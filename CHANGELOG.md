@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.50] - 2026-06-02
+
+### Added
+
+- Added a Windows NSIS installer release artifact and classroom/lab deployment
+  checklist, harvested from #2045 for #1987. The release workflow now builds
+  `CodeWhaleSetup.exe` from the canonical Windows binaries, and the installer
+  adds/removes only the exact current-user PATH entry.
+- Added deterministic session timestamps in session listings, receipt-export
+  boundary docs, and current-model turn metadata for routed/auto sessions.
+
+### Changed
+
+- Hardened theme repainting and sidebar color use so theme switches do not
+  leave stale Whale-dark panel colors behind.
+- Made legacy config migration visible when CodeWhale copies old DeepSeek-era
+  config into the CodeWhale config path.
+
+### Fixed
+
+- Fixed `/context` to use the effective routed model for context-window
+  budgeting, so DeepSeek V4 routes report the 1M-token window and legacy
+  DeepSeek routes keep the 128K fallback.
+- Fixed npm wrapper version output so `--version` prefers the installed binary
+  version instead of stale package metadata when both are available.
+- Fixed truncated subagent tool calls and repeated truncated subagent responses
+  so they return model-visible errors instead of silently failing.
+
+### Community
+
+Thanks to **@ZhulongNT** (#2045), **@cyq1017** (#2521, #2536, #2537, #2559,
+#2562, #2563, #2564), and **@HUQIANTAO** (#2527) for the work harvested into
+this release pass. Thanks also to issue reporters and verification helpers
+including **@New2Niu** (#2561), **@buko** (#2533, #2369), **@wywsoor**
+(#2494), **@ctxyao** (#2556), and **@Dr3259** (#2380) for reports and
+acceptance details that shaped these fixes.
+
 ## [0.8.49] - 2026-06-01
 
 ### Added
@@ -5162,7 +5199,8 @@ Welcome — and thank you.
 - Hooks system and config profiles
 - Example skills and launch assets
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.49...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.50...HEAD
+[0.8.50]: https://github.com/Hmbown/CodeWhale/compare/v0.8.49...v0.8.50
 [0.8.49]: https://github.com/Hmbown/CodeWhale/compare/v0.8.48...v0.8.49
 [0.8.48]: https://github.com/Hmbown/CodeWhale/compare/v0.8.47...v0.8.48
 [0.8.47]: https://github.com/Hmbown/CodeWhale/compare/v0.8.46...v0.8.47
