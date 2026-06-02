@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `balance` so it is less likely to be mistaken for session spend.
 - Fixed truncated subagent tool calls and repeated truncated subagent responses
   so they return model-visible errors instead of silently failing.
+- Moved Paste to the first position in the right-click context menu so users
+  copying text from the output area can paste with a single left-click instead
+  of navigating past cell-specific actions.
 
 ### Community
 
