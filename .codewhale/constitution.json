@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "authority": [
+    "current user request",
+    "live code and tests",
+    "GitHub issue/PR details",
+    "AGENTS.md and project CLAUDE.md",
+    "memory",
+    "previous-session handoffs"
+  ],
+  "verification_policy": {
+    "before_claiming_done": [
+      "run the focused tests for the changed crate (cargo test -p <crate>), then cargo check/clippy as appropriate",
+      "read changed files back to confirm the edit landed as intended",
+      "never claim verification you did not perform"
+    ]
+  }
+}

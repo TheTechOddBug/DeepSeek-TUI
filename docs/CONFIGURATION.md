@@ -5,6 +5,48 @@ At process startup it also loads a workspace-local `.env` file when present.
 Use the tracked `.env.example` as the template; copy it to `.env`, then edit
 only the provider and safety knobs you need.
 
+## Project instructions & repo authority
+
+Each repo can carry two distinct, complementary files:
+
+- **`AGENTS.md`** — cross-agent **project instructions** (prose). This is the
+  canonical file for "how should an agent work in this repo." Run `/init` to
+  scaffold one. `CLAUDE.md` and `.claude/instructions.md` are read as
+  compatibility fallbacks.
+- **`.codewhale/constitution.json`** — CodeWhale-specific **repo authority /
+  prioritization policy**: when local sources conflict, which should CodeWhale
+  trust first, and what to verify before claiming a task is done. `.codewhale/`
+  lives inside the repo (like `.github/`). Example:
+
+  ```json
+  {
+    "schema_version": 1,
+    "authority": [
+      "current user request",
+      "live code and tests",
+      "GitHub issue/PR details",
+      "AGENTS.md",
+      "memory",
+      "old handoffs"
+    ],
+    "verification_policy": {
+      "before_claiming_done": ["run focused tests", "read changed files back"]
+    }
+  }
+  ```
+
+  When present, it is rendered into the system prompt as a higher-authority
+  block and takes precedence over a legacy `WHALE.md`.
+
+> **`WHALE.md` is deprecated.** It overlapped confusingly with `AGENTS.md`.
+> CodeWhale still **reads** an existing `WHALE.md` (below `AGENTS.md`) so old
+> repos keep working, and emits a deprecation notice, but it is no longer
+> created or recommended and will be dropped from default discovery after a
+> deprecation window. Move ordinary instructions to `AGENTS.md` and
+> CodeWhale-specific authority policy to `.codewhale/constitution.json`. (The
+> global CodeWhale Constitution shipped in the model prompt is a separate thing
+> and is unaffected.)
+
 ## Where It Looks
 
 Default config path:
