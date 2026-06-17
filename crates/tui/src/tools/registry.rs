@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use std::path::{Path, PathBuf};
 
+use codewhale_protocol::runtime::DynamicToolSpec;
 use serde_json::Value;
 
 use crate::client::DeepSeekClient;
@@ -495,6 +496,16 @@ impl ToolRegistryBuilder {
     #[must_use]
     pub fn with_tool(mut self, tool: Arc<dyn ToolSpec>) -> Self {
         self.tools.push(tool);
+        self
+    }
+
+    #[must_use]
+    pub fn with_dynamic_tools(mut self, dynamic_tools: &[DynamicToolSpec]) -> Self {
+        for tool in dynamic_tools {
+            self = self.with_tool(Arc::new(super::dynamic::RuntimeDynamicTool::new(
+                tool.clone(),
+            )));
+        }
         self
     }
 

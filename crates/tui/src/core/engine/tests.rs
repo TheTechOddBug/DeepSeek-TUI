@@ -16,6 +16,54 @@ use tempfile::tempdir;
 
 const WORKING_SET_SUMMARY_MARKER: &str = "## Repo Working Set";
 
+#[test]
+fn subagent_mailbox_keeps_lifecycle_events_reliable() {
+    use crate::models::Usage;
+    use crate::tools::subagent::MailboxMessage;
+
+    assert!(subagent_mailbox_message_is_best_effort(
+        &MailboxMessage::progress("agent_a", "step 1")
+    ));
+    assert!(subagent_mailbox_message_is_best_effort(
+        &MailboxMessage::ToolCallStarted {
+            agent_id: "agent_a".to_string(),
+            tool_name: "read_file".to_string(),
+            step: 1,
+        }
+    ));
+    assert!(subagent_mailbox_message_is_best_effort(
+        &MailboxMessage::ToolCallCompleted {
+            agent_id: "agent_a".to_string(),
+            tool_name: "read_file".to_string(),
+            step: 1,
+            ok: true,
+        }
+    ));
+
+    assert!(!subagent_mailbox_message_is_best_effort(
+        &MailboxMessage::started("agent_a", crate::tools::subagent::SubAgentType::Explore)
+    ));
+    assert!(!subagent_mailbox_message_is_best_effort(
+        &MailboxMessage::Completed {
+            agent_id: "agent_a".to_string(),
+            summary: "done".to_string(),
+        }
+    ));
+    assert!(!subagent_mailbox_message_is_best_effort(
+        &MailboxMessage::Failed {
+            agent_id: "agent_a".to_string(),
+            error: "failed".to_string(),
+        }
+    ));
+    assert!(!subagent_mailbox_message_is_best_effort(
+        &MailboxMessage::TokenUsage {
+            agent_id: "agent_a".to_string(),
+            model: "model".to_string(),
+            usage: Usage::default(),
+        }
+    ));
+}
+
 struct ScopedDeepSeekApiKey {
     previous: Option<OsString>,
 }

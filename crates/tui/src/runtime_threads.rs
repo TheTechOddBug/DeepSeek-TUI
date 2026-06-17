@@ -38,7 +38,10 @@ use crate::tools::plan::new_shared_plan_state;
 use crate::tools::subagent::SubAgentStatus;
 use crate::tools::todo::new_shared_todo_list;
 use crate::tui::app::AppMode;
-use codewhale_protocol::runtime::{DynamicToolSpec, TurnEnvironmentParams};
+use codewhale_protocol::runtime::{
+    DynamicToolCallContent, DynamicToolCallParams, DynamicToolCallResult, DynamicToolSpec,
+    TurnEnvironmentParams,
+};
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const MAX_ACTIVE_THREADS_DEFAULT: usize = 8;
@@ -788,6 +791,7 @@ pub struct RuntimeThreadManager {
     task_manager: Arc<StdMutex<Option<crate::task_manager::SharedTaskManager>>>,
     automations: Arc<StdMutex<Option<crate::automation_manager::SharedAutomationManager>>>,
     pending_approvals: Arc<StdMutex<HashMap<String, oneshot::Sender<ExternalApprovalDecision>>>>,
+    pending_dynamic_tools: Arc<StdMutex<HashMap<String, oneshot::Sender<DynamicToolCallResult>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -822,6 +826,7 @@ impl RuntimeThreadManager {
             task_manager: Arc::new(StdMutex::new(None)),
             automations: Arc::new(StdMutex::new(None)),
             pending_approvals: Arc::new(StdMutex::new(HashMap::new())),
+            pending_dynamic_tools: Arc::new(StdMutex::new(HashMap::new())),
         };
         manager.recover_interrupted_state()?;
         Ok(manager)
@@ -851,6 +856,9 @@ impl RuntimeThreadManager {
         if let Ok(mut map) = self.pending_approvals.lock() {
             map.clear();
         }
+        if let Ok(mut map) = self.pending_dynamic_tools.lock() {
+            map.clear();
+        }
     }
 
     #[allow(dead_code)] // Public API for external callers
@@ -875,6 +883,23 @@ impl RuntimeThreadManager {
         }
     }
 
+    fn register_pending_dynamic_tool(
+        &self,
+        call_id: &str,
+    ) -> oneshot::Receiver<DynamicToolCallResult> {
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut map) = self.pending_dynamic_tools.lock() {
+            map.insert(call_id.to_string(), tx);
+        }
+        rx
+    }
+
+    fn cancel_pending_dynamic_tool(&self, call_id: &str) {
+        if let Ok(mut map) = self.pending_dynamic_tools.lock() {
+            map.remove(call_id);
+        }
+    }
+
     pub fn deliver_external_approval(
         &self,
         approval_id: &str,
@@ -889,6 +914,24 @@ impl RuntimeThreadManager {
         };
         match sender {
             Some(tx) => tx.send(decision).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn deliver_dynamic_tool_result(
+        &self,
+        call_id: &str,
+        result: DynamicToolCallResult,
+    ) -> bool {
+        let sender = match self.pending_dynamic_tools.lock() {
+            Ok(mut map) => map.remove(call_id),
+            Err(e) => {
+                tracing::error!("pending_dynamic_tools mutex poisoned: {e}");
+                return false;
+            }
+        };
+        match sender {
+            Some(tx) => tx.send(result).is_ok(),
             None => false,
         }
     }
@@ -925,12 +968,28 @@ impl RuntimeThreadManager {
             .unwrap_or(0)
     }
 
+    #[allow(dead_code)]
+    pub fn pending_dynamic_tools_count(&self) -> usize {
+        self.pending_dynamic_tools
+            .lock()
+            .map(|map| map.len())
+            .unwrap_or(0)
+    }
+
     #[cfg(test)]
     pub(crate) fn register_pending_approval_for_test(
         &self,
         approval_id: &str,
     ) -> oneshot::Receiver<ExternalApprovalDecision> {
         self.register_pending_approval(approval_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_pending_dynamic_tool_for_test(
+        &self,
+        call_id: &str,
+    ) -> oneshot::Receiver<DynamicToolCallResult> {
+        self.register_pending_dynamic_tool(call_id)
     }
 
     async fn remember_thread_auto_approve(&self, thread_id: &str) {
@@ -1765,6 +1824,7 @@ impl RuntimeThreadManager {
                 translation_enabled: false,
                 show_thinking,
                 allowed_tools: None,
+                dynamic_tools: req.dynamic_tools,
                 hook_executor: None,
                 approval_mode: if auto_approve {
                     crate::tui::approval::ApprovalMode::Auto
@@ -2121,6 +2181,7 @@ impl RuntimeThreadManager {
                 task_data_dir: Some(self.manager_cfg.task_data_dir.clone()),
                 active_task_id: thread.task_id.clone(),
                 active_thread_id: Some(thread.id.clone()),
+                dynamic_tool_executor: Some(Arc::new(self.clone())),
                 shell_manager: None,
                 hook_executor: None,
                 handle_store: crate::tools::handle::new_shared_handle_store(),
@@ -3053,6 +3114,16 @@ impl RuntimeThreadManager {
         Some((turn.auto_approve, turn.trust_mode))
     }
 
+    async fn active_turn_id(&self, thread_id: &str) -> Option<String> {
+        let active = self.active.lock().await;
+        active
+            .engines
+            .get(thread_id)?
+            .active_turn
+            .as_ref()
+            .map(|turn| turn.turn_id.clone())
+    }
+
     fn approval_decision(
         auto_approve: bool,
         trust_mode: bool,
@@ -3134,6 +3205,89 @@ impl RuntimeThreadManager {
         );
         touch_lru(&mut active.lru, thread_id);
         Ok(())
+    }
+}
+
+fn dynamic_tool_result_text(content: &[DynamicToolCallContent]) -> String {
+    content
+        .iter()
+        .map(|item| match item {
+            DynamicToolCallContent::InputText { text } => text.clone(),
+            DynamicToolCallContent::InputImage { image_url } => format!("[image] {image_url}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[async_trait::async_trait]
+impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
+    async fn execute_dynamic_tool(
+        &self,
+        thread_id: Option<String>,
+        namespace: Option<String>,
+        name: String,
+        input: Value,
+    ) -> std::result::Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> {
+        let thread_id = thread_id.ok_or_else(|| {
+            crate::tools::spec::ToolError::not_available(format!(
+                "runtime dynamic tool '{name}' has no active thread"
+            ))
+        })?;
+        let turn_id = self.active_turn_id(&thread_id).await.ok_or_else(|| {
+            crate::tools::spec::ToolError::not_available(format!(
+                "runtime dynamic tool '{name}' has no active turn"
+            ))
+        })?;
+        let call_id = format!("call_{}", &Uuid::new_v4().to_string()[..8]);
+        let rx = self.register_pending_dynamic_tool(&call_id);
+
+        let params = DynamicToolCallParams {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            call_id: call_id.clone(),
+            namespace,
+            tool: name.clone(),
+            arguments: input,
+        };
+        if let Err(err) = self
+            .emit_event(
+                &thread_id,
+                Some(&turn_id),
+                None,
+                "tool_call.requested",
+                json!(params),
+            )
+            .await
+        {
+            self.cancel_pending_dynamic_tool(&call_id);
+            return Err(crate::tools::spec::ToolError::execution_failed(format!(
+                "failed to emit runtime dynamic tool request for '{name}': {err}"
+            )));
+        }
+
+        match tokio::time::timeout(APPROVAL_DECISION_TIMEOUT, rx).await {
+            Ok(Ok(result)) => {
+                let text = dynamic_tool_result_text(&result.content);
+                if result.success {
+                    Ok(crate::tools::spec::ToolResult::success(text))
+                } else {
+                    Ok(crate::tools::spec::ToolResult::error(if text.is_empty() {
+                        "dynamic tool failed".to_string()
+                    } else {
+                        text
+                    }))
+                }
+            }
+            Ok(Err(_recv_err)) => Err(crate::tools::spec::ToolError::execution_failed(format!(
+                "runtime dynamic tool '{name}' result channel closed"
+            ))),
+            Err(_timeout) => {
+                self.cancel_pending_dynamic_tool(&call_id);
+                Err(crate::tools::spec::ToolError::Timeout {
+                    seconds: APPROVAL_DECISION_TIMEOUT.as_secs(),
+                })
+            }
+        }
     }
 }
 

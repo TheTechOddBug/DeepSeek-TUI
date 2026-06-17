@@ -264,7 +264,7 @@ const BEGIN_SYNC_UPDATE: &[u8] = b"\x1b[?2026h";
 /// the complete frame now.
 const END_SYNC_UPDATE: &[u8] = b"\x1b[?2026l";
 const TERMINAL_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const MAX_ENGINE_EVENTS_PER_DRAIN: usize = 512;
+const MAX_ENGINE_EVENTS_PER_DRAIN: usize = 128;
 
 struct TerminalInputPump {
     rx: std::sync::mpsc::Receiver<io::Result<Event>>,
@@ -629,6 +629,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
         task_data_dir: Some(task_manager.data_dir()),
         active_task_id: None,
         active_thread_id: None,
+        dynamic_tool_executor: None,
         // #456: plumb the App's HookExecutor so `exec_shell` can surface
         // the configured `shell_env` hooks. Clone the shared Arc.
         hook_executor: app.runtime_services.hook_executor.clone(),
@@ -5991,6 +5992,7 @@ async fn dispatch_user_message(
             translation_enabled: app.translation_enabled,
             show_thinking: app.show_thinking,
             allowed_tools: app.active_allowed_tools.clone(),
+            dynamic_tools: Vec::new(),
             hook_executor: app.runtime_services.hook_executor.clone(),
             verbosity: app.verbosity.clone(),
         })

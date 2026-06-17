@@ -20,8 +20,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use codewhale_protocol::runtime::{
-    RUNTIME_API_VERSION, RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION, RuntimeCapabilities,
-    RuntimeEventEnvelope, RuntimeExperimentalCapabilities,
+    DynamicToolCallResult, RUNTIME_API_VERSION, RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION,
+    RuntimeCapabilities, RuntimeEventEnvelope, RuntimeExperimentalCapabilities,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -395,7 +395,7 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         turn_steer: true,
         turn_interrupt: true,
         event_replay: true,
-        external_tools: false,
+        external_tools: true,
         environments: false,
         worker_runtime: false,
     }
@@ -634,6 +634,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route(
             "/v1/threads/{id}/turns/{turn_id}/interrupt",
             post(interrupt_thread_turn),
+        )
+        .route(
+            "/v1/threads/{id}/turns/{turn_id}/tool-calls/{call_id}/result",
+            post(deliver_dynamic_tool_result),
         )
         .route("/v1/threads/{id}/compact", post(compact_thread))
         .route("/v1/threads/{id}/events", get(stream_thread_events))
@@ -2456,6 +2460,28 @@ async fn interrupt_thread_turn(
         .await
         .map_err(map_thread_err)?;
     Ok(Json(turn))
+}
+
+async fn deliver_dynamic_tool_result(
+    State(state): State<RuntimeApiState>,
+    Path((id, _turn_id, call_id)): Path<(String, String, String)>,
+    Json(result): Json<DynamicToolCallResult>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    if state
+        .runtime_threads
+        .deliver_dynamic_tool_result(&call_id, result)
+    {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError::not_found(format!(
+            "No pending dynamic tool call '{call_id}'"
+        )))
+    }
 }
 
 async fn compact_thread(
@@ -6086,7 +6112,7 @@ mod tests {
         assert!(info["version"].is_string());
         assert_eq!(info["transports"], json!(["http", "sse"]));
         assert_eq!(info["capabilities"]["threads"], true);
-        assert_eq!(info["capabilities"]["external_tools"], false);
+        assert_eq!(info["capabilities"]["external_tools"], true);
         assert!(info["experimental"].is_object());
 
         handle.abort();
@@ -6337,6 +6363,43 @@ mod tests {
             received,
             ExternalApprovalDecision::Allow { remember: false }
         );
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dynamic_tool_result_endpoint_delivers_to_runtime() -> Result<()> {
+        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = crate::tls::reqwest_client();
+        let thread: serde_json::Value = client
+            .post(format!("http://{addr}/v1/threads"))
+            .json(&json!({}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let thread_id = thread["id"].as_str().context("thread id")?;
+        let rx = runtime_threads.register_pending_dynamic_tool_for_test("call_1");
+
+        let resp = client
+            .post(format!(
+                "http://{addr}/v1/threads/{thread_id}/turns/turn_1/tool-calls/call_1/result"
+            ))
+            .json(&json!({
+                "success": true,
+                "content": [{ "type": "input_text", "text": "ok" }]
+            }))
+            .send()
+            .await?;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let received = tokio::time::timeout(Duration::from_secs(1), rx).await??;
+        assert!(received.success);
+        assert_eq!(received.content.len(), 1);
 
         handle.abort();
         Ok(())

@@ -15,6 +15,7 @@ pub mod automation;
 pub mod cargo_failure_summary;
 pub mod diagnostics;
 pub mod diff_format;
+pub mod dynamic;
 pub mod file;
 pub mod file_search;
 pub mod finance;

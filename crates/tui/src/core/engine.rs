@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
+use codewhale_protocol::runtime::DynamicToolSpec;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use serde_json::json;
@@ -45,8 +46,8 @@ use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
 use crate::tools::spec::RuntimeToolServices;
 use crate::tools::spec::{ApprovalRequirement, ToolError, ToolResult};
 use crate::tools::subagent::{
-    Mailbox, SharedSubAgentManager, SubAgentCompletion, SubAgentForkContext, SubAgentResult,
-    SubAgentRuntime, SubAgentStatus, SubAgentThinking, SubAgentType,
+    Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion, SubAgentForkContext,
+    SubAgentResult, SubAgentRuntime, SubAgentStatus, SubAgentThinking, SubAgentType,
     new_shared_subagent_manager_with_timeout, resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
@@ -571,6 +572,15 @@ pub struct Engine {
 }
 
 // === Internal tool helpers ===
+
+fn subagent_mailbox_message_is_best_effort(message: &MailboxMessage) -> bool {
+    matches!(
+        message,
+        MailboxMessage::Progress { .. }
+            | MailboxMessage::ToolCallStarted { .. }
+            | MailboxMessage::ToolCallCompleted { .. }
+    )
+}
 
 impl Engine {
     pub(super) async fn emit_compaction_started(
@@ -1223,6 +1233,7 @@ impl Engine {
                         translation_enabled,
                         show_thinking,
                         allowed_tools,
+                        dynamic_tools,
                         hook_executor,
                         verbosity,
                     } => {
@@ -1244,6 +1255,7 @@ impl Engine {
                             translation_enabled,
                             show_thinking,
                             allowed_tools,
+                            dynamic_tools,
                             hook_executor,
                             verbosity,
                         )
@@ -1527,6 +1539,7 @@ impl Engine {
                             self.config.translation_enabled,
                             self.config.show_thinking,
                             self.config.allowed_tools.clone(),
+                            Vec::new(),
                             self.config.hook_executor.clone(),
                             self.config.verbosity.clone(),
                         )
@@ -1724,6 +1737,7 @@ impl Engine {
             self.config.translation_enabled,
             self.config.show_thinking,
             self.config.allowed_tools.clone(),
+            Vec::new(),
             self.config.hook_executor.clone(),
             self.config.verbosity.clone(),
         )
@@ -1842,6 +1856,7 @@ impl Engine {
         translation_enabled: bool,
         show_thinking: bool,
         allowed_tools: Option<Vec<String>>,
+        dynamic_tools: Vec<DynamicToolSpec>,
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
     ) {
@@ -2008,7 +2023,9 @@ impl Engine {
         let plan_state = self.config.plan_state.clone();
 
         let tool_context = self.build_tool_context(mode, auto_approve);
-        let builder = self.build_turn_tool_registry_builder(mode, todo_list, plan_state);
+        let builder = self
+            .build_turn_tool_registry_builder(mode, todo_list, plan_state)
+            .with_dynamic_tools(&dynamic_tools);
 
         let fork_context_for_runtime = if self.config.features.enabled(Feature::Subagents) {
             let state = StructuredState::capture(
@@ -2044,14 +2061,20 @@ impl Engine {
                 std::panic::Location::caller(),
                 async move {
                     while let Some(envelope) = receiver.recv().await {
-                        if tx_event_clone
-                            .send(Event::SubAgentMailbox {
-                                seq: envelope.seq,
-                                message: envelope.message,
-                            })
-                            .await
-                            .is_err()
+                        let event = Event::SubAgentMailbox {
+                            seq: envelope.seq,
+                            message: envelope.message,
+                        };
+                        if let Event::SubAgentMailbox { message, .. } = &event
+                            && subagent_mailbox_message_is_best_effort(message)
                         {
+                            match tx_event_clone.try_send(event) {
+                                Ok(()) => continue,
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                        }
+                        if tx_event_clone.send(event).await.is_err() {
                             break;
                         }
                     }
@@ -2267,6 +2290,7 @@ impl Engine {
                         translation_enabled,
                         show_thinking,
                         allowed_tools: self.config.allowed_tools.clone(),
+                        dynamic_tools: dynamic_tools.clone(),
                         hook_executor: self.config.hook_executor.clone(),
                         verbosity: self.config.verbosity.clone(),
                     })

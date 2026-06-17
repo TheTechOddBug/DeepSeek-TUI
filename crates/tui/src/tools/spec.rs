@@ -28,6 +28,17 @@ pub use codewhale_tools::{
     optional_u64, required_str, required_u64,
 };
 
+#[async_trait]
+pub trait DynamicToolExecutor: Send + Sync {
+    async fn execute_dynamic_tool(
+        &self,
+        thread_id: Option<String>,
+        namespace: Option<String>,
+        name: String,
+        input: Value,
+    ) -> Result<ToolResult, ToolError>;
+}
+
 /// Optional durable runtime services made available to model-visible tools.
 ///
 /// These are intentionally optional so existing unit tests and one-off tool
@@ -42,6 +53,7 @@ pub struct RuntimeToolServices {
     pub task_data_dir: Option<PathBuf>,
     pub active_task_id: Option<String>,
     pub active_thread_id: Option<String>,
+    pub dynamic_tool_executor: Option<Arc<dyn DynamicToolExecutor>>,
     /// Hook executor for `shell_env` injection (#456) and any future
     /// tool-side hook events. `None` outside the live engine — test
     /// contexts that don't care about hooks get a no-op.
@@ -62,6 +74,7 @@ impl Default for RuntimeToolServices {
             task_data_dir: None,
             active_task_id: None,
             active_thread_id: None,
+            dynamic_tool_executor: None,
             hook_executor: None,
             handle_store: new_shared_handle_store(),
             rlm_sessions: new_shared_rlm_session_store(),
@@ -78,6 +91,10 @@ impl std::fmt::Debug for RuntimeToolServices {
             .field("task_data_dir", &self.task_data_dir)
             .field("active_task_id", &self.active_task_id)
             .field("active_thread_id", &self.active_thread_id)
+            .field(
+                "dynamic_tool_executor",
+                &self.dynamic_tool_executor.is_some(),
+            )
             .field("hook_executor", &self.hook_executor.is_some())
             .field("handle_store", &true)
             .field("rlm_sessions", &true)
