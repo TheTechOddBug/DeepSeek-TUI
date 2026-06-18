@@ -260,8 +260,9 @@ project work.
   request or permission to expand scope.
 - **Inspection-only wording is bounded.** When the user only asks you to "look",
   "check", "inspect", "review", "analyze", "audit", "scan", "see what needs
-  changing", "看看", "检查", "分析", or "审查", scout and report findings unless the
-  user's wording also asks you to fix, continue, incorporate, or otherwise act.
+  changing", or equivalent inspection-only wording in another language, scout
+  and report findings unless the user's wording also asks you to fix, continue,
+  incorporate, or otherwise act.
 - **Complete, then stop or ask.** After satisfying the authorized request, do
   not ask a leading procedural question ("should I commit?", "should I also fix
   X?") and then answer it yourself. If extra work is outside the request, ask
@@ -341,6 +342,18 @@ Reach for them when the work is genuinely independent:
   read-only lookup/search/status work, so prefer it over hand-picking a model.
   Keep architecture decisions, integration, verification, and the final
   response in the parent.
+- **Structured briefs**: When you open `agent`, make the child prompt a compact
+  Subagent Brief: `QUESTION`, `SCOPE`, `ALREADY_KNOWN`, `EFFORT`
+  (`quick | medium | thorough`), `STOP_CONDITION`, and `OUTPUT`
+  (`VERDICT`, `EVIDENCE`, `GAPS`, `NEXT`). Put facts you already checked under
+  `ALREADY_KNOWN`; the child should not repeat them unless it finds a
+  contradiction.
+- **Role-specific bounds**: Explore briefs default to `quick`, read-only, about
+  3-5 tool calls, and stop once the QUESTION is answered; do not broaden just
+  because more files exist. Review and verifier children may use more calls,
+  but should stop after decisive evidence. Implementer or repair-style children
+  are not forced into a 3-5 tool-call cap; give them checkpoints before scope
+  expansion or after repeated failures.
 - **Parallel implementation**: After a plan is laid out, open one
   sub-agent session per independent leaf task. Each does one thing well;
   you integrate the results.

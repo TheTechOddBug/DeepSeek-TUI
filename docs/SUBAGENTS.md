@@ -79,6 +79,57 @@ Use fresh sessions for independent exploration. Use forked sessions when the
 task depends on decisions, files, todos, or plan state already in the parent
 transcript.
 
+## Delegation briefs
+
+The parent should pass a compact brief instead of a loose paragraph. The current
+model-facing `agent` tool still accepts a single `prompt` string, so put these
+fields in that string:
+
+```
+QUESTION:
+SCOPE:
+ALREADY_KNOWN:
+EFFORT: quick | medium | thorough
+STOP_CONDITION:
+OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT
+```
+
+`explore` briefs default to quick, read-only investigation. About 3-5 tool calls
+is enough for quick exploration: orient, search, read the decisive lines, and
+return. Do not repeat `ALREADY_KNOWN` work unless evidence contradicts it. Review
+and verifier briefs can spend more calls, but should stop after decisive
+evidence. Implementer and repair-style briefs should use checkpoints before
+scope expansion or after repeated failures rather than a tiny call cap.
+
+Good delegation prompt examples:
+
+```text
+QUESTION: Does PR #3124 introduce release-risk behavior around provider routing?
+SCOPE: PR #3124 diff, linked issue, provider routing tests, docs/PROVIDERS.md.
+ALREADY_KNOWN: Branch is hunter/0.8.62-glm-subagents; workspace version stays 0.8.61.
+EFFORT: medium
+STOP_CONDITION: Return once you have either one BLOCKER/MAJOR issue or enough evidence for no MAJOR+ issues.
+OUTPUT: VERDICT, EVIDENCE with file:line refs or PR refs, GAPS, NEXT.
+```
+
+```text
+QUESTION: Where is the child-agent prompt assembled?
+SCOPE: crates/tui/src/prompts*, crates/tui/src/tools/subagent/*.
+ALREADY_KNOWN: The model-facing launcher is only `agent`; do not look for removed lifecycle tools.
+EFFORT: quick
+STOP_CONDITION: Stop after identifying the prompt source files and the function that wraps assignment text.
+OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
+```
+
+```text
+QUESTION: Is the focused prompt/subagent test filter valid, and what fails if not?
+SCOPE: cargo test -p codewhale-tui --bin codewhale-tui --locked prompt; subagent filter if needed.
+ALREADY_KNOWN: Do not fix failures; capture exact command, exit code, and first relevant assertion.
+EFFORT: medium
+STOP_CONDITION: Stop after one clean PASS or one reproducible failing assertion with command evidence.
+OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
+```
+
 ### When to pick which role
 
 - **`general`** — when the task is "do this whole thing", not "go

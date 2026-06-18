@@ -2849,6 +2849,40 @@ mod tests {
     }
 
     #[test]
+    fn prompt_documents_structured_subagent_briefs() {
+        let prompt = compose_prompt(Personality::Calm);
+        for field in [
+            "Subagent Brief",
+            "QUESTION",
+            "SCOPE",
+            "ALREADY_KNOWN",
+            "EFFORT",
+            "STOP_CONDITION",
+            "VERDICT",
+            "EVIDENCE",
+            "GAPS",
+            "NEXT",
+        ] {
+            assert!(
+                prompt.contains(field),
+                "main prompt should include Subagent Brief field `{field}`"
+            );
+        }
+        assert!(prompt.contains("should not repeat them unless it finds a"));
+    }
+
+    #[test]
+    fn prompt_bounds_explore_without_tiny_cap_for_implementers() {
+        let prompt = compose_prompt(Personality::Calm);
+        assert!(prompt.contains("Explore briefs default to `quick`"));
+        assert!(prompt.contains("read-only"));
+        assert!(prompt.contains("3-5 tool calls"));
+        assert!(prompt.contains("Review and verifier children may use more calls"));
+        assert!(prompt.contains("are not forced into a 3-5 tool-call cap"));
+        assert!(prompt.contains("checkpoints before scope"));
+    }
+
+    #[test]
     fn subagent_done_sentinel_section_present() {
         let prompt = compose_prompt(Personality::Calm);
         assert!(prompt.contains("Internal Sub-agent Completion Events"));

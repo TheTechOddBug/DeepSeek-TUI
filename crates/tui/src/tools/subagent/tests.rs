@@ -547,6 +547,33 @@ fn explore_prompt_orients_before_searching() {
 }
 
 #[test]
+fn explore_prompt_is_quick_bounded_and_read_only() {
+    let prompt = SubAgentType::Explore.system_prompt();
+    assert!(prompt.contains("Default to `EFFORT: quick`"));
+    assert!(prompt.contains("3-5 tool calls"));
+    assert!(prompt.contains("strictly read-only"));
+    assert!(prompt.contains("ALREADY_KNOWN"));
+    assert!(prompt.contains("STOP_CONDITION"));
+    assert!(prompt.contains("Return partial findings"));
+}
+
+#[test]
+fn implementer_prompt_is_not_forced_into_explorer_cap() {
+    let prompt = SubAgentType::Implementer.system_prompt();
+    assert!(prompt.contains("not limited to an explorer-style 3-5 tool-call cap"));
+    assert!(prompt.contains("Checkpoint before expanding scope"));
+    assert!(!prompt.contains("Default to `EFFORT: quick`"));
+}
+
+#[test]
+fn review_and_verifier_prompts_stop_after_decisive_evidence() {
+    let review = SubAgentType::Review.system_prompt();
+    let verifier = SubAgentType::Verifier.system_prompt();
+    assert!(review.contains("stop after decisive evidence"));
+    assert!(verifier.contains("stop after decisive pass/fail evidence"));
+}
+
+#[test]
 fn agent_description_explains_background_child_and_transcript_handle() {
     let tmp = tempdir().expect("tempdir");
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
@@ -1127,6 +1154,18 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "thinking description should teach child thinking control: {thinking}"
     );
     assert!(agent_schema["properties"].get("model").is_some());
+}
+
+#[test]
+fn agent_tool_prompt_schema_prefers_structured_briefs() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let agent_schema = AgentTool::new(manager, stub_runtime()).input_schema();
+    let prompt = schema_property_description(&agent_schema, "prompt");
+    assert!(prompt.contains("Subagent Brief"));
+    assert!(prompt.contains("QUESTION"));
+    assert!(prompt.contains("STOP_CONDITION"));
+    assert!(prompt.contains("ALREADY_KNOWN"));
 }
 
 #[test]

@@ -15,6 +15,15 @@ You will receive a `<codewhale:subagent.done>` element in the transcript when it
 Read its `summary` field and integrate the work — do not re-do what the child already did.
 Use the returned transcript handle with `handle_read` only when the completion summary is insufficient.
 
+Write child prompts as a compact Subagent Brief:
+
+QUESTION: exact question or task.
+SCOPE: files, PRs, issue IDs, commands, or behavior areas to inspect.
+ALREADY_KNOWN: facts you already checked; do not repeat unless contradicted.
+EFFORT: quick | medium | thorough.
+STOP_CONDITION: evidence enough to return.
+OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
+
 Child model choice is explicit. Use `model_strength: "same"` when the child needs your current
 capability level. Use `model_strength: "faster"` for read-only lookup/search, status, or other
 low-risk tasks that should run on a smaller/faster same-family model — `type: "explore"` already
@@ -34,6 +43,12 @@ faster than reading sequentially. Each child runs concurrently in one turn and r
 synthesize; keep architecture decisions, integration, verification, and the final response in the
 parent. Do not open sub-agents for tiny one-step tasks — the spawn overhead is not worth it for a
 single read or search.
+
+For `type: "explore"`, default to `EFFORT: quick`: stay read-only, aim for about 3-5 tool calls,
+do not broaden once QUESTION is answered, and return partial findings if the next step would be
+speculative or duplicative. Review/verifier children can spend more calls but should stop after
+decisive evidence. Implementer/repair children are not subject to the 3-5 call cap; ask them to
+checkpoint before expanding scope or after repeated failures.
 
 Sub-agent outputs are self-reports, not verified facts. Re-check material claims before relying on
 them: read changed files directly, run the relevant tests, and inspect unexpected results. Keep
