@@ -173,6 +173,8 @@ jobs:
         with:
           toolchain: '1.88'
           targets: ${{ matrix.target }}
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false

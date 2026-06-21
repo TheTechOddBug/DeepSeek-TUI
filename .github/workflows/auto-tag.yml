@@ -67,19 +67,37 @@ jobs:
         run: ./scripts/release/check-versions.sh
 
       - name: Create and push tag
+        id: create
         if: steps.check.outputs.exists == 'false'
         env:
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags --quiet
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null \
+             || git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists after refresh; nothing to do."
+            exit 0
+          fi
           git tag "${TAG}"
-          git push origin "${TAG}"
+          if ! git push origin "${TAG}"; then
+            if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+              echo "pushed=false" >> "$GITHUB_OUTPUT"
+              echo "Tag ${TAG} appeared during push; treating as already handled."
+              exit 0
+            fi
+            exit 1
+          fi
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
           echo "Pushed ${TAG}. release.yml should now run (requires RELEASE_TAG_PAT for trigger)."
 
       - name: Warn if PAT missing
-        if: steps.check.outputs.exists == 'false' && env.HAS_PAT != 'true'
+        if: steps.create.outputs.pushed == 'true'
         env:
           HAS_PAT: ${{ secrets.RELEASE_TAG_PAT != '' }}
         run: |
-          echo "::warning::RELEASE_TAG_PAT secret is not set. The tag was pushed using GITHUB_TOKEN, which does NOT trigger release.yml. Manually re-push the tag from a developer machine, or run 'gh workflow run release.yml --ref ${{ steps.ver.outputs.tag }}'."
+          if [ "${HAS_PAT}" != "true" ]; then
+            echo "::warning::RELEASE_TAG_PAT secret is not set. The tag was pushed using GITHUB_TOKEN, which does NOT trigger release.yml. Manually re-push the tag from a developer machine, or run 'gh workflow run release.yml --ref ${{ steps.ver.outputs.tag }}'."
+          fi
