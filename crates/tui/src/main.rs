@@ -5383,21 +5383,23 @@ fn merge_project_config(config: &mut Config, workspace: &Path) {
         config.max_subagents = Some((v as usize).clamp(1, crate::config::MAX_SUBAGENTS));
     }
     if let Some(v) = table.get("allow_shell").and_then(toml::Value::as_bool) {
-        config.allow_shell = Some(v);
+        if v {
+            eprintln!(
+                "warning: project-scope `allow_shell = true` is ignored — \
+                 enable shell from user config for this workspace instead. \
+                 (See #417.)"
+            );
+        } else {
+            config.allow_shell = Some(false);
+        }
     }
 
-    // #454: instructions array — project replaces user. Empty arrays
-    // count: explicit `instructions = []` clears the user's list for
-    // this repo, useful when the user has a verbose global file that
-    // doesn't apply to the current project. Non-string entries are
-    // skipped silently rather than failing the load.
-    if let Some(arr) = table.get("instructions").and_then(toml::Value::as_array) {
-        let entries: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        config.instructions = Some(entries);
+    if table.contains_key("instructions") {
+        eprintln!(
+            "warning: project-scope `instructions` is ignored — \
+             configure instruction files from user config instead. \
+             (See #417.)"
+        );
     }
 }
 
@@ -7592,7 +7594,7 @@ sandbox_mode = "read-only"
     }
 
     #[test]
-    fn project_overlay_overrides_max_subagents_and_allow_shell() {
+    fn project_overlay_overrides_max_subagents_and_can_disable_shell() {
         let tmp = workspace_with_project_config(
             r#"
 max_subagents = 4
@@ -7603,6 +7605,25 @@ allow_shell = false
         merge_project_config(&mut config, tmp.path());
         assert_eq!(config.max_subagents, Some(4));
         assert_eq!(config.allow_shell, Some(false));
+    }
+
+    #[test]
+    fn project_overlay_cannot_enable_shell() {
+        let tmp = workspace_with_project_config(
+            r#"
+allow_shell = true
+"#,
+        );
+        let mut config = Config {
+            allow_shell: Some(false),
+            ..Config::default()
+        };
+        merge_project_config(&mut config, tmp.path());
+        assert_eq!(
+            config.allow_shell,
+            Some(false),
+            "project overlay must not loosen shell access"
+        );
     }
 
     #[test]
@@ -7806,47 +7827,42 @@ model = ""
     }
 
     #[test]
-    fn project_overlay_replaces_user_instructions_array_wholesale() {
+    fn project_overlay_ignores_project_instructions_array() {
         let tmp = workspace_with_project_config(
             r#"
 instructions = ["./AGENTS.md", "./extra.md"]
 "#,
         );
-        // User had a global file in their config; the project array
-        // should REPLACE it, not merge.
+        let user = vec!["~/global.md".to_string()];
         let mut config = Config {
-            instructions: Some(vec!["~/global.md".to_string()]),
+            instructions: Some(user.clone()),
             ..Config::default()
         };
         merge_project_config(&mut config, tmp.path());
         assert_eq!(
             config.instructions.as_deref(),
-            Some(&["./AGENTS.md".to_string(), "./extra.md".to_string()][..]),
-            "project instructions array replaces user array wholesale"
+            Some(user.as_slice()),
+            "project overlay must not replace user-owned instructions"
         );
     }
 
     #[test]
-    fn project_overlay_empty_instructions_array_clears_user_list() {
+    fn project_overlay_empty_instructions_array_preserves_user_list() {
         let tmp = workspace_with_project_config(
             r#"
 instructions = []
 "#,
         );
+        let user = vec!["~/global.md".to_string(), "~/team-prefs.md".to_string()];
         let mut config = Config {
-            instructions: Some(vec![
-                "~/global.md".to_string(),
-                "~/team-prefs.md".to_string(),
-            ]),
+            instructions: Some(user.clone()),
             ..Config::default()
         };
         merge_project_config(&mut config, tmp.path());
-        // Explicit empty array clears the user list — project says
-        // "this repo doesn't want any of those globals".
         assert_eq!(
             config.instructions.as_deref(),
-            Some(&[][..]),
-            "explicit empty array clears the user instructions list"
+            Some(user.as_slice()),
+            "project overlay must not clear user-owned instructions"
         );
     }
 
@@ -7872,7 +7888,7 @@ provider = "deepseek"
     }
 
     #[test]
-    fn project_overlay_drops_empty_string_entries_in_instructions_array() {
+    fn project_overlay_ignores_new_instructions_when_user_has_none() {
         let tmp = workspace_with_project_config(
             r#"
 instructions = ["./AGENTS.md", "", "  ", "./extra.md"]
@@ -7882,8 +7898,8 @@ instructions = ["./AGENTS.md", "", "  ", "./extra.md"]
         merge_project_config(&mut config, tmp.path());
         assert_eq!(
             config.instructions.as_deref(),
-            Some(&["./AGENTS.md".to_string(), "./extra.md".to_string()][..]),
-            "empty / whitespace-only entries are filtered"
+            None,
+            "project overlay must not introduce instruction paths"
         );
     }
 }
