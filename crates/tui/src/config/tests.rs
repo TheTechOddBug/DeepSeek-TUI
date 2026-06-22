@@ -2731,6 +2731,14 @@ fn normalize_model_name_preserves_v_series_snapshots() {
         normalize_model_name("deepseek-v4pro").as_deref(),
         Some("deepseek-v4-pro")
     );
+    assert_eq!(
+        normalize_model_name("pro").as_deref(),
+        Some("deepseek-v4-pro")
+    );
+    assert_eq!(
+        normalize_model_name("flash").as_deref(),
+        Some("deepseek-v4-flash")
+    );
     // v-series dated snapshots pass through unchanged
     assert_eq!(
         normalize_model_name("deepseek-v4-flash-20260423").as_deref(),

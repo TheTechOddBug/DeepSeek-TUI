@@ -496,6 +496,8 @@ enum ModelCommand {
         #[arg(long, value_enum)]
         provider: Option<ProviderArg>,
     },
+    /// Set the default model (e.g. "pro", "flash", "deepseek-v4-pro").
+    Set { model: String },
 }
 
 #[derive(Debug, Args)]
@@ -743,7 +745,9 @@ fn run() -> Result<()> {
         Some(Commands::Auth(args)) => run_auth_command(&mut store, args.command),
         Some(Commands::McpServer) => run_mcp_server_command(&mut store),
         Some(Commands::Config(args)) => run_config_command(&mut store, args.command),
-        Some(Commands::Model(args)) => run_model_command(args.command, runtime_overrides.provider),
+        Some(Commands::Model(args)) => {
+            run_model_command(&mut store, args.command, runtime_overrides.provider)
+        }
         Some(Commands::Thread(args)) => run_thread_command(args.command),
         Some(Commands::Sandbox(args)) => run_sandbox_command(args.command),
         Some(Commands::AppServer(args)) => {
@@ -1484,6 +1488,7 @@ fn model_command_provider_hint(
 }
 
 fn run_model_command(
+    store: &mut ConfigStore,
     command: ModelCommand,
     top_level_provider: Option<ProviderKind>,
 ) -> Result<()> {
@@ -1506,6 +1511,21 @@ fn run_model_command(
             println!("resolved: {}", resolved.resolved.id);
             println!("provider: {}", resolved.resolved.provider.as_str());
             println!("used_fallback: {}", resolved.used_fallback);
+            Ok(())
+        }
+        ModelCommand::Set { model } => {
+            let trimmed = model.trim();
+            if trimmed.is_empty() {
+                bail!("Model name cannot be empty");
+            }
+            let canonical = match trimmed.to_ascii_lowercase().as_str() {
+                "pro" | "deepseek-v4pro" => "deepseek-v4-pro",
+                "flash" | "deepseek-v4flash" => "deepseek-v4-flash",
+                _ => trimmed,
+            };
+            store.config.default_text_model = Some(canonical.to_string());
+            store.save()?;
+            println!("Default model set to '{canonical}'");
             Ok(())
         }
     }
@@ -2565,6 +2585,14 @@ mod tests {
                     provider: Some(ProviderArg::Deepseek)
                 }
             })) if model == "deepseek-v4-pro"
+        ));
+
+        let cli = parse_ok(&["deepseek", "model", "set", "pro"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Model(ModelArgs {
+                command: ModelCommand::Set { ref model }
+            })) if model == "pro"
         ));
     }
 

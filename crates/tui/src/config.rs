@@ -696,8 +696,8 @@ fn deepseek_alias_deprecation(model_lower: &str) -> Option<ModelAliasDeprecation
 #[must_use]
 pub fn canonical_model_name(model: &str) -> Option<&'static str> {
     match model.trim().to_ascii_lowercase().as_str() {
-        "deepseek-v4pro" => Some("deepseek-v4-pro"),
-        "deepseek-v4flash" => Some("deepseek-v4-flash"),
+        "pro" | "deepseek-v4pro" => Some("deepseek-v4-pro"),
+        "flash" | "deepseek-v4flash" => Some("deepseek-v4-flash"),
         _ => None,
     }
 }
