@@ -4483,12 +4483,16 @@ fn fanout_interrupted_mailbox_drops_running_count() {
 fn stall_reason_provider_wait_includes_route_and_idle_budget() {
     let mut app = create_test_app();
     app.is_loading = true;
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(45));
-    app.turn_last_activity_at = Some(Instant::now() - Duration::from_secs(40));
+    app.stream_chunk_timeout_secs = 300;
+    // Set idle to 65s so it exceeds the 60s threshold (#3189).
+    app.turn_started_at = Some(Instant::now() - Duration::from_secs(70));
+    app.turn_last_activity_at = Some(Instant::now() - Duration::from_secs(65));
 
     let reason = crate::tui::footer_ui::stall_reason(&app).expect("stalled turn has a reason");
     assert!(reason.contains("waiting for model"), "{reason}");
-    assert!(reason.contains("40s"), "{reason}");
+    // idle >= 60s, so the counter appears, but < 75% budget (225s) so no budget detail.
+    assert!(reason.contains("65s"), "{reason}");
+    assert!(!reason.contains("/300s"), "{reason}");
 }
 
 #[test]
