@@ -209,8 +209,13 @@ pub static COMMAND_ARITY: &[(&str, u8)] = &[
     ("pip3 uninstall", 2),
     ("pip3 list", 2),
     ("pip3 show", 2),
-    ("python -m", 3),
-    ("python3 -m", 3),
+    // Keyed on the bare interpreter (not `python -m`): `classify_command`
+    // strips flags such as `-m` before matching, so a `"python -m"` key could
+    // never fire. Arity 2 captures the module/script word that follows, so
+    // `python -m http.server` classifies to `python http.server` (distinct from
+    // `python -m pip` → `python pip`) and `python manage.py` → `python manage.py`.
+    ("python", 2),
+    ("python3", 2),
     // ── make / cmake ─────────────────────────────────────────────────────────
     ("make", 1),
     // ── gh (GitHub CLI) ──────────────────────────────────────────────────────
@@ -1453,6 +1458,31 @@ mod tests {
     #[test]
     fn classify_npm_test() {
         assert_eq!(classify("npm test"), "npm test");
+    }
+
+    // ── python (interpreter, arity 2) ─────────────────────────────────────────
+
+    #[test]
+    fn classify_python_module_captures_module_word() {
+        // `-m` is a flag and is stripped before arity lookup, so the canonical
+        // prefix must still capture the module that follows. Regression guard:
+        // a `"python -m"` arity key can never match (the flag is gone), which
+        // collapsed `python -m http.server` to just `python`.
+        assert_eq!(classify("python -m http.server"), "python http.server");
+        assert_eq!(
+            classify("python -m http.server --bind 0.0.0.0"),
+            "python http.server"
+        );
+        assert_eq!(classify("python3 -m venv env"), "python3 venv");
+        // Different modules classify distinctly so an allow rule for one does
+        // not leak to another.
+        assert_eq!(classify("python -m pip install x"), "python pip");
+    }
+
+    #[test]
+    fn classify_python_script_arity_2() {
+        assert_eq!(classify("python manage.py runserver"), "python manage.py");
+        assert_eq!(classify("python3 setup.py install"), "python3 setup.py");
     }
 
     // ── docker ───────────────────────────────────────────────────────────────
