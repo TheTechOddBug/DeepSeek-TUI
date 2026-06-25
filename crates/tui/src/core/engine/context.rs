@@ -64,8 +64,17 @@ pub(super) fn effective_max_output_tokens_for_route(
     route_limits: Option<RouteLimits>,
 ) -> u32 {
     let cap = effective_max_output_tokens(model);
-    crate::route_budget::route_output_limit_tokens(route_limits)
-        .map_or(cap, |route_cap| cap.min(route_cap))
+    let cap = crate::route_budget::route_output_limit_tokens(route_limits)
+        .map_or(cap, |route_cap| cap.min(route_cap));
+    let Some(window) = route_limits
+        .and_then(|limits| limits.context_tokens)
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .filter(|tokens| *tokens > 0)
+    else {
+        return cap;
+    };
+    u32::try_from(ContextBudget::new(u64::from(window), 0, u64::from(cap)).output_cap_tokens)
+        .unwrap_or(cap)
 }
 /// Keep this many most recent messages when emergency trimming is required.
 pub(super) const MIN_RECENT_MESSAGES_TO_KEEP: usize = 4;

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added WhaleFlow-to-Fleet launch-shape validation: the default Fleet workflow
   contract allows up to 100 total agents and 5 recursive rings, requires
   bounded loops/expands before launch, and preserves per-slot model selection.
+- Added provider-level `context_window` overrides so OpenAI-compatible
+  gateways and self-hosted providers can budget against their real model
+  context window (#3545).
 
 ### Changed
 

@@ -6543,9 +6543,13 @@ async fn apply_model_picker_choice(
             Some(&model),
             saved_provider_model,
             Some(config.deepseek_base_url()),
+            config.context_window_for_provider_config(app.api_provider),
         ) {
             Ok(candidate) => {
                 resolved_model = candidate.wire_model_id.as_str().to_string();
+                app.set_active_context_window_override(
+                    config.context_window_for_provider_config(app.api_provider),
+                );
                 app.set_active_route_limits(candidate.limits);
             }
             Err(reason) => {
@@ -6554,7 +6558,10 @@ async fn apply_model_picker_choice(
             }
         }
     } else if model_changed && model_is_auto {
-        app.active_route_limits = None;
+        app.set_active_context_window_override(
+            config.context_window_for_provider_config(app.api_provider),
+        );
+        app.active_route_limits = app.context_window_override_limits();
     }
 
     if model_changed {
@@ -6764,6 +6771,7 @@ async fn switch_provider(
     app.model_ids_passthrough = config.model_ids_pass_through();
     app.reasoning_effort = app.reasoning_effort.normalize_for_provider(target);
     app.set_model_selection(new_model.clone());
+    app.set_active_context_window_override(config.context_window_for_provider_config(target));
     app.set_active_route_limits(resolved_route.candidate.limits);
     if model_override.is_some() {
         app.provider_models
@@ -6895,6 +6903,7 @@ async fn apply_provider_fallback_switch(
     app.model_ids_passthrough = config.model_ids_pass_through();
     app.reasoning_effort = app.reasoning_effort.normalize_for_provider(target);
     app.set_model_selection(new_model.clone());
+    app.set_active_context_window_override(config.context_window_for_provider_config(target));
     app.set_active_route_limits(resolved_route.candidate.limits);
     app.update_model_compaction_budget();
     if cache_scope_changed {
@@ -7451,7 +7460,27 @@ async fn apply_command_result(
                         app.api_provider = config.api_provider();
                         let new_model = config.default_model();
                         app.set_model_selection(new_model.clone());
-                        app.active_route_limits = None;
+                        app.set_active_context_window_override(
+                            config.context_window_for_provider_config(app.api_provider),
+                        );
+                        app.active_route_limits = if app.auto_model {
+                            app.context_window_override_limits()
+                        } else {
+                            let saved_provider_model = config
+                                .provider_config_for(app.api_provider)
+                                .and_then(|provider| provider.model.as_deref());
+                            resolve_route_candidate(
+                                app.api_provider,
+                                Some(&new_model),
+                                saved_provider_model,
+                                Some(config.deepseek_base_url()),
+                                app.active_context_window_override,
+                            )
+                            .ok()
+                            .and_then(|candidate| {
+                                crate::route_budget::known_route_limits(candidate.limits)
+                            })
+                        };
                         app.update_model_compaction_budget();
                         app.session.last_prompt_tokens = None;
                         app.session.last_completion_tokens = None;

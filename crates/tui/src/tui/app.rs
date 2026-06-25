@@ -21,10 +21,7 @@ use crate::config::{
 use crate::config_ui::ConfigUiMode;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
 use crate::localization::{Locale, MessageId, resolve_locale, tr};
-use crate::models::{
-    Message, SystemPrompt, Tool, auto_compact_default_for_model,
-    compaction_threshold_for_model_at_percent,
-};
+use crate::models::{Message, SystemPrompt, Tool};
 use crate::palette::{self, UiTheme};
 use crate::pricing::{CostCurrency, CostEstimate};
 use crate::resource_telemetry::TokenThroughput;
@@ -1607,6 +1604,8 @@ pub struct App {
     pub model_ids_passthrough: bool,
     /// Resolved provider/model route limits for the active runtime route.
     pub active_route_limits: Option<RouteLimits>,
+    /// User-configured provider context-window override for the active route.
+    pub active_context_window_override: Option<u32>,
     /// Pending provider transition for transactional rollback when the next
     /// auth failure indicates the new provider cannot be used.
     pub pending_provider_switch: Option<PendingProviderSwitch>,
@@ -2377,6 +2376,26 @@ impl App {
             })
             .unwrap_or(model);
         let auto_model = model.trim().eq_ignore_ascii_case("auto");
+        let active_context_window_override = config.context_window_for_provider_config(provider);
+        let active_route_limits = if auto_model {
+            active_context_window_override.map(|window| RouteLimits {
+                context_tokens: Some(u64::from(window)),
+                ..RouteLimits::default()
+            })
+        } else {
+            let saved_provider_model = config
+                .provider_config_for(provider)
+                .and_then(|provider| provider.model.as_deref());
+            crate::route_runtime::resolve_route_candidate(
+                provider,
+                Some(&model),
+                saved_provider_model,
+                Some(effective_auth_config.deepseek_base_url()),
+                active_context_window_override,
+            )
+            .ok()
+            .and_then(|candidate| crate::route_budget::known_route_limits(candidate.limits))
+        };
         let configured_reasoning_effort = settings
             .reasoning_effort
             .as_deref()
@@ -2386,14 +2405,20 @@ impl App {
         } else {
             model.as_str()
         };
-        let compact_threshold = compaction_threshold_for_model_at_percent(
+        let compact_threshold = crate::route_budget::compaction_threshold_for_route_at_percent(
+            provider,
             threshold_model,
+            active_route_limits,
             auto_compact_threshold_percent,
         );
         let auto_compact = if auto_compact_user_configured {
             settings_auto_compact
         } else {
-            auto_compact_default_for_model(threshold_model)
+            crate::route_budget::auto_compact_default_for_route(
+                provider,
+                threshold_model,
+                active_route_limits,
+            )
         };
         let reasoning_effort = if auto_model {
             ReasoningEffort::Auto
@@ -2547,7 +2572,8 @@ impl App {
             provider_readiness,
             last_fallback_reason: None,
             model_ids_passthrough,
-            active_route_limits: None,
+            active_route_limits,
+            active_context_window_override,
             pending_provider_switch: None,
             reasoning_effort,
             last_effective_reasoning_effort: None,
@@ -5539,6 +5565,21 @@ impl App {
 
     pub fn set_active_route_limits(&mut self, limits: RouteLimits) {
         self.active_route_limits = crate::route_budget::known_route_limits(limits);
+    }
+
+    pub fn set_active_context_window_override(&mut self, context_window: Option<u32>) {
+        self.active_context_window_override = context_window;
+        if self.active_route_limits.is_none() {
+            self.active_route_limits = self.context_window_override_limits();
+        }
+    }
+
+    pub fn context_window_override_limits(&self) -> Option<RouteLimits> {
+        self.active_context_window_override
+            .map(|window| RouteLimits {
+                context_tokens: Some(u64::from(window)),
+                ..RouteLimits::default()
+            })
     }
 
     pub fn set_model_selection(&mut self, model: String) {

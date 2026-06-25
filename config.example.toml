@@ -353,6 +353,7 @@ max_subagents = 10 # optional (1-20)
 # Alibaba Bailian / Model Studio DashScope OpenAI-compatible example:
 # base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 # model = "qwen-plus"
+# context_window = 1000000 # set the gateway/model's real total context window
 # insecure_skip_tls_verify = true # last resort for private gateways; prefer SSL_CERT_FILE
 
 # AtlasCloud OpenAI-compatible endpoint (https://www.atlascloud.ai/docs/models/llm)

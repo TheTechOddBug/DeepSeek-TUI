@@ -1689,6 +1689,7 @@ fn provider_key_value_api_covers_all_provider_metadata_entries() -> Result<()> {
         let api_key_path = format!("providers.{table}.api_key");
         let base_url_path = format!("providers.{table}.base_url");
         let model_path = format!("providers.{table}.model");
+        let context_window_path = format!("providers.{table}.context_window");
         let headers_path = format!("providers.{table}.http_headers");
         let mode_path = format!("providers.{table}.mode");
         let auth_mode_path = format!("providers.{table}.auth_mode");
@@ -1698,6 +1699,7 @@ fn provider_key_value_api_covers_all_provider_metadata_entries() -> Result<()> {
         config.set_value(&api_key_path, &api_key)?;
         config.set_value(&base_url_path, "https://gateway.example/v1")?;
         config.set_value(&model_path, "provider-test-model")?;
+        config.set_value(&context_window_path, "1000000")?;
         config.set_value(&headers_path, "X-Test=ok")?;
         config.set_value(&mode_path, "concise")?;
         config.set_value(&auth_mode_path, "api_key")?;
@@ -1715,6 +1717,10 @@ fn provider_key_value_api_covers_all_provider_metadata_entries() -> Result<()> {
         assert_eq!(
             config.get_value(&model_path).as_deref(),
             Some("provider-test-model")
+        );
+        assert_eq!(
+            config.get_value(&context_window_path).as_deref(),
+            Some("1000000")
         );
         assert_eq!(
             config.get_value(&headers_path).as_deref(),
@@ -1741,11 +1747,16 @@ fn provider_key_value_api_covers_all_provider_metadata_entries() -> Result<()> {
             listed.get(&headers_path).map(String::as_str),
             Some("X-Test=ok")
         );
+        assert_eq!(
+            listed.get(&context_window_path).map(String::as_str),
+            Some("1000000")
+        );
         assert_eq!(listed.get(&insecure_path).map(String::as_str), Some("true"));
 
         config.unset_value(&api_key_path)?;
         config.unset_value(&base_url_path)?;
         config.unset_value(&model_path)?;
+        config.unset_value(&context_window_path)?;
         config.unset_value(&headers_path)?;
         config.unset_value(&mode_path)?;
         config.unset_value(&auth_mode_path)?;
@@ -1755,6 +1766,7 @@ fn provider_key_value_api_covers_all_provider_metadata_entries() -> Result<()> {
         assert_eq!(config.get_value(&api_key_path), None);
         assert_eq!(config.get_value(&base_url_path), None);
         assert_eq!(config.get_value(&model_path), None);
+        assert_eq!(config.get_value(&context_window_path), None);
         assert_eq!(config.get_value(&headers_path), None);
         assert_eq!(config.get_value(&mode_path), None);
         assert_eq!(config.get_value(&auth_mode_path), None);
@@ -1770,6 +1782,16 @@ fn provider_key_value_api_covers_all_provider_metadata_entries() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[test]
+fn provider_context_window_rejects_zero() {
+    let mut config = ConfigToml::default();
+    let err = config
+        .set_value("providers.openai.context_window", "0")
+        .expect_err("zero context window should be rejected");
+
+    assert!(err.to_string().contains("greater than 0"));
 }
 
 #[test]

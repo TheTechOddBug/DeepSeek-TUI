@@ -45,6 +45,15 @@ pub struct ProviderConfigToml {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    #[serde(
+        default,
+        alias = "contextWindow",
+        alias = "context_window_tokens",
+        alias = "contextWindowTokens",
+        alias = "context_length",
+        alias = "contextLength"
+    )]
+    pub context_window: Option<u32>,
     pub mode: Option<String>,
     pub auth_mode: Option<String>,
     pub insecure_skip_tls_verify: Option<bool>,
@@ -322,6 +331,7 @@ enum ProviderConfigField {
     ApiKey,
     BaseUrl,
     Model,
+    ContextWindow,
     Mode,
     AuthMode,
     InsecureSkipTlsVerify,
@@ -335,6 +345,7 @@ impl ProviderConfigField {
             "api_key" => Self::ApiKey,
             "base_url" => Self::BaseUrl,
             "model" => Self::Model,
+            "context_window" | "context_window_tokens" => Self::ContextWindow,
             "mode" => Self::Mode,
             "auth_mode" => Self::AuthMode,
             "insecure_skip_tls_verify" => Self::InsecureSkipTlsVerify,
@@ -349,6 +360,7 @@ impl ProviderConfigField {
             Self::ApiKey => "api_key",
             Self::BaseUrl => "base_url",
             Self::Model => "model",
+            Self::ContextWindow => "context_window",
             Self::Mode => "mode",
             Self::AuthMode => "auth_mode",
             Self::InsecureSkipTlsVerify => "insecure_skip_tls_verify",
@@ -385,6 +397,7 @@ fn get_provider_config_value(
         ProviderConfigField::ApiKey => config.api_key.clone(),
         ProviderConfigField::BaseUrl => config.base_url.clone(),
         ProviderConfigField::Model => config.model.clone(),
+        ProviderConfigField::ContextWindow => config.context_window.map(|value| value.to_string()),
         ProviderConfigField::Mode => config.mode.clone(),
         ProviderConfigField::AuthMode => config.auth_mode.clone(),
         ProviderConfigField::InsecureSkipTlsVerify => config
@@ -406,6 +419,16 @@ fn get_provider_config_display_value(
         }
         _ => get_provider_config_value(config, field),
     }
+}
+
+fn parse_context_window(value: &str) -> Result<u32> {
+    let parsed = value.trim().parse::<u32>().with_context(|| {
+        format!("invalid context_window '{value}': expected a positive token count")
+    })?;
+    if parsed == 0 {
+        bail!("context_window must be greater than 0");
+    }
+    Ok(parsed)
 }
 
 fn set_provider_config_value(
@@ -435,6 +458,10 @@ fn set_provider_config_value(
             if provider == ProviderKind::Deepseek {
                 config.default_text_model = Some(value);
             }
+        }
+        ProviderConfigField::ContextWindow => {
+            config.providers.for_provider_mut(provider).context_window =
+                Some(parse_context_window(value)?);
         }
         ProviderConfigField::Mode => {
             config.providers.for_provider_mut(provider).mode = Some(value.to_string());
@@ -486,6 +513,9 @@ fn unset_provider_config_value(
                 config.default_text_model = None;
             }
         }
+        ProviderConfigField::ContextWindow => {
+            config.providers.for_provider_mut(provider).context_window = None;
+        }
         ProviderConfigField::Mode => {
             config.providers.for_provider_mut(provider).mode = None;
         }
@@ -535,6 +565,12 @@ fn insert_provider_config_values(
         out.insert(
             provider_config_key(provider, ProviderConfigField::Model),
             v.clone(),
+        );
+    }
+    if let Some(v) = config.context_window {
+        out.insert(
+            provider_config_key(provider, ProviderConfigField::ContextWindow),
+            v.to_string(),
         );
     }
     if let Some(v) = config.mode.as_ref() {

@@ -96,6 +96,43 @@ fn deepseek_api_key_reads_metadata_env_vars_for_newer_providers() -> Result<()> 
 }
 
 #[test]
+fn provider_context_window_loads_from_provider_table() -> Result<()> {
+    let config: Config = toml::from_str(
+        r#"
+provider = "openai"
+
+[providers.openai]
+model = "qwen3.7"
+context_window = 1000000
+"#,
+    )?;
+
+    config.validate()?;
+    assert_eq!(
+        config.context_window_for_provider_config(ApiProvider::Openai),
+        Some(1_000_000)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn provider_context_window_zero_is_invalid() {
+    let config: Config = toml::from_str(
+        r#"
+[providers.openai]
+context_window = 0
+"#,
+    )
+    .expect("zero is syntactically valid TOML");
+
+    let err = config
+        .validate()
+        .expect_err("zero context_window should be rejected");
+    assert!(err.to_string().contains("providers.openai.context_window"));
+}
+
+#[test]
 fn missing_provider_api_key_message_uses_provider_metadata() -> Result<()> {
     let message = missing_provider_api_key_message(ApiProvider::Zai)?;
 

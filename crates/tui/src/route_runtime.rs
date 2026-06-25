@@ -1,5 +1,5 @@
 use codewhale_config::route::{
-    LogicalModelRef, ReadyRouteCandidate, RouteRequest, RouteResolver, WireModelId,
+    LogicalModelRef, ReadyRouteCandidate, RouteLimits, RouteRequest, RouteResolver, WireModelId,
 };
 
 use crate::config::{ApiProvider, Config, DEFAULT_NVIDIA_NIM_BASE_URL};
@@ -16,6 +16,7 @@ pub(crate) fn resolve_route_candidate(
     model_selector: Option<&str>,
     saved_provider_model: Option<&str>,
     base_url_override: Option<String>,
+    context_window_override: Option<u32>,
 ) -> Result<ReadyRouteCandidate, String> {
     let route_request = RouteRequest {
         explicit_provider: provider.kind(),
@@ -24,9 +25,17 @@ pub(crate) fn resolve_route_candidate(
             .map(|model| WireModelId::from(model.to_string())),
         base_url_override,
     };
-    RouteResolver::new()
+    let mut candidate = RouteResolver::new()
         .resolve(&route_request)
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    apply_context_window_override(&mut candidate.limits, context_window_override);
+    Ok(candidate)
+}
+
+fn apply_context_window_override(limits: &mut RouteLimits, context_window: Option<u32>) {
+    if let Some(context_window) = context_window.filter(|window| *window > 0) {
+        limits.context_tokens = Some(u64::from(context_window));
+    }
 }
 
 pub(crate) fn resolve_runtime_route(
@@ -43,6 +52,7 @@ pub(crate) fn resolve_runtime_route(
         model_selector,
         saved_provider_model,
         Some(route_config.deepseek_base_url()),
+        route_config.context_window_for_provider_config(provider),
     )?;
     let model = candidate.wire_model_id.as_str().to_string();
     route_config.provider_config_for_mut(provider).model = Some(model.clone());
@@ -230,6 +240,36 @@ mod tests {
         assert!(route.candidate.validation.messages.is_empty());
         // The selected provider name is preserved (not overwritten with "custom").
         assert_eq!(route.config.provider.as_deref(), Some("my_thing"));
+    }
+
+    #[test]
+    fn custom_provider_context_window_overrides_unknown_route_limit() {
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("https://dashscope.example.com/compatible-mode/v1".to_string()),
+                model: Some("qwen3.7".to_string()),
+                context_window: Some(1_000_000),
+                api_key_env: Some("DASHSCOPE_API_KEY".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = Config {
+            provider: Some("dashscope".to_string()),
+            providers: Some(ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+
+        let route = resolve_runtime_route(&config, ApiProvider::Custom, None)
+            .expect("custom route should resolve");
+
+        assert_eq!(route.model, "qwen3.7");
+        assert_eq!(route.candidate.limits.context_tokens, Some(1_000_000));
     }
 
     #[test]

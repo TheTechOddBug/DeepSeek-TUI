@@ -3213,6 +3213,24 @@ fn effective_max_output_tokens_for_route_caps_to_route_output_limit() {
 }
 
 #[test]
+fn effective_max_output_tokens_for_route_caps_to_context_window() {
+    let _lock = lock_test_env();
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(32_000),
+        input_tokens: None,
+        output_tokens: None,
+    };
+
+    let cap = effective_max_output_tokens_for_route("deepseek-v4-pro", Some(limits));
+
+    assert!(cap < 32_000, "request cap must fit the configured window");
+    assert!(
+        cap > 0,
+        "small configured windows should still allow output"
+    );
+}
+
+#[test]
 fn effective_max_output_tokens_caps_api_request_for_large_window_models() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // v4_cap and flash_cap below see the same env state.

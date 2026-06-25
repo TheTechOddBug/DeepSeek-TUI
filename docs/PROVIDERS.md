@@ -178,6 +178,7 @@ provider = "openai"
 api_key = "YOUR_DASHSCOPE_API_KEY"
 base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 model = "qwen-plus"
+context_window = 1000000
 ```
 
 The Singapore endpoint above sends chat requests to `/chat/completions`;
@@ -185,7 +186,9 @@ Alibaba also documents regional `compatible-mode/v1` base URLs for Virginia,
 Beijing, Hong Kong, and Frankfurt. Keep the API key and base URL from the same
 region. The `qwen-plus` model ID is preserved as an OpenAI provider-scoped wire
 ID; CodeWhale does not infer a switch to OpenRouter, DeepSeek, or another
-provider from the `qwen` prefix.
+provider from the `qwen` prefix. Set `context_window` to the gateway/model's
+real total context window when it differs from CodeWhale's static model
+metadata.
 
 Private gateways with broken or intercepted certificates should use
 `SSL_CERT_FILE` with a trusted CA bundle. The legacy
@@ -399,6 +402,11 @@ metadata, not a live API probe. Current fields are:
 
 Most shipped providers use the Chat Completions request payload mode. Native
 Anthropic uses Messages, and `openai-codex` uses Responses.
+
+For OpenAI-compatible gateways or self-hosted runtimes whose real window
+differs from the static table, set `[providers.<name>] context_window = N`.
+The configured value becomes the route-effective context window for prompts,
+context-pressure checks, compaction, and output-cap budgeting.
 
 | Provider/model class | Context window | Max output metadata | Thinking support | Cache telemetry | FIM endpoint |
 | --- | --- | --- | --- | --- | --- |

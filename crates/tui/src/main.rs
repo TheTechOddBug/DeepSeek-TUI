@@ -6163,6 +6163,16 @@ fn config_for_cli_route(config: &Config, route: &CliAutoRoute) -> Config {
     execution_config
 }
 
+fn resolve_cli_route_limits(
+    config: &Config,
+    provider: crate::config::ApiProvider,
+    model: &str,
+) -> Option<codewhale_config::route::RouteLimits> {
+    crate::route_runtime::resolve_runtime_route(config, provider, Some(model))
+        .ok()
+        .and_then(|route| crate::route_budget::known_route_limits(route.candidate.limits))
+}
+
 async fn resolve_cli_auto_route(
     config: &Config,
     model: &str,
@@ -6449,9 +6459,6 @@ async fn run_exec_agent(
     use crate::core::engine::{EngineConfig, spawn_engine};
     use crate::core::events::Event;
     use crate::core::ops::Op;
-    use crate::models::{
-        auto_compact_default_for_model, compaction_threshold_for_model_at_percent,
-    };
     use crate::tools::plan::new_shared_plan_state;
     use crate::tools::todo::new_shared_todo_list;
     use crate::tui::app::AppMode;
@@ -6461,6 +6468,8 @@ async fn run_exec_agent(
     let auto_model = route.auto_model;
     let effective_provider = route.provider;
     let effective_model = route.model;
+    let active_route_limits =
+        resolve_cli_route_limits(&execution_config, effective_provider, &effective_model);
     let max_subagents = if max_subagents == config.max_subagents_for_provider(config.api_provider())
     {
         execution_config
@@ -6477,13 +6486,19 @@ async fn run_exec_agent(
     let auto_compact_enabled = if crate::settings::Settings::auto_compact_explicitly_configured() {
         settings.auto_compact
     } else {
-        auto_compact_default_for_model(&effective_model)
+        crate::route_budget::auto_compact_default_for_route(
+            effective_provider,
+            &effective_model,
+            active_route_limits,
+        )
     };
     let compaction = CompactionConfig {
         enabled: auto_compact_enabled,
         model: effective_model.clone(),
-        token_threshold: compaction_threshold_for_model_at_percent(
+        token_threshold: crate::route_budget::compaction_threshold_for_route_at_percent(
+            effective_provider,
             &effective_model,
+            active_route_limits,
             settings.auto_compact_threshold_percent,
         ),
         ..Default::default()
@@ -6499,7 +6514,7 @@ async fn run_exec_agent(
         .map(crate::config::LspConfigToml::into_runtime);
     let engine_config = EngineConfig {
         model: effective_model.clone(),
-        active_route_limits: None,
+        active_route_limits,
         workspace: workspace.clone(),
         allow_shell: auto_approve || execution_config.allow_shell(),
         trust_mode,

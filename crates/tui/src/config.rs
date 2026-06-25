@@ -2384,6 +2384,15 @@ pub struct ProviderConfig {
     #[serde(alias = "baseUrl")]
     pub base_url: Option<String>,
     pub model: Option<String>,
+    #[serde(
+        default,
+        alias = "contextWindow",
+        alias = "context_window_tokens",
+        alias = "contextWindowTokens",
+        alias = "context_length",
+        alias = "contextLength"
+    )]
+    pub context_window: Option<u32>,
     pub mode: Option<String>,
     #[serde(alias = "authMode")]
     pub auth_mode: Option<String>,
@@ -2534,6 +2543,53 @@ impl ProvidersConfig {
     pub fn custom_provider_config(&self, name: &str) -> Option<&ProviderConfig> {
         self.custom.get(name)
     }
+
+    fn validate(&self) -> Result<()> {
+        let builtins = [
+            ("providers.deepseek", &self.deepseek),
+            ("providers.deepseek_cn", &self.deepseek_cn),
+            ("providers.deepseek_anthropic", &self.deepseek_anthropic),
+            ("providers.nvidia_nim", &self.nvidia_nim),
+            ("providers.openai", &self.openai),
+            ("providers.atlascloud", &self.atlascloud),
+            ("providers.wanjie_ark", &self.wanjie_ark),
+            ("providers.volcengine", &self.volcengine),
+            ("providers.openrouter", &self.openrouter),
+            ("providers.xiaomi_mimo", &self.xiaomi_mimo),
+            ("providers.novita", &self.novita),
+            ("providers.fireworks", &self.fireworks),
+            ("providers.siliconflow", &self.siliconflow),
+            ("providers.siliconflow_cn", &self.siliconflow_cn),
+            ("providers.arcee", &self.arcee),
+            ("providers.moonshot", &self.moonshot),
+            ("providers.sglang", &self.sglang),
+            ("providers.vllm", &self.vllm),
+            ("providers.ollama", &self.ollama),
+            ("providers.huggingface", &self.huggingface),
+            ("providers.deepinfra", &self.deepinfra),
+            ("providers.together", &self.together),
+            ("providers.qianfan", &self.qianfan),
+            ("providers.openai_codex", &self.openai_codex),
+            ("providers.anthropic", &self.anthropic),
+            ("providers.zai", &self.zai),
+            ("providers.stepfun", &self.stepfun),
+            ("providers.minimax", &self.minimax),
+        ];
+        for (name, config) in builtins {
+            validate_provider_context_window(name, config.context_window)?;
+        }
+        for (name, config) in &self.custom {
+            validate_provider_context_window(&format!("providers.{name}"), config.context_window)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_provider_context_window(name: &str, value: Option<u32>) -> Result<()> {
+    if value == Some(0) {
+        anyhow::bail!("{name}.context_window must be greater than 0");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2772,6 +2828,9 @@ impl Config {
         if let Some(auto_review) = &self.auto_review {
             auto_review.validate()?;
         }
+        if let Some(providers) = &self.providers {
+            providers.validate()?;
+        }
         Ok(())
     }
 
@@ -2938,6 +2997,24 @@ impl Config {
         self.provider_config()
             .and_then(|provider| provider.insecure_skip_tls_verify)
             .unwrap_or(false)
+    }
+
+    #[must_use]
+    pub(crate) fn context_window_for_provider_config(&self, provider: ApiProvider) -> Option<u32> {
+        if let Some(window) = self
+            .provider_config_for(provider)
+            .and_then(|entry| entry.context_window)
+            .filter(|window| *window > 0)
+        {
+            return Some(window);
+        }
+        if provider == ApiProvider::SiliconflowCn {
+            return self
+                .provider_config_for(ApiProvider::Siliconflow)
+                .and_then(|entry| entry.context_window)
+                .filter(|window| *window > 0);
+        }
+        None
     }
 
     #[must_use]
@@ -5410,6 +5487,7 @@ fn merge_provider_config(base: ProviderConfig, override_cfg: ProviderConfig) -> 
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
         model: override_cfg.model.or(base.model),
+        context_window: override_cfg.context_window.or(base.context_window),
         mode: override_cfg.mode.or(base.mode),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         insecure_skip_tls_verify: override_cfg

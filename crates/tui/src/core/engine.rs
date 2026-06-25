@@ -767,6 +767,8 @@ impl Engine {
             Ok(client) => {
                 self.api_provider = provider;
                 self.api_config = route_config;
+                self.active_route_limits =
+                    crate::route_budget::known_route_limits(route.candidate.limits);
                 self.api_key_env_only_recovery =
                     Self::env_only_api_key_recovery_hint(&self.api_config);
                 self.deepseek_client = Some(client.clone());
