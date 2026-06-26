@@ -3178,7 +3178,8 @@ impl RuntimeThreadManager {
                     };
 
                     if auto_approve || trust_mode {
-                        let auto_decision = Self::approval_decision(auto_approve, trust_mode, false);
+                        let auto_decision =
+                            Self::approval_decision(auto_approve, trust_mode, false);
                         let (dec_str, approved) = match auto_decision {
                             RuntimeApprovalDecision::ApproveTool => ("allow", true),
                             RuntimeApprovalDecision::DenyTool
