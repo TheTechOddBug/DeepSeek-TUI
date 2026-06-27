@@ -85,14 +85,7 @@ fn binary_exits_without_crashing(world: &mut EvalSmokeWorld) {
     //   2. A known exit code was produced (not a crash/hang)
     //   3. Step-level success is validated by the next Gherkin step.
     let exit_code = status.code().expect("process should have terminated");
-    if cfg!(unix) {
-        use std::os::unix::process::ExitStatusExt;
-        assert!(
-            status.signal().is_none(),
-            "codewhale-tui eval was killed by signal {} (crash?)",
-            status.signal().unwrap()
-        );
-    }
+    assert_no_signal_crash(&status);
     assert!(
         exit_code == 0 || exit_code == 1,
         "codewhale-tui eval exited with unexpected code {exit_code} (expected 0 or 1)"
@@ -167,6 +160,21 @@ async fn eval_smoke_binary_loads_and_reports_steps() {
         "scenario did not run: {SMOKE_SCENARIO}"
     );
 }
+
+/// Assert the process was not killed by a signal (Unix-only check).
+#[cfg(unix)]
+fn assert_no_signal_crash(status: &ExitStatus) {
+    use std::os::unix::process::ExitStatusExt;
+    assert!(
+        status.signal().is_none(),
+        "codewhale-tui eval was killed by signal {} (crash?)",
+        status.signal().unwrap()
+    );
+}
+
+/// No-op on non-Unix platforms where `ExitStatusExt` is unavailable.
+#[cfg(not(unix))]
+fn assert_no_signal_crash(_status: &ExitStatus) {}
 
 fn codewhale_tui_binary() -> PathBuf {
     if let Some(path) = option_env!("CARGO_BIN_EXE_codewhale-tui") {
