@@ -179,6 +179,13 @@ export function telegramRetryDelayMs(error, fallbackMs = 3000) {
   return fallbackMs;
 }
 
+const POLLING_CONFLICT_DELAYS_MS = [15000, 25000, 35000, 45000, 55000];
+
+export function telegramPollingConflictDelayMs(attempt = 0) {
+  const index = Math.max(0, Math.floor(Number(attempt) || 0));
+  return POLLING_CONFLICT_DELAYS_MS[index] ?? null;
+}
+
 export function telegramSendRetryDelayMs(error, attempt = 0) {
   const retryAfter = Number(error?.parameters?.retry_after || 0);
   if (error?.errorCode === 429 && attempt < 3) {

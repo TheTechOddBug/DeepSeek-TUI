@@ -21,6 +21,7 @@ import {
   stripGroupPrefix,
   threadListKeyboard,
   telegramIdentity,
+  telegramPollingConflictDelayMs,
   telegramRetryDelayMs,
   telegramSendRetryDelayMs
 } from "./lib.mjs";
@@ -111,6 +112,7 @@ async function configureBotCommands() {
 }
 
 async function pollTelegram() {
+  let pollingConflictAttempts = 0;
   while (!stopping) {
     try {
       const updates = await telegramApi("getUpdates", {
@@ -118,6 +120,7 @@ async function pollTelegram() {
         timeout: config.pollTimeoutSeconds,
         allowed_updates: ["message", "callback_query"]
       });
+      pollingConflictAttempts = 0;
       for (const update of updates || []) {
         try {
           await handleIncomingUpdate(update);
@@ -129,10 +132,20 @@ async function pollTelegram() {
       }
     } catch (error) {
       if (looksLikePollingConflict(error)) {
-        console.warn("Telegram getUpdates conflict; another bridge is polling this bot. Retrying in 10s.");
-        await delay(10000);
+        const waitMs = telegramPollingConflictDelayMs(pollingConflictAttempts);
+        pollingConflictAttempts += 1;
+        if (waitMs == null) {
+          throw new Error(
+            "Telegram getUpdates conflict; another bridge is polling this bot token. Stop the other bridge process or use a different token."
+          );
+        }
+        console.warn(
+          `Telegram getUpdates conflict; another bridge is polling this bot. Retrying in ${Math.round(waitMs / 1000)}s.`
+        );
+        await delay(waitMs);
         continue;
       }
+      pollingConflictAttempts = 0;
       const waitMs = telegramRetryDelayMs(error);
       console.error(`Telegram poll failed: ${error.message}. Retrying in ${Math.round(waitMs / 1000)}s.`);
       await delay(waitMs);

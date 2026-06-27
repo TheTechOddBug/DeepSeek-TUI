@@ -82,6 +82,19 @@ test("polling persists offsets only after successful update handling", async () 
   assert.match(markUpdateHandled, /await threadStore\.setCursor\("telegram\.update_offset", updateOffset\);/);
 });
 
+test("polling conflicts use bounded escalation instead of a flat retry loop", async () => {
+  const source = await readBridgeSource();
+  const pollTelegram = extractFunction(source, "pollTelegram");
+
+  assert.match(source, /telegramPollingConflictDelayMs/);
+  assert.match(pollTelegram, /let pollingConflictAttempts = 0;/);
+  assert.match(pollTelegram, /telegramPollingConflictDelayMs\(pollingConflictAttempts\)/);
+  assert.match(pollTelegram, /pollingConflictAttempts \+= 1;/);
+  assert.match(pollTelegram, /throw new Error\(/);
+  assert.doesNotMatch(pollTelegram, /Retrying in 10s/);
+  assert.doesNotMatch(pollTelegram, /await delay\(10000\)/);
+});
+
 test("callback replay is ignored before modal dispatch", async () => {
   const source = await readBridgeSource();
   const incomingHandler = extractFunction(source, "handleIncomingUpdate");

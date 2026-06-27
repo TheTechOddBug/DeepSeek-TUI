@@ -22,6 +22,7 @@ import {
   stripGroupPrefix,
   threadListKeyboard,
   telegramIdentity,
+  telegramPollingConflictDelayMs,
   telegramRetryDelayMs,
   telegramSendRetryDelayMs,
   looksLikePollingConflict,
@@ -248,6 +249,13 @@ test("splitMessage chunks long text without splitting surrogate pairs", () => {
 
 test("telegramRetryDelayMs honors retry_after", () => {
   assert.equal(telegramRetryDelayMs({ parameters: { retry_after: 2 } }), 2000);
+});
+
+test("telegramPollingConflictDelayMs escalates before going fatal", () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5].map((attempt) => telegramPollingConflictDelayMs(attempt)),
+    [15000, 25000, 35000, 45000, 55000, null]
+  );
 });
 
 test("telegramSendRetryDelayMs retries only safe send failures", () => {
