@@ -843,6 +843,10 @@ struct EnvGuard {
     minimax_api_key: Option<OsString>,
     minimax_base_url: Option<OsString>,
     minimax_model: Option<OsString>,
+    sakana_api_key: Option<OsString>,
+    fugu_api_key: Option<OsString>,
+    sakana_base_url: Option<OsString>,
+    sakana_model: Option<OsString>,
     sglang_api_key: Option<OsString>,
     sglang_base_url: Option<OsString>,
     vllm_api_key: Option<OsString>,
@@ -953,6 +957,10 @@ impl EnvGuard {
             minimax_api_key: env::var_os("MINIMAX_API_KEY"),
             minimax_base_url: env::var_os("MINIMAX_BASE_URL"),
             minimax_model: env::var_os("MINIMAX_MODEL"),
+            sakana_api_key: env::var_os("SAKANA_API_KEY"),
+            fugu_api_key: env::var_os("FUGU_API_KEY"),
+            sakana_base_url: env::var_os("SAKANA_BASE_URL"),
+            sakana_model: env::var_os("SAKANA_MODEL"),
             sglang_api_key: env::var_os("SGLANG_API_KEY"),
             sglang_base_url: env::var_os("SGLANG_BASE_URL"),
             vllm_api_key: env::var_os("VLLM_API_KEY"),
@@ -1058,6 +1066,10 @@ impl EnvGuard {
             env::remove_var("MINIMAX_API_KEY");
             env::remove_var("MINIMAX_BASE_URL");
             env::remove_var("MINIMAX_MODEL");
+            env::remove_var("SAKANA_API_KEY");
+            env::remove_var("FUGU_API_KEY");
+            env::remove_var("SAKANA_BASE_URL");
+            env::remove_var("SAKANA_MODEL");
             env::remove_var("SGLANG_API_KEY");
             env::remove_var("SGLANG_BASE_URL");
             env::remove_var("VLLM_API_KEY");
@@ -1195,6 +1207,10 @@ impl Drop for EnvGuard {
             Self::restore_var("MINIMAX_API_KEY", self.minimax_api_key.take());
             Self::restore_var("MINIMAX_BASE_URL", self.minimax_base_url.take());
             Self::restore_var("MINIMAX_MODEL", self.minimax_model.take());
+            Self::restore_var("SAKANA_API_KEY", self.sakana_api_key.take());
+            Self::restore_var("FUGU_API_KEY", self.fugu_api_key.take());
+            Self::restore_var("SAKANA_BASE_URL", self.sakana_base_url.take());
+            Self::restore_var("SAKANA_MODEL", self.sakana_model.take());
             Self::restore_var("SGLANG_API_KEY", self.sglang_api_key.take());
             Self::restore_var("SGLANG_BASE_URL", self.sglang_base_url.take());
             Self::restore_var("VLLM_API_KEY", self.vllm_api_key.take());
@@ -3092,6 +3108,14 @@ fn provider_kind_parses_openrouter_and_novita_aliases() {
         assert_eq!(parsed.provider, ProviderKind::Deepinfra);
     }
 
+    for alias in ["sakana", "sakana-ai", "sakana_ai", "fugu"] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Sakana));
+
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("sakana alias");
+        assert_eq!(parsed.provider, ProviderKind::Sakana);
+    }
+
     for alias in ["qianfan", "baidu-qianfan", "baidu_qianfan", "baidu"] {
         assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Qianfan));
 
@@ -3652,7 +3676,7 @@ fn moonshot_provider_defaults_to_kimi_k27_code() {
 }
 
 #[test]
-fn zai_stepfun_and_minimax_default_to_first_party_routes() {
+fn zai_stepfun_minimax_and_sakana_default_to_first_party_routes() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
 
@@ -3667,6 +3691,11 @@ fn zai_stepfun_and_minimax_default_to_first_party_routes() {
             ProviderKind::Minimax,
             DEFAULT_MINIMAX_BASE_URL,
             DEFAULT_MINIMAX_MODEL,
+        ),
+        (
+            ProviderKind::Sakana,
+            DEFAULT_SAKANA_BASE_URL,
+            DEFAULT_SAKANA_MODEL,
         ),
     ] {
         let config = ConfigToml {
@@ -3747,6 +3776,23 @@ fn minimax_env_model_override_canonicalizes_known_aliases() {
 
     assert_eq!(resolved.provider, ProviderKind::Minimax);
     assert_eq!(resolved.model, "MiniMax-M2.5-highspeed");
+}
+
+#[test]
+fn sakana_env_overrides_resolve_fugu_route() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    unsafe {
+        env::set_var("CODEWHALE_PROVIDER", "sakana");
+        env::set_var("SAKANA_BASE_URL", "https://sakana.example/v1");
+        env::set_var("SAKANA_MODEL", "fugu-ultra-20260615");
+    }
+
+    let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+
+    assert_eq!(resolved.provider, ProviderKind::Sakana);
+    assert_eq!(resolved.base_url, "https://sakana.example/v1");
+    assert_eq!(resolved.model, "fugu-ultra-20260615");
 }
 
 #[test]

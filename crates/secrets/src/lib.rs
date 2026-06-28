@@ -864,6 +864,7 @@ pub fn env_for(name: &str) -> Option<String> {
             "WANJIE_API_KEY",
             "WANJIE_MAAS_API_KEY",
         ],
+        "sakana" | "sakana-ai" | "sakana_ai" | "fugu" => &["FUGU_API_KEY", "SAKANA_API_KEY"],
         _ => return None,
     };
     for var in candidates {
@@ -912,6 +913,8 @@ mod tests {
             "XIAOMI_MIMO_API_KEY",
             "XIAOMI_API_KEY",
             "MIMO_API_KEY",
+            "FUGU_API_KEY",
+            "SAKANA_API_KEY",
             SECRET_BACKEND_ENV,
             LEGACY_SECRET_BACKEND_ENV,
         ] {
@@ -1220,6 +1223,24 @@ mod tests {
         assert_eq!(env_for("atlascloud").as_deref(), Some("atlas-key"));
         assert_eq!(env_for("atlas").as_deref(), Some("atlas-key"));
         assert_eq!(env_for("atlas-cloud").as_deref(), Some("atlas-key"));
+
+        clear_known_envs();
+    }
+
+    #[test]
+    fn sakana_env_aliases_resolve() {
+        let _guard = env_lock();
+        clear_known_envs();
+        unsafe { std::env::set_var("FUGU_API_KEY", "fugu-key") };
+
+        assert_eq!(env_for("sakana").as_deref(), Some("fugu-key"));
+        assert_eq!(env_for("sakana-ai").as_deref(), Some("fugu-key"));
+        assert_eq!(env_for("sakana_ai").as_deref(), Some("fugu-key"));
+        assert_eq!(env_for("fugu").as_deref(), Some("fugu-key"));
+
+        clear_known_envs();
+        unsafe { std::env::set_var("SAKANA_API_KEY", "sakana-key") };
+        assert_eq!(env_for("sakana").as_deref(), Some("sakana-key"));
 
         clear_known_envs();
     }

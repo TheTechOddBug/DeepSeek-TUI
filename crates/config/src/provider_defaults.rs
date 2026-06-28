@@ -127,3 +127,6 @@ pub(crate) const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
 pub(crate) const DEFAULT_DEEPINFRA_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub(crate) const DEFAULT_DEEPINFRA_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub(crate) const DEFAULT_DEEPINFRA_BASE_URL: &str = "https://api.deepinfra.com/v1/openai";
+// Sakana AI Fugu defaults
+pub(crate) const DEFAULT_SAKANA_MODEL: &str = "fugu";
+pub(crate) const DEFAULT_SAKANA_BASE_URL: &str = "https://api.sakana.ai/v1";

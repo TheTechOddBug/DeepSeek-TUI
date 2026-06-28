@@ -28,8 +28,11 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
-<summary><strong>v0.8.66 — cleanup lane in progress</strong></summary>
+<summary><strong>v0.8.67 — cleanup lane in progress</strong></summary>
 
+- **[lerugray](https://github.com/lerugray)** — Sakana AI Fugu provider
+  support across config, CLI, TUI provider picker, docs, and model completions
+  (#3748, harvested)
 - **[noaft](https://github.com/noaft)** — `/links` provider docs fallback
   update, including the current CodeWhale docs URL and a Baidu Qianfan docs
   link (#3621, harvested)

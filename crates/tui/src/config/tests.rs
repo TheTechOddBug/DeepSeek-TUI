@@ -71,6 +71,7 @@ fn deepseek_api_key_reads_metadata_env_vars_for_newer_providers() -> Result<()> 
             "DEEPINFRA_API_KEY",
             "deepinfra-env-key",
         ),
+        (ApiProvider::Sakana, "FUGU_API_KEY", "fugu-env-key"),
         (
             ApiProvider::Together,
             "TOGETHER_API_KEY",
@@ -3474,6 +3475,14 @@ fn model_completion_names_for_minimax_include_direct_chat_models() {
     assert!(
         !models.contains(&OPENROUTER_MINIMAX_M3_MODEL),
         "direct MiniMax picker must not expose OpenRouter namespaced IDs"
+    );
+}
+
+#[test]
+fn model_completion_names_for_sakana_include_fugu_models() {
+    assert_eq!(
+        model_completion_names_for_provider(ApiProvider::Sakana),
+        vec![DEFAULT_SAKANA_MODEL, SAKANA_FUGU_ULTRA_MODEL]
     );
 }
 

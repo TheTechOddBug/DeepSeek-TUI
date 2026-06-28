@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added Sakana AI Fugu as a first-class OpenAI-compatible provider with
+  `sakana`/`fugu` aliases, `FUGU_API_KEY` / `SAKANA_API_KEY` discovery,
+  provider-picker wiring, model completions, and provider docs. Harvested from
+  #3748 by @lerugray.
 - Added WhaleFlow-to-Fleet launch-shape validation: the default Fleet workflow
   contract allows up to 100 total agents and 5 recursive rings, requires
   bounded loops/expands before launch, and preserves per-slot model selection.
