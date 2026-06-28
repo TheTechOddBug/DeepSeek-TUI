@@ -15,10 +15,11 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 const FEATURE_NAME: &str = "Tool call lifecycle";
 const FEATURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/features/tool_lifecycle_happy_path.feature"
+    "/tests/features/tool_lifecycle.feature"
 );
 const HAPPY_PATH_SCENARIO: &str = "Happy path lists the current directory through a tool";
-const TOOL_CALL_ID: &str = "call_list_dir";
+const UNKNOWN_TOOL_SCENARIO: &str = "Unknown tool returns an error result";
+const TOOL_CALL_ID: &str = "call_tool";
 const TEST_MODEL: &str = "acceptance-model";
 
 #[derive(Debug, Default, cucumber::World)]
@@ -29,6 +30,7 @@ struct ToolLifecycleWorld {
     tool_name: Option<String>,
     tool_input: Option<Value>,
     final_answer: Option<String>,
+    prompt: Option<String>,
     stdout: String,
     stderr: String,
     events: Vec<Value>,
@@ -87,6 +89,7 @@ async fn user_asks(world: &mut ToolLifecycleWorld, prompt: String) {
     let server = start_mock_llm(world).await;
     let output = run_codewhale_exec(world, &server, &prompt);
 
+    world.prompt = Some(prompt);
     world.stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     world.stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
@@ -120,7 +123,13 @@ fn codewhale_should_send_user_request_to_mocked_llm(world: &mut ToolLifecycleWor
         .expect("expected an initial chat request");
 
     assert!(
-        request_contains_user_text(first_request, "list the current directory"),
+        request_contains_user_text(
+            first_request,
+            world
+                .prompt
+                .as_deref()
+                .expect("scenario prompt should be set")
+        ),
         "initial request should include the user prompt:\n{first_request:#}"
     );
     assert!(
@@ -192,6 +201,48 @@ fn codewhale_should_send_tool_result_back_to_mocked_llm(world: &mut ToolLifecycl
     }
 }
 
+#[then(regex = r#"^the public tool result should report an error for "([^"]+)"$"#)]
+fn public_tool_result_should_report_error_for(world: &mut ToolLifecycleWorld, tool_name: String) {
+    let _ = tool_use_event(world, &tool_name);
+    let event = tool_result_event(world);
+
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
+    let output = event
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("tool_result error output");
+    assert!(
+        output.contains(&tool_name) && output.contains("not available"),
+        "tool_result error should name the unavailable tool:\n{output}"
+    );
+}
+
+#[then("CodeWhale should send the tool error back to the mocked LLM")]
+fn codewhale_should_send_tool_error_back_to_mocked_llm(world: &mut ToolLifecycleWorld) {
+    let request = world
+        .requests
+        .iter()
+        .find(|request| request_contains_tool_result(request))
+        .expect("expected a follow-up chat request containing the tool error");
+    let tool_result = tool_result_message(request).expect("tool result message");
+    assert_eq!(
+        tool_result
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str),
+        Some(TOOL_CALL_ID)
+    );
+
+    let content = tool_result
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .expect("tool result content");
+    let tool_name = world.tool_name.as_deref().expect("tool name");
+    assert!(
+        content.contains(tool_name) && content.contains("not available"),
+        "tool error sent to LLM should describe the unavailable tool:\n{content}"
+    );
+}
+
 #[then("the public tool lifecycle should show a completed tool:")]
 fn public_tool_lifecycle_should_show_completed_tool(world: &mut ToolLifecycleWorld, step: &Step) {
     let expected = one_table_row(step);
@@ -200,6 +251,22 @@ fn public_tool_lifecycle_should_show_completed_tool(world: &mut ToolLifecycleWor
 
     let event = tool_result_event(world);
     assert_eq!(event.get("status").and_then(Value::as_str), Some("success"));
+
+    let tool_use = tool_use_event(world, &row_value(&expected, "tool"));
+    assert_eq!(
+        tool_use.get("input").and_then(|input| input.get("path")),
+        Some(&json!(row_value(&expected, "input")))
+    );
+}
+
+#[then("the public tool lifecycle should show a failed tool:")]
+fn public_tool_lifecycle_should_show_failed_tool(world: &mut ToolLifecycleWorld, step: &Step) {
+    let expected = one_table_row(step);
+    assert_eq!(row_value(&expected, "status"), "error");
+    assert_eq!(row_value(&expected, "marker"), "[!]");
+
+    let event = tool_result_event(world);
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
 
     let tool_use = tool_use_event(world, &row_value(&expected, "tool"));
     assert_eq!(
@@ -226,10 +293,15 @@ fn public_output_should_include(world: &mut ToolLifecycleWorld, expected: String
 
 #[tokio::test(flavor = "current_thread")]
 async fn happy_path_lists_current_directory_through_tool() {
-    run_scenario(HAPPY_PATH_SCENARIO).await;
+    run_scenario(HAPPY_PATH_SCENARIO, 10).await;
 }
 
-async fn run_scenario(name: &'static str) {
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_tool_returns_error_result() {
+    run_scenario(UNKNOWN_TOOL_SCENARIO, 10).await;
+}
+
+async fn run_scenario(name: &'static str, expected_steps: usize) {
     let writer = ToolLifecycleWorld::cucumber()
         .fail_on_skipped()
         .with_default_cli()
@@ -239,7 +311,11 @@ async fn run_scenario(name: &'static str) {
         .await;
     assert_eq!(writer.failed_steps(), 0, "scenario failed: {name}");
     assert_eq!(writer.skipped_steps(), 0, "scenario skipped steps: {name}");
-    assert_eq!(writer.passed_steps(), 10, "scenario did not run: {name}");
+    assert_eq!(
+        writer.passed_steps(),
+        expected_steps,
+        "scenario did not run: {name}"
+    );
 }
 
 async fn start_mock_llm(world: &ToolLifecycleWorld) -> MockServer {
