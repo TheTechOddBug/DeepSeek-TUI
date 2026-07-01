@@ -324,6 +324,8 @@
   "SetupCheckpointDoneBundled": "宪法检查点已完成：使用内置/默认准则。",
   "SetupCheckpointDoneGuided": "已保存引导式用户全局宪法，并完成检查点。",
   "SetupCheckpointDeferred": "宪法检查点已稍后处理：在返回 /setup 前使用内置/默认准则。",
+  "SetupStepSkipped": "已保存跳过此设置步骤。",
+  "SetupStepRetryRecorded": "已标记此设置步骤待重试。",
   "SetupConstitutionChoiceLabel": "选择：",
   "SetupConstitutionSourceLabel": "来源：",
   "SetupConstitutionValidityLabel": "有效性：",

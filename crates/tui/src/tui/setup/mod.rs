@@ -334,12 +334,32 @@ impl SetupWizardView {
         self.selected = self.selected.saturating_sub(1);
     }
 
-    fn mark_selected(&mut self, status: StepStatus) {
+    fn commit_selected_status(
+        &mut self,
+        status: StepStatus,
+        message_id: MessageId,
+        advance: bool,
+    ) -> ViewAction {
         let spec = self.selected_spec();
-        self.state.set_step(
-            spec.id(),
-            StepEntry::new(status, spec.required(), CONSTITUTION_CHECKPOINT_VERSION),
-        );
+        let result = match status {
+            StepStatus::Skipped => Some("skipped by user"),
+            StepStatus::NeedsAction => Some("retry requested; needs action"),
+            _ => None,
+        };
+        let mut entry = StepEntry::new(status, spec.required(), CONSTITUTION_CHECKPOINT_VERSION);
+        if let Some(result) = result {
+            entry = entry.with_result(result);
+        }
+        let mut state = self.state.clone();
+        state.set_step(spec.id(), entry);
+        self.state = state.clone();
+        if advance {
+            self.move_next();
+        }
+        ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
+            state,
+            message: tr(self.locale, message_id).to_string(),
+        })
     }
 
     fn commit_provider_model_review(&mut self) -> ViewAction {
@@ -503,14 +523,13 @@ impl ModalView for SetupWizardView {
                 ViewAction::None
             }
             KeyCode::Char('s') => {
-                self.mark_selected(StepStatus::Skipped);
-                self.move_next();
-                ViewAction::None
+                self.commit_selected_status(StepStatus::Skipped, MessageId::SetupStepSkipped, true)
             }
-            KeyCode::Char('r') => {
-                self.mark_selected(StepStatus::NeedsAction);
-                ViewAction::None
-            }
+            KeyCode::Char('r') => self.commit_selected_status(
+                StepStatus::NeedsAction,
+                MessageId::SetupStepRetryRecorded,
+                false,
+            ),
             KeyCode::Char('g') if self.selected_step() == SetupStep::Constitution => {
                 self.commit_guided_constitution()
             }
@@ -1049,25 +1068,30 @@ mod tests {
     }
 
     #[test]
-    fn skip_and_retry_update_staged_state_without_committing() {
+    fn skip_and_retry_emit_setup_state_commits() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
 
         let action = view.handle_key(key(KeyCode::Char('s')));
 
-        assert!(matches!(action, ViewAction::None));
-        assert_eq!(
-            view.state().status(SetupStep::Constitution),
-            StepStatus::Skipped
-        );
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected skipped setup-state commit event");
+        };
+        assert_eq!(state.status(SetupStep::Constitution), StepStatus::Skipped);
+        assert!(message.contains("skipped"));
         assert_eq!(view.selected_step(), SetupStep::Verification);
 
         let action = view.handle_key(key(KeyCode::Char('r')));
 
-        assert!(matches!(action, ViewAction::None));
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected retry setup-state commit event");
+        };
         assert_eq!(
-            view.state().status(SetupStep::Verification),
+            state.status(SetupStep::Verification),
             StepStatus::NeedsAction
         );
+        assert!(message.contains("retry"));
     }
 
     #[test]

@@ -334,6 +334,8 @@
     "SetupCheckpointDoneBundled": "Constitution checkpoint complete: using bundled/default law.",
     "SetupCheckpointDoneGuided": "Guided user-global constitution saved and checkpoint complete.",
     "SetupCheckpointDeferred": "Constitution checkpoint deferred: bundled/default law applies until you return to /setup.",
+    "SetupStepSkipped": "Setup step skipped and saved.",
+    "SetupStepRetryRecorded": "Setup step marked for retry.",
     "SetupConstitutionChoiceLabel": "Choice:",
     "SetupConstitutionSourceLabel": "Source:",
     "SetupConstitutionValidityLabel": "Validity:",
