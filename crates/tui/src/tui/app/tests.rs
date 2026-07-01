@@ -44,9 +44,14 @@ fn create_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> std::
 }
 
 #[test]
-fn feature_intro_content_mentions_features_and_disable_paths() {
+fn feature_intro_content_centers_constitution_follow_up() {
     let content = App::feature_intro_content();
-    assert!(content.contains("Hotbar"));
+    assert!(content.contains("Your CodeWhale setup is ready."));
+    assert!(content.contains("Constitution"));
+    assert!(content.contains("/constitution"));
+    assert!(content.contains("/setup"));
+    assert!(content.contains("/provider") && content.contains("/model"));
+    assert!(content.contains("Optional later"));
     assert!(content.contains("/hotbar") && content.contains("/hotbar off"));
     assert!(content.contains("Fleet") && content.contains("/fleet setup"));
 }

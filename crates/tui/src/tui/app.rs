@@ -2873,7 +2873,7 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Show the one-time Fleet + Hotbar introduction nudge. Idempotent and
+    /// Show the one-time first-run follow-up nudge. Idempotent and
     /// gated by a persisted `Settings::feature_intro_shown` flag, so it appears
     /// exactly once per install: after first-run setup handoff when no
     /// constitution checkpoint is due, and on the next launch for returning
@@ -2899,13 +2899,15 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// The one-time Fleet + Hotbar introduction copy. Plain language, no
+    /// The one-time first-run follow-up copy. Plain language, no
     /// marketing. Pure so it can be unit-tested without touching disk or env.
     pub(crate) fn feature_intro_content() -> String {
-        let alt = crate::tui::widgets::key_hint::alt_prefix();
-        format!(
-            "A couple of things you can set up any time:\n\n• Hotbar — {alt}1-8 shortcuts for common actions. Run `/hotbar` to customize, or `/hotbar off` to hide it.\n• Fleet — a durable team of sub-agents for parallel work. Run `/fleet setup` to configure a loadout.\n\nThis tip won't show again."
-        )
+        "Your CodeWhale setup is ready.\n\n\
+         • Constitution — review or personalize standing guidance with `/constitution`; run `/setup` for the full checkpoint any time.\n\
+         • Provider and model — adjust the active route later with `/provider` or `/model`.\n\
+         • Optional later — use `/hotbar` for Hotbar shortcuts (`/hotbar off` hides it) and `/fleet setup` for Fleet loadouts.\n\n\
+         This tip won't show again."
+            .to_string()
     }
 
     /// Apply a locale tag selected from the onboarding language picker (#566).
