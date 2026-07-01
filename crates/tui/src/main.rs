@@ -3850,6 +3850,24 @@ fn print_doctor_setup_report(
         "  · runtime posture: {}",
         doctor_runtime_posture_line(config, workspace)
     );
+    let consistency = doctor_setup_consistency(state, source);
+    if consistency["status"] == "inconsistent" {
+        let issues = consistency["issues"]
+            .as_array()
+            .map(|issues| {
+                issues
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        println!(
+            "  {} consistency: half-applied setup detected ({issues}) — {}",
+            "!".truecolor(warn_rgb.0, warn_rgb.1, warn_rgb.2),
+            consistency["repair"].as_str().unwrap_or("/setup"),
+        );
+    }
     println!(
         "  · next actions: /constitution (standing law), /setup report (readiness), /provider or /model (route), /config (runtime posture)"
     );
@@ -3871,6 +3889,68 @@ fn print_doctor_setup_report(
 
 fn doctor_ready_label(ready: bool) -> &'static str {
     if ready { "ready" } else { "needs action" }
+}
+
+/// Detect half-applied setup persistence (#3410).
+///
+/// The setup transaction writes `constitution.json` and `setup_state.json`
+/// together, so a persisted state that points at a user-global constitution
+/// which is missing or unusable on disk means a write was interrupted or a
+/// file was removed out-of-band. Stale `.tmp*` files in `$CODEWHALE_HOME`
+/// are the other fingerprint of an interrupted atomic write.
+fn doctor_setup_consistency(
+    state: &codewhale_config::SetupState,
+    source: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let mut issues: Vec<&'static str> = Vec::new();
+
+    if source == "persisted"
+        && matches!(
+            state.constitution_source,
+            codewhale_config::ConstitutionSource::UserGlobal
+        )
+    {
+        match codewhale_config::UserConstitution::load() {
+            Ok(codewhale_config::UserConstitutionLoad::Missing) => {
+                issues.push("setup_state_points_at_missing_user_constitution");
+            }
+            Ok(codewhale_config::UserConstitutionLoad::Empty) => {
+                issues.push("user_constitution_empty");
+            }
+            Ok(codewhale_config::UserConstitutionLoad::Invalid(_)) => {
+                issues.push("user_constitution_invalid");
+            }
+            Ok(codewhale_config::UserConstitutionLoad::Unreadable(_)) | Err(_) => {
+                issues.push("user_constitution_unreadable");
+            }
+            Ok(codewhale_config::UserConstitutionLoad::Loaded(_)) => {}
+        }
+    }
+
+    if doctor_home_has_stale_setup_temp_files() {
+        issues.push("stale_setup_temp_files_in_codewhale_home");
+    }
+
+    json!({
+        "status": if issues.is_empty() { "consistent" } else { "inconsistent" },
+        "issues": issues,
+        "repair": "/constitution to rebuild standing law, /setup to re-run the checkpoint",
+    })
+}
+
+fn doctor_home_has_stale_setup_temp_files() -> bool {
+    let Ok(home) = codewhale_config::codewhale_home() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&home) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_name().to_string_lossy().starts_with(".tmp")
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+    })
 }
 
 fn doctor_constitution_autonomy_preference() -> codewhale_config::AutonomyPreference {
@@ -4035,6 +4115,7 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
                 "source": "workspace",
             },
         },
+        "consistency": doctor_setup_consistency(&state, source),
         "next_actions": {
             "constitution": "/constitution",
             "setup_report": "/setup report",
@@ -8100,6 +8181,75 @@ mod doctor_setup_state_tests {
             .iter()
             .find(|step| step["step"] == "provider_model")
             .expect("provider/model step")
+    }
+
+    #[test]
+    fn doctor_setup_consistency_flags_missing_user_constitution() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().expect("tempdir");
+        let (_home_guard, _codewhale_home) = prepare_env(&tmp);
+        let _key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+        let _source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let mut state = codewhale_config::SetupState::default();
+        state.constitution_source = codewhale_config::ConstitutionSource::UserGlobal;
+        state.save().expect("persist setup state");
+
+        let report = doctor_setup_report_json(&Config::default(), &workspace);
+
+        assert_eq!(report["source"], "persisted");
+        assert_eq!(report["consistency"]["status"], "inconsistent");
+        let issues = report["consistency"]["issues"].to_string();
+        assert!(
+            issues.contains("setup_state_points_at_missing_user_constitution"),
+            "{issues}"
+        );
+    }
+
+    #[test]
+    fn doctor_setup_consistency_flags_stale_temp_files() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().expect("tempdir");
+        let (_home_guard, codewhale_home) = prepare_env(&tmp);
+        let _key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+        let _source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(codewhale_home.join(".tmpAbC123"), b"orphaned atomic write")
+            .expect("stale temp file");
+
+        let report = doctor_setup_report_json(&Config::default(), &workspace);
+
+        assert_eq!(report["consistency"]["status"], "inconsistent");
+        let issues = report["consistency"]["issues"].to_string();
+        assert!(
+            issues.contains("stale_setup_temp_files_in_codewhale_home"),
+            "{issues}"
+        );
+    }
+
+    #[test]
+    fn doctor_setup_consistency_reports_consistent_for_clean_home() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().expect("tempdir");
+        let (_home_guard, _codewhale_home) = prepare_env(&tmp);
+        let _key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+        let _source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let report = doctor_setup_report_json(&Config::default(), &workspace);
+
+        assert_eq!(report["consistency"]["status"], "consistent");
+        assert_eq!(
+            report["consistency"]["issues"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default(),
+            0
+        );
     }
 
     #[test]
