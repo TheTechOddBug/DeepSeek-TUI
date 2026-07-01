@@ -2819,6 +2819,8 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
 
     let (setup_state, setup_source) = doctor_setup_state(config, workspace);
     print_doctor_setup_report(
+        config,
+        workspace,
         &setup_state,
         setup_source,
         (aqua_r, aqua_g, aqua_b),
@@ -3806,6 +3808,8 @@ fn doctor_has_credentials_or_local_runtime(config: &Config) -> bool {
 }
 
 fn print_doctor_setup_report(
+    config: &Config,
+    workspace: &Path,
     state: &codewhale_config::SetupState,
     source: &str,
     ok_rgb: (u8, u8, u8),
@@ -3839,6 +3843,14 @@ fn print_doctor_setup_report(
         doctor_ready_label(update_ready)
     );
     println!(
+        "  · constitution autonomy: {} (guidance only)",
+        doctor_constitution_autonomy_preference_id()
+    );
+    println!(
+        "  · runtime posture: {}",
+        doctor_runtime_posture_line(config, workspace)
+    );
+    println!(
         "  · next actions: /constitution (standing law), /setup report (readiness), /provider or /model (route), /config (runtime posture)"
     );
     for step in codewhale_config::SetupStep::ALL {
@@ -3861,10 +3873,109 @@ fn doctor_ready_label(ready: bool) -> &'static str {
     if ready { "ready" } else { "needs action" }
 }
 
+fn doctor_constitution_autonomy_preference() -> codewhale_config::AutonomyPreference {
+    codewhale_config::UserConstitution::load()
+        .ok()
+        .and_then(|load| {
+            load.constitution()
+                .map(|constitution| constitution.autonomy_preference)
+        })
+        .unwrap_or(codewhale_config::AutonomyPreference::Unspecified)
+}
+
+fn doctor_constitution_autonomy_preference_id() -> &'static str {
+    autonomy_preference_id(doctor_constitution_autonomy_preference())
+}
+
+fn autonomy_preference_id(preference: codewhale_config::AutonomyPreference) -> &'static str {
+    match preference {
+        codewhale_config::AutonomyPreference::Unspecified => "unspecified",
+        codewhale_config::AutonomyPreference::Cautious => "cautious",
+        codewhale_config::AutonomyPreference::Balanced => "balanced",
+        codewhale_config::AutonomyPreference::Autonomous => "autonomous",
+    }
+}
+
+fn doctor_runtime_default_mode() -> (String, &'static str) {
+    match crate::settings::Settings::load() {
+        Ok(settings) => (settings.default_mode, "settings"),
+        Err(_) => (crate::settings::Settings::default().default_mode, "default"),
+    }
+}
+
+fn doctor_runtime_posture_line(config: &Config, workspace: &Path) -> String {
+    let (default_mode, default_mode_source) = doctor_runtime_default_mode();
+    let approval = config.approval_policy.as_deref().unwrap_or("on-request");
+    let approval_source = if config.approval_policy.is_some() {
+        "config"
+    } else {
+        "default"
+    };
+    let allow_shell = config.interactive_allow_shell();
+    let allow_shell_source = if config.allow_shell.is_some() {
+        "config"
+    } else {
+        "interactive default"
+    };
+    let sandbox = config.sandbox_mode.as_deref().unwrap_or("mode-derived");
+    let sandbox_source = if config.sandbox_mode.is_some() {
+        "config"
+    } else {
+        "default"
+    };
+    let network = config
+        .network
+        .as_ref()
+        .map_or("prompt", |policy| policy.default.as_str());
+    let network_source = if config.network.is_some() {
+        "config"
+    } else {
+        "default"
+    };
+    let trust = if crate::tui::onboarding::needs_trust(workspace) {
+        "workspace not elevated"
+    } else {
+        "workspace trusted"
+    };
+
+    format!(
+        "default_mode={default_mode} ({default_mode_source}), approval_policy={approval} ({approval_source}), allow_shell={allow_shell} ({allow_shell_source}), sandbox={sandbox} ({sandbox_source}), network.default={network} ({network_source}), trust={trust}"
+    )
+}
+
 fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Value {
     use serde_json::json;
 
     let (state, source) = doctor_setup_state(config, workspace);
+    let (default_mode, default_mode_source) = doctor_runtime_default_mode();
+    let approval_policy = config.approval_policy.as_deref().unwrap_or("on-request");
+    let approval_policy_source = if config.approval_policy.is_some() {
+        "config"
+    } else {
+        "default"
+    };
+    let allow_shell = config.interactive_allow_shell();
+    let allow_shell_source = if config.allow_shell.is_some() {
+        "config"
+    } else {
+        "interactive_default"
+    };
+    let sandbox_mode = config.sandbox_mode.as_deref().unwrap_or("mode-derived");
+    let sandbox_mode_source = if config.sandbox_mode.is_some() {
+        "config"
+    } else {
+        "default"
+    };
+    let network_default = config
+        .network
+        .as_ref()
+        .map_or("prompt", |policy| policy.default.as_str());
+    let network_source = if config.network.is_some() {
+        "config"
+    } else {
+        "default"
+    };
+    let workspace_trusted = !crate::tui::onboarding::needs_trust(workspace);
     let steps: Vec<_> = codewhale_config::SetupStep::ALL
         .into_iter()
         .map(|step| {
@@ -3894,8 +4005,36 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
             "language": state.constitution_language.clone(),
             "preview_hash_present": state.constitution_preview_hash.is_some(),
             "preview_version": state.constitution_preview_version,
+            "autonomy_preference": doctor_constitution_autonomy_preference_id(),
         },
         "runtime_posture_source": runtime_posture_source_id(state.runtime_posture_source),
+        "runtime_posture": {
+            "source": runtime_posture_source_id(state.runtime_posture_source),
+            "default_mode": {
+                "value": default_mode,
+                "source": default_mode_source,
+            },
+            "approval_policy": {
+                "value": approval_policy,
+                "source": approval_policy_source,
+            },
+            "allow_shell": {
+                "value": allow_shell,
+                "source": allow_shell_source,
+            },
+            "sandbox_mode": {
+                "value": sandbox_mode,
+                "source": sandbox_mode_source,
+            },
+            "network_default": {
+                "value": network_default,
+                "source": network_source,
+            },
+            "workspace_trust": {
+                "trusted": workspace_trusted,
+                "source": "workspace",
+            },
+        },
         "next_actions": {
             "constitution": "/constitution",
             "setup_report": "/setup report",
@@ -7990,6 +8129,22 @@ mod doctor_setup_state_tests {
         );
         assert_eq!(report["update_ready"], false);
         assert_eq!(report["constitution"]["source"], "bundled");
+        assert_eq!(report["constitution"]["autonomy_preference"], "unspecified");
+        assert_eq!(report["runtime_posture"]["source"], "unset");
+        assert_eq!(report["runtime_posture"]["default_mode"]["value"], "agent");
+        assert_eq!(
+            report["runtime_posture"]["approval_policy"]["value"],
+            "on-request"
+        );
+        assert_eq!(report["runtime_posture"]["allow_shell"]["value"], true);
+        assert_eq!(
+            report["runtime_posture"]["sandbox_mode"]["value"],
+            "mode-derived"
+        );
+        assert_eq!(
+            report["runtime_posture"]["network_default"]["value"],
+            "prompt"
+        );
         assert_eq!(provider_step(&report)["status"], "needs_action");
     }
 
@@ -8041,8 +8196,24 @@ mod doctor_setup_state_tests {
             );
         state.runtime_posture_source = codewhale_config::RuntimePostureSource::Confirmed;
         state.save().expect("persist setup state");
+        codewhale_config::UserConstitution {
+            autonomy_preference: codewhale_config::AutonomyPreference::Balanced,
+            ..Default::default()
+        }
+        .save()
+        .expect("persist user constitution");
+        let config = Config {
+            approval_policy: Some("never".to_string()),
+            allow_shell: Some(false),
+            sandbox_mode: Some("read-only".to_string()),
+            network: Some(crate::config::NetworkPolicyToml {
+                default: "deny".to_string(),
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
 
-        let report = doctor_setup_report_json(&Config::default(), &workspace);
+        let report = doctor_setup_report_json(&config, &workspace);
 
         assert_eq!(report["source"], "persisted");
         assert_eq!(report["first_run_ready"], true);
@@ -8052,7 +8223,35 @@ mod doctor_setup_state_tests {
             report["constitution"]["checkpoint_completed_for"],
             crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION
         );
+        assert_eq!(report["constitution"]["autonomy_preference"], "balanced");
         assert_eq!(report["runtime_posture_source"], "confirmed");
+        assert_eq!(report["runtime_posture"]["source"], "confirmed");
+        assert_eq!(
+            report["runtime_posture"]["approval_policy"]["value"],
+            "never"
+        );
+        assert_eq!(
+            report["runtime_posture"]["approval_policy"]["source"],
+            "config"
+        );
+        assert_eq!(report["runtime_posture"]["allow_shell"]["value"], false);
+        assert_eq!(report["runtime_posture"]["allow_shell"]["source"], "config");
+        assert_eq!(
+            report["runtime_posture"]["sandbox_mode"]["value"],
+            "read-only"
+        );
+        assert_eq!(
+            report["runtime_posture"]["sandbox_mode"]["source"],
+            "config"
+        );
+        assert_eq!(
+            report["runtime_posture"]["network_default"]["value"],
+            "deny"
+        );
+        assert_eq!(
+            report["runtime_posture"]["network_default"]["source"],
+            "config"
+        );
         assert_eq!(provider_step(&report)["result"], "deepseek/deepseek-chat");
     }
 }

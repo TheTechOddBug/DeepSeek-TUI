@@ -364,6 +364,8 @@
   "SetupReportFirstRunLabel": "首次运行：",
   "SetupReportUpdateLabel": "更新检查点：",
   "SetupReportSourceLabel": "来源：",
+  "SetupReportAutonomyLabel": "宪法主动性：",
+  "SetupReportRuntimePostureLabel": "运行时姿态：",
   "SetupReportPersisted": "已持久化的 setup_state.json",
   "SetupReportInherited": "从现有配置推导",
   "SetupReportReady": "就绪",

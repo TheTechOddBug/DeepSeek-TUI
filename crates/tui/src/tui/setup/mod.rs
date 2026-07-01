@@ -154,6 +154,7 @@ struct SetupRuntimeFacts {
     sandbox: String,
     network: String,
     runtime_result: String,
+    constitution_autonomy: String,
     constitution_file: SetupConstitutionFileState,
 }
 
@@ -173,6 +174,7 @@ impl Default for SetupRuntimeFacts {
             sandbox: "not configured".to_string(),
             network: "not configured".to_string(),
             runtime_result: "runtime posture not loaded".to_string(),
+            constitution_autonomy: "not loaded".to_string(),
             constitution_file: SetupConstitutionFileState::NotChecked,
         }
     }
@@ -241,6 +243,17 @@ impl SetupRuntimeFacts {
             sandbox,
             network
         );
+        let constitution_autonomy = UserConstitution::load()
+            .ok()
+            .and_then(|load| {
+                load.constitution().map(|constitution| {
+                    autonomy_label(constitution.autonomy_preference, app.ui_locale).to_string()
+                })
+            })
+            .unwrap_or_else(|| match app.ui_locale {
+                Locale::ZhHans => "未指定或使用内置准则".to_string(),
+                _ => "unspecified or bundled/default".to_string(),
+            });
         Self {
             provider,
             model,
@@ -255,6 +268,7 @@ impl SetupRuntimeFacts {
             sandbox,
             network,
             runtime_result,
+            constitution_autonomy,
             constitution_file: SetupConstitutionFileState::load(),
         }
     }
@@ -937,7 +951,7 @@ impl SetupWizardView {
         state.set_step(
             SetupStep::Verification,
             StepEntry::new(status, false, CONSTITUTION_CHECKPOINT_VERSION)
-                .with_result(setup_report_result(&state)),
+                .with_result(setup_report_result(&state, &self.facts)),
         );
         self.state = state.clone();
         ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
@@ -1381,6 +1395,14 @@ impl SetupWizardView {
                 MessageId::SetupReportSourceLabel,
                 &self.state_source_label(),
             ),
+            self.detail_row(
+                MessageId::SetupReportAutonomyLabel,
+                &self.facts.constitution_autonomy,
+            ),
+            self.detail_row(
+                MessageId::SetupReportRuntimePostureLabel,
+                &self.facts.runtime_result,
+            ),
             Line::from(""),
             Line::from(Span::styled(
                 tr(self.locale, MessageId::SetupReportRowsLabel).to_string(),
@@ -1506,9 +1528,9 @@ fn setup_report_ready(state: &SetupState) -> bool {
     state.first_run_ready() || state.update_ready(CONSTITUTION_CHECKPOINT_VERSION)
 }
 
-fn setup_report_result(state: &SetupState) -> String {
+fn setup_report_result(state: &SetupState, facts: &SetupRuntimeFacts) -> String {
     format!(
-        "first_run={}, update={}, constitution={:?}, posture={:?}",
+        "first_run={}, update={}, constitution={:?}, autonomy={}, posture={:?}, runtime={}",
         if state.first_run_ready() {
             "ready"
         } else {
@@ -1520,7 +1542,9 @@ fn setup_report_result(state: &SetupState) -> String {
             "needs_action"
         },
         state.constitution_choice,
-        state.runtime_posture_source
+        facts.constitution_autonomy,
+        state.runtime_posture_source,
+        facts.runtime_result
     )
 }
 
@@ -2260,11 +2284,16 @@ mod tests {
 
     #[test]
     fn verification_report_records_needs_action_until_checkpoint_complete() {
+        let facts = SetupRuntimeFacts {
+            constitution_autonomy: "balanced".to_string(),
+            runtime_result: "intent=agent, approval=suggest".to_string(),
+            ..SetupRuntimeFacts::default()
+        };
         let mut view = SetupWizardView::new_at_with_facts(
             SetupState::default(),
             Locale::En,
             SetupStep::Verification,
-            SetupRuntimeFacts::default(),
+            facts,
         );
 
         let action = view.handle_key(key(KeyCode::Enter));
@@ -2282,7 +2311,11 @@ mod tests {
                 .steps
                 .get(&SetupStep::Verification)
                 .and_then(|entry| entry.result.as_deref())
-                .is_some_and(|result| result.contains("update=needs_action"))
+                .is_some_and(|result| {
+                    result.contains("update=needs_action")
+                        && result.contains("autonomy=balanced")
+                        && result.contains("runtime=intent=agent, approval=suggest")
+                })
         );
         assert!(message.contains("Setup report recorded"));
     }
@@ -2318,17 +2351,26 @@ mod tests {
 
     #[test]
     fn verification_detail_lines_show_next_action() {
+        let facts = SetupRuntimeFacts {
+            constitution_autonomy: "balanced".to_string(),
+            runtime_result: "intent=agent, approval=suggest".to_string(),
+            ..SetupRuntimeFacts::default()
+        };
         let view = SetupWizardView::new_at_with_facts(
             SetupState::default(),
             Locale::En,
             SetupStep::Verification,
-            SetupRuntimeFacts::default(),
+            facts,
         );
 
         let text = lines_to_text(view.verification_detail_lines());
 
         assert!(text.contains("First-run:"));
         assert!(text.contains("Update checkpoint:"));
+        assert!(text.contains("Constitution autonomy:"));
+        assert!(text.contains("balanced"));
+        assert!(text.contains("Runtime posture:"));
+        assert!(text.contains("intent=agent, approval=suggest"));
         assert!(text.contains("Complete the constitution checkpoint"));
     }
 

@@ -374,6 +374,8 @@
     "SetupReportFirstRunLabel": "First-run:",
     "SetupReportUpdateLabel": "Update checkpoint:",
     "SetupReportSourceLabel": "Source:",
+    "SetupReportAutonomyLabel": "Constitution autonomy:",
+    "SetupReportRuntimePostureLabel": "Runtime posture:",
     "SetupReportPersisted": "persisted setup_state.json",
     "SetupReportInherited": "derived from existing config",
     "SetupReportReady": "ready",
