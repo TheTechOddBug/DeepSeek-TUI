@@ -2943,6 +2943,26 @@ impl ConfigStore {
         })
     }
 
+    /// Render the exact body [`save`](Self::save) would write: the serialized
+    /// config with comments and disabled keys from the originally-loaded file
+    /// merged back in. Exposed so setup flows can stage this body into a
+    /// [`persistence::SetupTransaction`] alongside sibling files and keep the
+    /// comment-preserving write atomic with the rest of the transaction.
+    pub fn rendered_body(&self) -> Result<String> {
+        let serialized =
+            toml::to_string_pretty(&self.config).context("failed to serialize config")?;
+        if let Some(ref original_raw) = self.original_raw {
+            Ok(
+                merge_and_preserve_comments(&serialized, original_raw).unwrap_or_else(|e| {
+                    tracing::warn!("failed to merge config comments, saving without them: {e:#}");
+                    serialized
+                }),
+            )
+        } else {
+            Ok(serialized)
+        }
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = normalize_config_file_path(self.path.clone())?;
         if let Some(parent) = path.parent() {
@@ -2950,16 +2970,7 @@ impl ConfigStore {
                 format!("failed to create config directory {}", parent.display())
             })?;
         }
-        let body = if let Some(ref original_raw) = self.original_raw {
-            let serialized =
-                toml::to_string_pretty(&self.config).context("failed to serialize config")?;
-            merge_and_preserve_comments(&serialized, original_raw).unwrap_or_else(|e| {
-                tracing::warn!("failed to merge config comments, saving without them: {e:#}");
-                serialized
-            })
-        } else {
-            toml::to_string_pretty(&self.config).context("failed to serialize config")?
-        };
+        let body = self.rendered_body()?;
         if checked_path_exists(&path)? {
             let existing = read_checked_config_file(&path)?;
             if existing == body {
