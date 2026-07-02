@@ -1972,6 +1972,16 @@ async fn run_event_loop(
             deliver_fleet_draft_result(app, model_label, outcome, app.ui_locale);
         }
 
+        // Poll the constitution model-draft cell (same background pattern).
+        let constitution_draft_delivery = app
+            .constitution_draft_cell
+            .try_lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some((model_label, draft_locale, outcome)) = constitution_draft_delivery {
+            deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
+        }
+
         // First, poll for engine events (non-blocking)
         let mut received_engine_event = false;
         let mut transcript_batch_updated = false;
@@ -5423,33 +5433,72 @@ async fn handle_setup_constitution_model_draft(
     draft: crate::tui::setup::GuidedConstitutionDraft,
     locale: crate::localization::Locale,
 ) {
+    // Spawn the draft off the event loop (same pattern as the fleet drafter,
+    // #3757 review): awaiting it inline parked the whole TUI for up to the
+    // timeout. The loop polls constitution_draft_cell and delivers the result.
     const DRAFT_TIMEOUT: Duration = Duration::from_secs(20);
     let model_label = app.model_display_label();
-    let outcome = match DeepSeekClient::new(config) {
-        Err(err) => Err(format!("provider not ready: {err:#}")),
-        Ok(client) => {
-            let request_model = app.model.clone();
-            match tokio::time::timeout(
-                DRAFT_TIMEOUT,
-                crate::tui::setup::draft_constitution_with_model(
-                    &client,
-                    &request_model,
-                    draft,
-                    locale,
-                ),
-            )
-            .await
-            {
-                Err(_) => Err(format!("timed out after {}s", DRAFT_TIMEOUT.as_secs())),
-                Ok(result) => result,
-            }
+    let client = match DeepSeekClient::new(config) {
+        Ok(client) => client,
+        Err(err) => {
+            deliver_constitution_draft_result(
+                app,
+                model_label.clone(),
+                locale,
+                Err(format!("provider not ready: {err:#}")),
+            );
+            return;
         }
     };
+    let request_model = app.model.clone();
+    let cell = app.constitution_draft_cell.clone();
+    let spawn_label = model_label.clone();
+    app.status_message = Some(match locale {
+        crate::localization::Locale::ZhHans => {
+            format!(
+                "{model_label} 正在起草宪法……（最多 {}s）",
+                DRAFT_TIMEOUT.as_secs()
+            )
+        }
+        _ => format!(
+            "{model_label} is drafting your constitution… (up to {}s)",
+            DRAFT_TIMEOUT.as_secs()
+        ),
+    });
+    app.needs_redraw = true;
+    tokio::spawn(async move {
+        let outcome = match tokio::time::timeout(
+            DRAFT_TIMEOUT,
+            crate::tui::setup::draft_constitution_with_model(
+                &client,
+                &request_model,
+                draft,
+                locale,
+            ),
+        )
+        .await
+        {
+            Err(_) => Err(format!("timed out after {}s", DRAFT_TIMEOUT.as_secs())),
+            Ok(result) => result,
+        };
+        if let Ok(mut guard) = cell.lock() {
+            *guard = Some((spawn_label, locale, outcome));
+        }
+    });
+}
+
+/// Install a completed constitution draft into the setup wizard (if still on
+/// top) and open its ratification preview, or surface a failure. Called from
+/// the event loop when the background draft lands, and directly on the
+/// pre-spawn provider-construction failure.
+fn deliver_constitution_draft_result(
+    app: &mut App,
+    model_label: String,
+    locale: crate::localization::Locale,
+    outcome: Result<Box<codewhale_config::UserConstitution>, String>,
+) {
     match outcome {
         Ok(constitution) => {
-            // The wizard emitted this event with `Emit` (no close), so it
-            // should still be on top; if the user closed it mid-flight the
-            // draft is simply dropped — never installed, never saved.
             if app.view_stack.top_kind() == Some(ModalKind::SetupWizard)
                 && let Some(mut boxed) = app.view_stack.pop()
             {
@@ -5475,8 +5524,8 @@ async fn handle_setup_constitution_model_draft(
             ));
         }
     }
+    app.needs_redraw = true;
 }
-
 /// One-shot fleet-profile draft: same contract as the constitution drafter —
 /// minimal payload out, untrusted gate in, preview before ratify, degrade to
 /// the manual authoring flow on any failure.

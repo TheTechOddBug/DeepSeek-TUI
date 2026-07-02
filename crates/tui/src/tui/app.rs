@@ -2026,6 +2026,19 @@ pub struct App {
             )>,
         >,
     >,
+    /// Shared cell for async constitution model-draft delivery (same pattern
+    /// as `fleet_draft_cell`, so the drafting network call never parks the
+    /// event loop).
+    #[allow(clippy::type_complexity)]
+    pub constitution_draft_cell: std::sync::Arc<
+        std::sync::Mutex<
+            Option<(
+                String,
+                crate::localization::Locale,
+                Result<Box<codewhale_config::UserConstitution>, String>,
+            )>,
+        >,
+    >,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -2807,6 +2820,7 @@ impl App {
             cumulative_turn_duration: std::time::Duration::ZERO,
             balance_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            constitution_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             prompt_suggestion_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             balance_initiated: false,
             last_balance_fetch: None,
