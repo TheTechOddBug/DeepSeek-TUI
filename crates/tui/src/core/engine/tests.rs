@@ -5786,6 +5786,59 @@ fn filter_tool_call_delta_strips_fullwidth_dsml_invoke_fixture() {
 }
 
 #[test]
+fn filter_tool_call_delta_strips_ascii_dsml_invoke_fixture() {
+    let mut in_block = false;
+    let visible = filter_tool_call_delta(
+        "visible prefix <|DSML|tool_calls>\n\
+         <|DSML|invoke name=\"read_file\">\n\
+         <|DSML|parameter name=\"path\" string=\"true\">backend/open_webui/utils/auth.py</|DSML|parameter>\n\
+         </|DSML|invoke>\n\
+         </|DSML|tool_calls> visible suffix",
+        &mut in_block,
+    );
+
+    assert!(!in_block);
+    assert_eq!(visible, "visible prefix  visible suffix");
+    assert!(!visible.contains("DSML"));
+    assert!(!visible.contains("read_file"));
+    assert!(!visible.contains("backend/open_webui"));
+}
+
+#[test]
+fn filter_tool_call_delta_carries_split_fullwidth_dsml_marker() {
+    let mut state = ToolCallDeltaFilterState::default();
+
+    let visible_a = filter_tool_call_delta_with_state("visible prefix <｜DS", &mut state);
+    assert_eq!(visible_a, "visible prefix ");
+
+    let visible_b = filter_tool_call_delta_with_state(
+        "ML｜tool_calls>\n<｜DSML｜invoke name=\"read_file\">",
+        &mut state,
+    );
+    assert!(
+        visible_b.is_empty(),
+        "split DSML opener leaked: {visible_b:?}"
+    );
+
+    let visible_c = filter_tool_call_delta_with_state(
+        "</｜DSML｜invoke>\n</｜DSML｜tool_calls> visible suffix",
+        &mut state,
+    );
+    assert_eq!(visible_c, " visible suffix");
+}
+
+#[test]
+fn filter_tool_call_delta_flushes_clean_partial_marker_prefix() {
+    let mut state = ToolCallDeltaFilterState::default();
+
+    let visible = filter_tool_call_delta_with_state("ordinary text ending in <", &mut state);
+    assert_eq!(visible, "ordinary text ending in ");
+
+    let flushed = flush_tool_call_delta_state(&mut state);
+    assert_eq!(flushed, "<");
+}
+
+#[test]
 fn filter_tool_call_delta_handles_chunk_split_marker() {
     let mut in_block = false;
     // First chunk opens the wrapper but does not close it.

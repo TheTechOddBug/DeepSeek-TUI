@@ -685,7 +685,7 @@ impl Engine {
             // tool call except the last one in the batch.
             let mut current_tool_indices: std::collections::HashMap<u32, usize> =
                 std::collections::HashMap::new();
-            let mut in_tool_call_block = false;
+            let mut tool_call_filter = ToolCallDeltaFilterState::default();
             let mut fake_wrapper_notice_emitted = false;
             let mut pending_message_complete = false;
             let mut last_text_index: Option<usize> = None;
@@ -889,9 +889,11 @@ impl Engine {
                         ContentBlockStart::Text { text } => {
                             current_text_raw = text;
                             current_text_visible.clear();
-                            in_tool_call_block = false;
-                            let filtered =
-                                filter_tool_call_delta(&current_text_raw, &mut in_tool_call_block);
+                            tool_call_filter = ToolCallDeltaFilterState::default();
+                            let filtered = filter_tool_call_delta_with_state(
+                                &current_text_raw,
+                                &mut tool_call_filter,
+                            );
                             if !fake_wrapper_notice_emitted
                                 && filtered.len() < current_text_raw.len()
                                 && contains_fake_tool_wrapper(&current_text_raw)
@@ -964,10 +966,11 @@ impl Engine {
                         Delta::TextDelta { text } => {
                             stream_content_bytes = stream_content_bytes.saturating_add(text.len());
                             current_text_raw.push_str(&text);
-                            let filtered = filter_tool_call_delta(&text, &mut in_tool_call_block);
+                            let filtered =
+                                filter_tool_call_delta_with_state(&text, &mut tool_call_filter);
                             if !fake_wrapper_notice_emitted
                                 && filtered.len() < text.len()
-                                && contains_fake_tool_wrapper(&text)
+                                && contains_fake_tool_wrapper(&current_text_raw)
                             {
                                 let _ =
                                     self.tx_event.send(Event::status(FAKE_WRAPPER_NOTICE)).await;
@@ -1029,6 +1032,17 @@ impl Engine {
                         let stopped_kind = current_block_kind.take();
                         match stopped_kind {
                             Some(ContentBlockKind::Text) => {
+                                let flushed = flush_tool_call_delta_state(&mut tool_call_filter);
+                                if !flushed.is_empty() {
+                                    current_text_visible.push_str(&flushed);
+                                    let _ = self
+                                        .tx_event
+                                        .send(Event::MessageDelta {
+                                            index: index as usize,
+                                            content: flushed,
+                                        })
+                                        .await;
+                                }
                                 pending_message_complete = true;
                                 last_text_index = Some(index as usize);
                             }
