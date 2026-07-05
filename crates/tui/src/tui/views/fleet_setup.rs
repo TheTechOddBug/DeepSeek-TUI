@@ -41,6 +41,10 @@ struct Choice {
     description: &'static str,
 }
 
+const CHOICE_LIST_WIDTH: u16 = 22;
+const CHOICE_DETAIL_MIN_WIDTH: u16 = 58;
+const CHOICE_TWO_COLUMN_MIN_WIDTH: u16 = CHOICE_LIST_WIDTH + CHOICE_DETAIL_MIN_WIDTH;
+
 /// Agent-team roles. `label` doubles as the profile `role_hint` and file stem,
 /// so these strings are part of the generated-profile contract.
 const ROLES: [Choice; 8] = [
@@ -703,10 +707,13 @@ fn render_choice_step(
         return;
     }
 
-    let (list_area, detail_area) = if area.width >= 56 {
+    let (list_area, detail_area) = if area.width >= CHOICE_TWO_COLUMN_MIN_WIDTH {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(22), Constraint::Min(20)])
+            .constraints([
+                Constraint::Length(CHOICE_LIST_WIDTH),
+                Constraint::Min(CHOICE_DETAIL_MIN_WIDTH),
+            ])
             .split(area);
         (cols[0], cols[1])
     } else {
@@ -1106,6 +1113,50 @@ mod tests {
         assert!(prompt.contains("model_class_hint (set to \"inherit\""));
         assert!(prompt.contains("Current route context only"));
         assert!(prompt.contains("permission-narrowing"));
+    }
+
+    #[test]
+    fn role_step_keeps_list_and_detail_separate_at_80_columns() {
+        let rows = render_through_stack(|| FleetSetupView::from_snapshot(snapshot()), 80, 24);
+        let text = rows.join("\n");
+
+        let manager_row = rows
+            .iter()
+            .position(|row| row.contains("> manager"))
+            .expect("manager row should render");
+        let custom_row = rows
+            .iter()
+            .position(|row| row.contains("  custom"))
+            .expect("custom row should render");
+        let summary_row = rows
+            .iter()
+            .position(|row| row.contains("Plan & split queued work"))
+            .expect("selected role summary should render");
+        let description_row = rows
+            .iter()
+            .position(|row| row.contains("Coordinates the Fleet run"))
+            .expect("selected role description should render");
+
+        assert!(
+            manager_row < custom_row,
+            "expected the full role list before details:\n{text}"
+        );
+        assert!(
+            custom_row < summary_row,
+            "selected summary must not share a row with role names:\n{text}"
+        );
+        assert!(
+            custom_row < description_row,
+            "selected description must render below the list:\n{text}"
+        );
+        for row in &rows[manager_row..=custom_row] {
+            assert!(
+                !row.contains("Plan & split queued work")
+                    && !row.contains("Coordinates the Fleet run")
+                    && !row.contains("Fleet runs sub-agents"),
+                "role list row contains detail copy at 80 columns: {row:?}\n{text}"
+            );
+        }
     }
 
     fn render_through_stack(view_at: impl Fn() -> FleetSetupView, w: u16, h: u16) -> Vec<String> {
