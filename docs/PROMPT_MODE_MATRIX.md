@@ -19,11 +19,12 @@ contract is:
 
 Runtime anchors:
 
-- `base_policy_for_mode` in `crates/tui/src/tui/app.rs` derives the live
-  permission mirrors for Plan, Agent, and YOLO.
-- `sandbox_policy_for_mode` and `shell_policy_for_mode` in
-  `crates/tui/src/core/engine/tool_setup.rs` keep Plan in a read-only sandbox
-  and remove shell tools from Plan turns.
+- `crates/tui/src/core/authority.rs` derives the live permission mirrors,
+  shell policy, sandbox policy, and provenance narrowing for Plan, Agent, and
+  YOLO. `Act` is accepted as an alias for Agent and still normalizes to
+  `agent` in saved settings.
+- `crates/tui/src/core/engine/tool_setup.rs` consumes that authority policy to
+  keep Plan shell-free and build the per-mode tool registry.
 - `Engine::send_user_shell_command` still rejects `exec_shell` directly when
   the active mode is Plan.
 

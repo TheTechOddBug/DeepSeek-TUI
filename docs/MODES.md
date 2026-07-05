@@ -25,10 +25,11 @@ while a turn is running, or cycle through the visible modes when the composer is
 otherwise idle: **Plan → Agent → YOLO → Plan**.
 Press `Shift+Tab` to cycle reasoning effort.
 Run `/mode` to open the mode picker, or switch directly with `/mode agent`,
-`/mode plan`, `/mode yolo`, `/mode 1`, `/mode 2`, or `/mode 3`.
+`/mode act`, `/mode plan`, `/mode yolo`, `/mode 1`, `/mode 2`, or `/mode 4`.
 
 - **Plan**: design-first prompting. Read-only investigation tools stay available; shell and patch execution stay off. Use this when you want to think out loud and produce a plan to hand to a human (yourself later, or a reviewer).
 - **Agent**: multi-step tool use. In interactive TUI sessions, shell tools (`exec_shell`, `task_shell_start`, `task_shell_wait`) are available by default and approval prompts gate each call. Set top-level `allow_shell = false` to hide shell tools for a workspace/profile. File writes are allowed without a prompt.
+- **Act**: accepted as an alias for Agent mode. Saved settings still normalize to `agent` for backward compatibility.
 - **YOLO**: enables shell + trust mode and auto-approves all tools. Use only in trusted repos.
 
 ### Tool availability by mode

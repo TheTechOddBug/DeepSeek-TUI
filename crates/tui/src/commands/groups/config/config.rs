@@ -1853,7 +1853,7 @@ pub fn mode(app: &mut App, arg: Option<&str>) -> CommandResult {
                 CommandResult::message(message)
             }
         }
-        None => CommandResult::error("Usage: /mode [agent|plan|yolo|1|2|4]"),
+        None => CommandResult::error("Usage: /mode [agent|act|plan|yolo|1|2|4]"),
     }
 }
 
@@ -2535,6 +2535,11 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         assert_eq!(app.mode, AppMode::Agent);
         let result = mode(&mut app, Some("2"));
         assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Plan)));
+        assert_eq!(app.mode, AppMode::Plan);
+        let result = mode(&mut app, Some("act"));
+        assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Agent)));
+        assert_eq!(app.mode, AppMode::Agent);
+        let _ = mode(&mut app, Some("plan"));
         assert_eq!(app.mode, AppMode::Plan);
         let result = mode(&mut app, Some("3"));
         assert!(result.is_error);

@@ -925,7 +925,7 @@ impl AppMode {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "agent" | "auto" | "1" => Some(Self::Agent),
+            "agent" | "act" | "auto" | "1" => Some(Self::Agent),
             "plan" | "2" => Some(Self::Plan),
             "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions" => {
                 Some(Self::Yolo)
