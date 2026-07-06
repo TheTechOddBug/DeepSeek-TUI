@@ -1742,6 +1742,7 @@ impl Engine {
                             messages: self.session.messages.to_vec(),
                             total_tokens,
                             model: self.session.model.clone(),
+                            model_provider: self.api_provider.as_str().to_string(),
                             workspace: self.session.workspace.clone(),
                             system_prompt: self.session.system_prompt.clone(),
                             mode: self.current_mode.as_setting().to_string(),

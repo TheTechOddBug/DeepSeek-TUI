@@ -38,6 +38,7 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
+    session.metadata.model_provider = app.api_provider.as_str().to_string();
     app.sync_cost_to_metadata(&mut session.metadata);
     session.artifacts = app.session_artifacts.clone();
 
@@ -94,6 +95,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
+    parent.metadata.model_provider = app.api_provider.as_str().to_string();
     app.sync_cost_to_metadata(&mut parent.metadata);
     parent.artifacts = app.session_artifacts.clone();
 
@@ -109,6 +111,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
+    forked.metadata.model_provider = app.api_provider.as_str().to_string();
     forked.metadata.copy_cost_from(&parent.metadata);
     forked.metadata.mark_forked_from(&parent.metadata);
 
@@ -238,6 +241,10 @@ pub fn load(app: &mut App, path: Option<&str>) -> CommandResult {
     app.extend_history(cells_to_add);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
+    if let Some(provider) = crate::config::ApiProvider::parse(&session.metadata.model_provider) {
+        app.api_provider = provider;
+        app.reasoning_effort = app.reasoning_effort.normalize_for_provider(provider);
+    }
     app.set_model_selection(session.metadata.model.clone());
     app.update_model_compaction_budget();
     app.workspace.clone_from(&session.metadata.workspace);

@@ -5717,6 +5717,7 @@ fn build_session_snapshot(app: &App, manager: &SessionManager) -> SavedSession {
             app.system_prompt.as_ref(),
         );
         updated.metadata.model = model;
+        updated.metadata.model_provider = app.api_provider.as_str().to_string();
         updated.metadata.mode = Some(app.mode.as_setting().to_string());
         app.sync_cost_to_metadata(&mut updated.metadata);
         updated.context_references = app.session_context_references.clone();
@@ -5743,6 +5744,7 @@ fn build_session_snapshot(app: &App, manager: &SessionManager) -> SavedSession {
                 Some(app.mode.as_setting()),
             )
         };
+        session.metadata.model_provider = app.api_provider.as_str().to_string();
         app.sync_cost_to_metadata(&mut session.metadata);
         session.context_references = app.session_context_references.clone();
         session.artifacts = app.session_artifacts.clone();
@@ -11028,7 +11030,7 @@ fn set_provider_auth_mode_in_memory(config: &mut Config, provider: ApiProvider, 
     entry.auth_mode = Some(auth_mode);
 }
 
-fn apply_loaded_session(app: &mut App, config: &Config, session: &SavedSession) -> bool {
+fn apply_loaded_session(app: &mut App, config: &mut Config, session: &SavedSession) -> bool {
     let (messages, recovered_draft) = recover_interrupted_user_tail(&session.messages);
     app.api_messages = messages;
     app.clear_history();
@@ -11073,7 +11075,12 @@ fn apply_loaded_session(app: &mut App, config: &Config, session: &SavedSession) 
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
+    restore_loaded_session_provider(app, config, &session.metadata.model_provider);
     app.set_model_selection(session.metadata.model.clone());
+    app.provider_models.insert(
+        app.api_provider.as_str().to_string(),
+        app.model_selection_for_persistence(),
+    );
     app.update_model_compaction_budget();
     apply_workspace_runtime_state(app, config, session.metadata.workspace.clone());
     if let Some(mode) = session.metadata.mode.as_deref().and_then(AppMode::parse) {
@@ -11134,6 +11141,27 @@ fn apply_loaded_session(app: &mut App, config: &Config, session: &SavedSession) 
     };
     app.scroll_to_bottom();
     recovered
+}
+
+fn restore_loaded_session_provider(app: &mut App, config: &mut Config, model_provider: &str) {
+    let Some(provider) = ApiProvider::parse(model_provider) else {
+        return;
+    };
+
+    app.api_provider = provider;
+    config.provider = Some(provider.as_str().to_string());
+    app.max_subagents = config
+        .max_subagents_for_provider(provider)
+        .clamp(1, crate::config::MAX_SUBAGENTS);
+    app.provider_chain = provider
+        .kind()
+        .map(|kind| codewhale_config::ProviderChain::new(kind, &config.fallback_providers))
+        .filter(|chain| chain.providers().len() > 1);
+    app.last_fallback_reason = None;
+    app.model_ids_passthrough = config.model_ids_pass_through();
+    app.reasoning_effort = app.reasoning_effort.normalize_for_provider(provider);
+    app.set_active_context_window_override(config.context_window_for_provider_config(provider));
+    app.active_route_limits = app.context_window_override_limits();
 }
 
 /// Derive a short display title from the API message list.

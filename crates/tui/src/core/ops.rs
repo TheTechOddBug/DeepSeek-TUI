@@ -22,6 +22,7 @@ pub struct SessionSnapshot {
     pub messages: Vec<Message>,
     pub total_tokens: u64,
     pub model: String,
+    pub model_provider: String,
     pub workspace: PathBuf,
     pub system_prompt: Option<SystemPrompt>,
     pub mode: String,
