@@ -1834,9 +1834,12 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
     }
 
     let fleet_config = config.fleet_config();
+    // The configured route is the operator: fleet workers without a
+    // task/profile model pin inherit the session's active model.
     let manager = FleetManager::open(workspace)?
         .with_exec_config(fleet_config.exec.clone())
-        .with_fleet_config(fleet_config);
+        .with_fleet_config(fleet_config)
+        .with_session_model(config.default_model());
     match args.command {
         FleetCommand::Init => {
             println!("fleet ledger: {}", manager.ledger_path().display());

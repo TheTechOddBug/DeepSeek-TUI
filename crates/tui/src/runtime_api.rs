@@ -1035,18 +1035,23 @@ async fn stop_fleet_run(
 }
 
 fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError> {
-    let exec_config = state
-        .config
-        .read()
-        .fleet
-        .as_ref()
-        .map(|fleet| fleet.exec.clone())
-        .unwrap_or_default();
+    let (exec_config, session_model) = {
+        let config = state.config.read();
+        let exec_config = config
+            .fleet
+            .as_ref()
+            .map(|fleet| fleet.exec.clone())
+            .unwrap_or_default();
+        // The active session route is the operator: workers without a
+        // task/profile model pin inherit the model the user picked in /model.
+        (exec_config, config.default_model())
+    };
     FleetManager::open(&state.workspace)
         .map(|manager| {
             manager
                 .with_exec_config(exec_config)
                 .with_sub_agent_manager(state.sub_agent_manager.clone())
+                .with_session_model(session_model)
         })
         .map_err(|err| ApiError::internal(format!("Failed to open fleet manager: {err}")))
 }

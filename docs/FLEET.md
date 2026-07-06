@@ -114,6 +114,11 @@ These are population limits, not a demand to launch everything at once. A
 Recommended model layouts, such as a DeepSeek Pro orchestrator with Flash
 workers in the first ring and cheaper workers farther out, are presets only.
 Every slot can inherit the active model or carry an explicit model override.
+Inheritance is literal: the model you select in `/model` is the **operator**
+(the pinned first row in `/fleet roster`), and any worker whose task spec and
+roster profile pin no model runs on that session model. Task-level `model` and
+profile `model` overrides still win; route receipts record which source
+applied (`task.model`, `agent_profile.model`, or `run.model`).
 
 The setup UI should render this as an expanding grid: an orchestrator plus a
 small number of visible sub-agent slots, with Right/Enter drilling into a slot's

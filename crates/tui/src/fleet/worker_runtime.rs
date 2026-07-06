@@ -127,6 +127,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
 pub(crate) fn resolve_fleet_route(
     task_spec: &FleetTaskSpec,
     agent_profiles: &[AgentProfile],
+    session_model: Option<&str>,
 ) -> Option<FleetResolvedRoute> {
     let agent_profile = resolve_task_agent_profile(task_spec, agent_profiles)
         .ok()
@@ -137,11 +138,12 @@ pub(crate) fn resolve_fleet_route(
         effective_fleet_loadout_with_source(worker_profile, agent_profile);
     let (model_class, model_class_source) = task_model_class_with_source(worker_profile);
 
-    // Task/profile model pins are visible route intent; otherwise let the
-    // resolver pick the provider default. Provider authority belongs to route
-    // resolution, so we do not infer a provider here.
+    // Task/profile model pins are visible route intent; next the session
+    // route (the operator's model) applies as the run-level fallback; only
+    // then does the resolver pick the provider default. Provider authority
+    // belongs to route resolution, so we do not infer a provider here.
     let (model_selector, model_source) =
-        fleet_route_model_selector_with_source(worker_profile, agent_profile);
+        fleet_route_model_selector_with_source(worker_profile, agent_profile, session_model);
     let model_selector = model_selector.as_deref();
 
     // The worker profile carries no provider authority, so resolve within the
@@ -429,8 +431,17 @@ fn task_model_class_with_source(
 fn fleet_route_model_selector_with_source(
     worker_profile: Option<&FleetTaskWorkerProfile>,
     agent_profile: Option<&AgentProfile>,
+    session_model: Option<&str>,
 ) -> (Option<String>, &'static str) {
-    let (model, source) = effective_fleet_model_with_source("auto", worker_profile, agent_profile);
+    // The session route (operator model) is the run-level fallback, matching
+    // the dispatch path where FleetManager::run_model() feeds
+    // `effective_fleet_model_with_source`. Empty/"auto" stays resolver-default.
+    let run_model = session_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or("auto");
+    let (model, source) =
+        effective_fleet_model_with_source(run_model, worker_profile, agent_profile);
     if model.trim().is_empty() || model.eq_ignore_ascii_case("auto") {
         (None, "resolver.default")
     } else {
@@ -860,7 +871,8 @@ mod tests {
                 vec!["read_file"],
             )),
         );
-        let route = resolve_fleet_route(&task, &[]).expect("default route should resolve offline");
+        let route =
+            resolve_fleet_route(&task, &[], None).expect("default route should resolve offline");
 
         // Honest, non-empty route shape from the resolver.
         assert!(!route.provider_id.is_empty());
@@ -918,7 +930,7 @@ mod tests {
                 vec!["read_file"],
             )),
         );
-        let route = resolve_fleet_route(&task, &[]).expect("route should resolve");
+        let route = resolve_fleet_route(&task, &[], None).expect("route should resolve");
         assert_eq!(route.role.as_deref(), Some("scout"));
         assert!(route.loadout.is_none());
         assert_eq!(route.loadout_source, None);
@@ -946,7 +958,8 @@ mod tests {
                 vec!["read_file"],
             )),
         );
-        let route = resolve_fleet_route(&task, &[profile]).expect("profile route should resolve");
+        let route =
+            resolve_fleet_route(&task, &[profile], None).expect("profile route should resolve");
 
         assert_eq!(route.role.as_deref(), Some("reviewer"));
         assert_eq!(route.role_source.as_deref(), Some("agent_profile.role"));
@@ -1093,6 +1106,86 @@ mod tests {
         assert_eq!(permissions.profile_id.as_deref(), Some("reviewer"));
         assert_eq!(permissions.profile_origin.as_deref(), Some("workspace"));
         assert_eq!(permissions.source, "worker_runtime_profile");
+    }
+
+    #[test]
+    fn fleet_worker_spec_inherits_session_run_model_when_unpinned() {
+        // No task-level model, no roster profile model: the run model (the
+        // session route — the operator's model) must flow through to the
+        // worker spec, so the model picked in /model is the model that runs.
+        let task = fleet_task("build", None);
+        let worker = FleetWorkerSpec {
+            id: "worker-1".to_string(),
+            name: "Worker".to_string(),
+            host: FleetHostSpec::Local,
+            trust_level: None,
+            labels: Default::default(),
+            capabilities: vec![],
+            max_concurrent_tasks: None,
+        };
+
+        let spec = fleet_task_to_worker_spec_with_profiles(
+            "worker-1",
+            "run-1",
+            &task,
+            &worker,
+            "deepseek-v4-flash",
+            std::path::Path::new("/tmp"),
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(spec.model, "deepseek-v4-flash");
+
+        // Legacy headless callers with no session still get the auto sentinel.
+        let legacy = fleet_task_to_worker_spec_with_profiles(
+            "worker-1",
+            "run-1",
+            &task,
+            &worker,
+            "auto",
+            std::path::Path::new("/tmp"),
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(legacy.model, "auto");
+    }
+
+    #[test]
+    fn resolve_fleet_route_uses_session_model_as_run_fallback() {
+        // Route receipts must agree with dispatch: when neither the task nor
+        // a roster profile pins a model, the session route is the run-level
+        // fallback and the receipt records it came from `run.model`.
+        let task = fleet_task("route-session", None);
+        let route = resolve_fleet_route(&task, &[], Some("deepseek-v4-flash"))
+            .expect("session-model route should resolve offline");
+        assert_eq!(route.model_source.as_deref(), Some("run.model"));
+        assert_eq!(route.wire_model_id, "deepseek-v4-flash");
+
+        // Task/profile pins still win over the session route.
+        let mut profile = agent_profile(
+            "audit",
+            "reviewer",
+            None,
+            codewhale_config::FleetLoadout::Review,
+        );
+        profile.profile.model = Some("deepseek-v4-pro".to_string());
+        let pinned_task = fleet_task(
+            "route-pinned",
+            Some(worker_profile(
+                Some("audit"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+        let pinned = resolve_fleet_route(&pinned_task, &[profile], Some("deepseek-v4-flash"))
+            .expect("pinned route should resolve");
+        assert_eq!(pinned.model_source.as_deref(), Some("agent_profile.model"));
+        assert_eq!(pinned.wire_model_id, "deepseek-v4-pro");
     }
 
     #[test]

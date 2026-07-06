@@ -44,6 +44,12 @@ pub struct FleetManager {
     /// When set, fleet workers spawn real sub-agents; when None,
     /// the manager falls back to local simulation.
     sub_agent_manager: Option<SharedSubAgentManager>,
+    /// The live session route — the operator's model. Workers whose task and
+    /// roster profile pin no model inherit this instead of `"auto"`, so the
+    /// model the user picked in `/model` is the model that runs the fleet
+    /// (matching the `/fleet roster` operator row). `None` keeps the legacy
+    /// `"auto"` fallback for headless callers with no session.
+    session_model: Option<String>,
 }
 
 impl std::fmt::Debug for FleetManager {
@@ -179,7 +185,27 @@ impl FleetManager {
             exec_config: codewhale_config::FleetExecConfig::default(),
             fleet_config: codewhale_config::FleetConfigToml::default(),
             sub_agent_manager: None,
+            session_model: None,
         })
+    }
+
+    /// Adopt the active session route as the run-level model: whatever the
+    /// user selected in `/model` becomes the operator, and workers without a
+    /// task/profile model pin inherit it. Empty and `"auto"` values are
+    /// ignored so the resolver default keeps applying.
+    pub fn with_session_model(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        let trimmed = model.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("auto") {
+            self.session_model = Some(trimmed.to_string());
+        }
+        self
+    }
+
+    /// The run-level model handed to worker-spec resolution: the session
+    /// model when one was adopted, else the legacy `"auto"` sentinel.
+    fn run_model(&self) -> &str {
+        self.session_model.as_deref().unwrap_or("auto")
     }
 
     pub fn with_stale_after(mut self, stale_after: Duration) -> Self {
@@ -724,7 +750,7 @@ impl FleetManager {
                 &entry.run_id.0,
                 task_spec,
                 &worker_spec,
-                "auto",
+                self.run_model(),
                 &self.workspace,
                 roster.members(),
                 None,
@@ -982,7 +1008,12 @@ impl FleetManager {
     /// when resolution is unavailable.
     fn resolve_task_route(&self, task_spec: &FleetTaskSpec) -> Option<FleetResolvedRoute> {
         let roster = self.agent_roster();
-        worker_runtime::resolve_fleet_route(task_spec, roster.members())
+        worker_runtime::resolve_fleet_route(task_spec, roster.members(), self.session_model())
+    }
+
+    /// The adopted session route, if any — the operator's model.
+    fn session_model(&self) -> Option<&str> {
+        self.session_model.as_deref()
     }
 
     /// Resolve the effective worker authority to persist on a task's receipt
@@ -1007,7 +1038,7 @@ impl FleetManager {
             &task.entry.run_id.0,
             &task.task_spec,
             &worker_spec,
-            "auto",
+            self.run_model(),
             &self.workspace,
             roster.members(),
             None,
@@ -1578,6 +1609,32 @@ mod tests {
             alert_policy: None,
             timeout_seconds: None,
             metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn with_session_model_adopts_route_and_ignores_auto_or_empty() {
+        let tmp = TempDir::new().unwrap();
+
+        // No session: legacy auto sentinel.
+        let manager = FleetManager::open(tmp.path()).unwrap();
+        assert_eq!(manager.run_model(), "auto");
+        assert_eq!(manager.session_model(), None);
+
+        // The session route becomes the run model — the operator's model.
+        let manager = FleetManager::open(tmp.path())
+            .unwrap()
+            .with_session_model("deepseek-v4-pro");
+        assert_eq!(manager.run_model(), "deepseek-v4-pro");
+        assert_eq!(manager.session_model(), Some("deepseek-v4-pro"));
+
+        // "auto" and empty/whitespace inputs keep the resolver default.
+        for noop in ["auto", "AUTO", "", "   "] {
+            let manager = FleetManager::open(tmp.path())
+                .unwrap()
+                .with_session_model(noop);
+            assert_eq!(manager.run_model(), "auto");
+            assert_eq!(manager.session_model(), None);
         }
     }
 
