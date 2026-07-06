@@ -2542,6 +2542,97 @@ async fn sse_post_error_includes_response_body_excerpt() {
 }
 
 #[tokio::test]
+async fn streamable_http_caps_chunked_bodies_without_content_length() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let _lock = lock_mcp_loopback_tests().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Serve chunked responses (no Content-Length) of the requested size:
+    // GET /over streams past the cap, GET /under stays below it.
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let total: usize = if request.starts_with("GET /over ") {
+                    256
+                } else {
+                    16
+                };
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let chunk = vec![b'x'; 32];
+                let mut sent = 0;
+                while sent < total {
+                    let n = chunk.len().min(total - sent);
+                    let frame = format!("{n:x}\r\n");
+                    socket.write_all(frame.as_bytes()).await.unwrap();
+                    socket.write_all(&chunk[..n]).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                    sent += n;
+                }
+                socket.write_all(b"0\r\n\r\n").await.unwrap();
+                socket.flush().await.unwrap();
+            });
+        }
+    });
+
+    let client = test_http_client();
+    let cap = 64;
+
+    let over = client
+        .get(format!("http://{addr}/over"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        over.content_length(),
+        None,
+        "chunked response must not declare a length for this test to be meaningful"
+    );
+    let err = streamable_http::read_body_capped(over, cap)
+        .await
+        .expect_err("a chunked body past the cap must fail, not OOM");
+    assert!(
+        err.to_string().contains("exceeds"),
+        "unexpected error: {err}"
+    );
+
+    let under = client
+        .get(format!("http://{addr}/under"))
+        .send()
+        .await
+        .unwrap();
+    let body = streamable_http::read_body_capped(under, cap)
+        .await
+        .expect("a chunked body under the cap reads fine");
+    assert_eq!(body, "x".repeat(16));
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn streamable_http_stale_session_reconnects_and_retries_tool_call() {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
