@@ -5326,6 +5326,37 @@ fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
 }
 
 #[test]
+fn subagent_completion_inlines_evidence_before_sentinel() {
+    let mut snap = make_snapshot(SubAgentStatus::Completed);
+    snap.result = Some(
+        "VERDICT: pass\n### EVIDENCE\n- src/lib.rs:1-3 — init ok\n### GAPS\nnone".to_string(),
+    );
+    let completion = subagent_completion_from_result(&snap);
+    let evidence_pos = completion
+        .payload
+        .find("### EVIDENCE")
+        .expect("evidence block");
+    let sentinel_pos = completion
+        .payload
+        .find("<codewhale:subagent.done>")
+        .expect("sentinel");
+    assert!(evidence_pos < sentinel_pos, "evidence before sentinel");
+    assert!(completion.payload.contains("src/lib.rs:1-3"));
+    assert!(
+        completion.payload.find("VERDICT: pass").unwrap_or(0) < evidence_pos,
+        "summary before evidence"
+    );
+}
+
+#[test]
+fn subagent_completion_skips_empty_evidence_on_failed_child() {
+    let mut snap = make_snapshot(SubAgentStatus::Failed("boom".to_string()));
+    snap.result = Some("### EVIDENCE\n- should-not-appear".to_string());
+    let completion = subagent_completion_from_result(&snap);
+    assert!(!completion.payload.contains("### EVIDENCE"));
+}
+
+#[test]
 fn child_completion_runtime_message_preserves_agent_and_provenance_guidance() {
     let message = child_completion_runtime_message(&[SubAgentCompletion {
         agent_id: "agent_nested".to_string(),

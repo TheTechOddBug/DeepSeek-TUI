@@ -4398,15 +4398,102 @@ pub(crate) fn emit_parent_completion(
 
 pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAgentCompletion {
     let raw = summarize_subagent_result(result);
-    let (summary, truncated) = stamp_subagent_summary(&raw);
+    let mut evidence_truncated = false;
+    let evidence_block = match &result.status {
+        SubAgentStatus::Failed(_)
+        | SubAgentStatus::BudgetExhausted
+        | SubAgentStatus::Cancelled
+        | SubAgentStatus::Interrupted(_) => None,
+        _ => result
+            .result
+            .as_deref()
+            .and_then(extract_evidence_block)
+            .map(|block| {
+                let (clipped, ev_trunc) = clip_evidence_block(&block);
+                evidence_truncated = ev_trunc;
+                clipped
+            })
+            .filter(|evidence| !evidence.trim().is_empty()),
+    };
+    let summary_source = evidence_block
+        .as_ref()
+        .map(|_| strip_evidence_block(&raw))
+        .unwrap_or(raw);
+    let (summary, truncated) = stamp_subagent_summary(&summary_source);
+    let summary_truncated = truncated || evidence_truncated;
     let sentinel = match &result.status {
         SubAgentStatus::Failed(error) => subagent_failed_sentinel(&result.agent_id, error),
-        _ => subagent_done_sentinel(&result.agent_id, result, truncated),
+        _ => subagent_done_sentinel(&result.agent_id, result, summary_truncated),
+    };
+    let payload = match evidence_block {
+        Some(evidence) => format!("{summary}\n{evidence}\n{sentinel}"),
+        None => format!("{summary}\n{sentinel}"),
     };
     SubAgentCompletion {
         agent_id: result.agent_id.clone(),
-        payload: format!("{summary}\n{sentinel}"),
+        payload,
     }
+}
+
+const SUBAGENT_EVIDENCE_CHAR_BUDGET: usize = 4_000;
+
+fn clip_evidence_block(block: &str) -> (String, bool) {
+    let total = block.chars().count();
+    if total <= SUBAGENT_EVIDENCE_CHAR_BUDGET {
+        return (block.to_string(), false);
+    }
+    let clipped: String = block
+        .chars()
+        .take(SUBAGENT_EVIDENCE_CHAR_BUDGET)
+        .collect();
+    (format!("{clipped}…"), true)
+}
+
+fn extract_evidence_block(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let markers = ["### evidence", "## evidence", "evidence:"];
+    for marker in markers {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let block = &text[start..];
+        let tail = &block[marker.len()..];
+        let end = tail
+            .find("\n### ")
+            .or_else(|| tail.find("\n## "))
+            .or_else(|| tail.to_ascii_lowercase().find("\ngaps"))
+            .or_else(|| tail.to_ascii_lowercase().find("\nnext"))
+            .unwrap_or(tail.len());
+        let extracted = format!("{}{}", &block[..marker.len()], &tail[..end])
+            .trim()
+            .to_string();
+        if !extracted.is_empty() {
+            return Some(extracted);
+        }
+    }
+    None
+}
+
+fn strip_evidence_block(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let markers = ["### evidence", "## evidence", "evidence:"];
+    for marker in markers {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let block = &text[start..];
+        let tail = &block[marker.len()..];
+        let end = tail
+            .find("\n### ")
+            .or_else(|| tail.find("\n## "))
+            .or_else(|| tail.to_ascii_lowercase().find("\ngaps"))
+            .or_else(|| tail.to_ascii_lowercase().find("\nnext"))
+            .unwrap_or(tail.len());
+        let mut without = format!("{}{}", &text[..start], &block[marker.len() + end..]);
+        without = without.trim().to_string();
+        return without;
+    }
+    text.trim().to_string()
 }
 
 /// Build a `<codewhale:subagent.done>` JSON sentinel for a successful child.
