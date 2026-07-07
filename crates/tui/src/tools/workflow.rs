@@ -1625,7 +1625,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn workflow_run_dispatches_task_through_subagent_manager() {
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -1736,7 +1738,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn declarative_dependency_results_are_forwarded_to_downstream_prompt() {
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -1800,7 +1804,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn workflow_status_lists_compact_typed_receipts() {
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -1861,7 +1867,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn workflow_status_surfaces_schema_failure_instead_of_null_success() {
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -1920,7 +1928,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn declarative_issue_audit_fixture_runs_through_subagent_driver() {
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let workflow_dir = tmp.path().join("workflows");
         std::fs::create_dir_all(&workflow_dir).expect("workflow dir");
@@ -2066,5 +2076,12 @@ mod tests {
             calls,
             bodies,
         )
+    }
+
+    fn workflow_test_retry_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::retry_status::test_guard();
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+        guard
     }
 }
