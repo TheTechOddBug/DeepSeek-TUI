@@ -115,7 +115,7 @@ fn mask_key(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
     use crate::tui::app::TuiOptions;
     use std::path::PathBuf;
@@ -144,6 +144,7 @@ mod tests {
         };
         let mut app = App::new(options, &Config::default());
         app.ui_locale = locale;
+        app.onboarding_provider = ApiProvider::Zai;
         app
     }
 
