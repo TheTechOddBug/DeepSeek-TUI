@@ -20,7 +20,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         Line::from(Span::styled(
             format!(
                 "{} ({})",
-                app.tr(MessageId::OnboardApiKeyStep1).to_string(),
+                app.tr(MessageId::OnboardApiKeyStep1),
                 provider.display_name()
             ),
             Style::default().fg(palette::TEXT_PRIMARY),
@@ -159,8 +159,14 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(body.contains("Connect your API key"), "title is provider-neutral");
-        assert!(body.contains("platform.deepseek.com"), "expected default DeepSeek credential URL, got: {body}");
+        assert!(
+            body.contains("Connect your API key"),
+            "title is provider-neutral"
+        );
+        assert!(
+            body.contains("platform.deepseek.com"),
+            "expected default DeepSeek credential URL, got: {body}"
+        );
         assert!(
             body.contains("密钥"),
             "expected zh-Hans 'key' label, got: {body}"
