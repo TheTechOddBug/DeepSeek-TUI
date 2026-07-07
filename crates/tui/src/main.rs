@@ -1120,6 +1120,14 @@ enum SandboxCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Match the dispatcher entrypoint: Unix shells and supervisors may inherit
+    // SIGPIPE ignored, which turns short pipelines such as `codewhale doctor |
+    // head` into BrokenPipe panics once this delegated TUI binary prints.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     startup_trace::mark_process_start();
     configure_windows_console_utf8();
     install_rustls_crypto_provider();

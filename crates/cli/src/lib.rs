@@ -2256,11 +2256,29 @@ fn build_tui_command(
     Ok(cmd)
 }
 
-fn exit_with_tui_status(status: std::process::ExitStatus) -> Result<()> {
-    match status.code() {
-        Some(code) => std::process::exit(code),
-        None => bail!("codewhale-tui terminated by signal"),
+fn tui_child_exit_code(status: std::process::ExitStatus) -> Option<i32> {
+    if let Some(code) = status.code() {
+        return Some(code);
     }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        status.signal().map(|signal| 128 + signal)
+    }
+
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn exit_with_tui_status(status: std::process::ExitStatus) -> Result<()> {
+    if let Some(code) = tui_child_exit_code(status) {
+        std::process::exit(code);
+    }
+    bail!("codewhale-tui terminated without an exit code")
 }
 
 fn delegate_simple_tui(args: Vec<String>) -> Result<()> {
@@ -2269,10 +2287,7 @@ fn delegate_simple_tui(args: Vec<String>) -> Result<()> {
         .args(args)
         .status()
         .map_err(|err| anyhow!("{}", tui_spawn_error(&tui, &err)))?;
-    match status.code() {
-        Some(code) => std::process::exit(code),
-        None => bail!("codewhale-tui terminated by signal"),
-    }
+    exit_with_tui_status(status)
 }
 
 fn tui_spawn_error(tui: &Path, err: &io::Error) -> String {
@@ -4694,6 +4709,16 @@ mod tests {
         assert!(message.contains("access is denied"));
         assert!(message.contains("where codewhale"));
         assert!(message.contains("DEEPSEEK_TUI_BIN"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_child_exit_code_maps_unix_signal_to_shell_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let status = std::process::ExitStatus::from_raw(libc::SIGPIPE);
+
+        assert_eq!(tui_child_exit_code(status), Some(141));
     }
 
     /// Windows-only fallback: the user from #247 manually renamed the
