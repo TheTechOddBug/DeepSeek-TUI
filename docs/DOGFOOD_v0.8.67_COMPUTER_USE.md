@@ -2,7 +2,7 @@
 
 **Release:** v0.8.67 (2026-07-06) — Fleet/Workflow usability + sub-agent reliability lane  
 **Audience:** A model with terminal/computer-use ability that can drive `codewhale-tui` interactively or semi-interactively.  
-**Milestone issues covered:** #4050, #4051, #4052, #4053, #4054, #4056, #4057, #4058, #4059, #4062, #4063, plus Constitution / `/workflow` / `/fleet` basics.
+**Milestone issues covered:** #4050, #4051, #4052, #4053, #4054, #4056, #4057, #4058, #4059, #4062, #4063, plus post-candidate checks #4071-#4076, #4078, #4081, partial #4027, and Constitution / `/workflow` / `/fleet` basics. #4077 remains open/not covered.
 
 ---
 
@@ -81,8 +81,8 @@ codewhale-tui --workspace "$WORKSPACE" --skip-onboarding -p "List files in the w
 
 # Headless probes (non-TUI)
 codewhale-tui doctor --json | jq '.setup'
-codewhale-tui features
-codew exec --help
+codewhale-tui features list
+codewhale exec --help
 ```
 
 ---
@@ -107,11 +107,11 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 
 | ID | Objective | Steps | Expected | Pass criteria |
 | --- | --- | --- | --- | --- |
-| 4050-A | Unit regression (headless) | From codewhale repo: `cargo test -p codewhale-tui --bin codewhale-tui --locked summarize_subagent_result_diagnoses_missing_completed_payload child_hit_max_steps -- --nocapture` | Tests pass | No test failures |
+| 4050-A | Unit regression (headless) | From codewhale repo: `for f in summarize_subagent_result_diagnoses_missing_completed_payload child_hit_max_steps; do cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture; done` | Tests pass | No test failures |
 | 4050-B | Live delegate with forced short budget | In TUI (Agent mode, configured provider): send a message that spawns a sub-agent with a very small scope, e.g. `"Use the agent tool to summarize README.md in one sentence. Set max_steps to 1 if the tool allows."` | History shows **failed** or diagnostic text containing **"no final summary"** — not bare `Completed` with empty payload | No row reads as successful completion with zero useful output |
 | 4050-C | Workflow fan-in | Run `/workflow Audit: read Cargo.toml and report the workspace name` and wait for workflow receipt | Failed/missing child slots surface as failures or null with explicit handling; parent receipt does not show `results: []` as if all children succeeded | Parent aggregation distinguishes failed children |
 
-**Headless fallback:** `cargo test -p codewhale-tui --bin codewhale-tui --locked -- subagent -- --nocapture`
+**Headless fallback:** `cargo test -p codewhale-tui --bin codewhale-tui --locked subagent -- --nocapture`
 
 ---
 
@@ -121,7 +121,7 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 
 | ID | Objective | Steps | Expected | Pass criteria |
 | --- | --- | --- | --- | --- |
-| 4051-A | Unit regression | `cargo test -p codewhale-tui --bin codewhale-tui --locked extract_agent_id delegate -- --nocapture` | Pass | Tests green |
+| 4051-A | Unit regression | `for f in extract_agent_id delegate; do cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture; done` | Pass | Tests green |
 | 4051-B | Burst fan-out UI | In Agent mode: `"Spawn 3 agent tools in parallel: (1) list top-level files, (2) count lines in README, (3) report git status. Use short prompts."` | Each delegate row shows **running** before **done**; identity column is never only `…` | Readable rows with agent id, role, or task slug |
 | 4051-C | Completion-before-start recovery | Observe fast completions during burst | If completion arrives early, row still shows meaningful identity (not dropped) | No empty ellipsis-only delegate rows |
 
@@ -133,7 +133,7 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 
 | ID | Objective | Steps | Expected | Pass criteria |
 | --- | --- | --- | --- | --- |
-| 4052-A | Unit regression | `cargo test -p codewhale-tui --bin codewhale-tui --locked git_repo_root_discovers create_isolated_worktree_discovers -- --nocapture` | Pass | Tests green |
+| 4052-A | Unit regression | `for f in git_repo_root_discovers create_isolated_worktree_discovers; do cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture; done` | Pass | Tests green |
 | 4052-B | Harness layout (manual/TUI) | Create layout: `Harness/` (not a git root) containing nested clone `Harness/CodeWhale/` (real repo). `cd Harness` and launch TUI. Ask agent: `"Use agent tool with worktree:true to run 'git rev-parse --show-toplevel' in an isolated worktree."` | Worktree creation succeeds; discovers nested repo | No raw `not a git repository` from parent harness cwd alone |
 | 4052-C | Friendly miss | `cd $(mktemp -d)` (no `.git`), same agent request | Structured error listing **Tried:** paths | Actionable error, not bare git stderr |
 
@@ -172,7 +172,7 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 | 4056-A | Unit regression | `cargo test -p codewhale-tui --bin codewhale-tui --locked config_view_experimental -- --nocapture` | Pass | Tests green |
 | 4056-B | Config UI | In TUI: `/config` → scroll to **Experimental** section | Only **beta/experimental** features listed (`vision_model` = beta); stable tools absent from Experimental | No `mcp`/`subagents`/etc. under Experimental |
 | 4056-C | Goal/workflow copy | Filter config for `goal` and `workflow` | Copy describes live commands; no "preview placeholder" wording | Professional, accurate descriptions |
-| 4056-D | CLI features table | `codewhale-tui features` (or `codew features`) | `shell_tool`, `subagents`, `mcp`, etc. show stage **stable** | Matches shipped reality |
+| 4056-D | CLI features table | `codewhale-tui features list` (or `codew features list`) | `shell_tool`, `subagents`, `mcp`, etc. show stage **stable** | Matches shipped reality |
 
 ---
 
@@ -213,7 +213,7 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 | ID | Objective | Steps | Expected | Pass criteria |
 | --- | --- | --- | --- | --- |
 | 4057-A | JSON validity | `jq empty crates/tui/locales/*.json` (from repo) | All files valid JSON | Exit 0 |
-| 4057-B | Parity tests | `cargo test -p codewhale-tui --bin codewhale-tui --locked localization missing_message -- --nocapture` | Pass | No missing keys for complete packs |
+| 4057-B | Parity tests | `for f in localization missing_message; do cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture; done` | Pass | No missing keys for complete packs |
 | 4057-C | Non-English setup | Onboarding language: pick `3` (zh-Hans) or `2` (ja); open `/setup` | Setup wizard title/steps in chosen language | UI not English for complete packs |
 | 4057-D | zh-Hant partial | Select zh-Hant (Traditional Chinese); open `/setup` | Mixed zh-Hant + English fallback acceptable; not advertised as fully localized | Document if fallback strings appear; no crash |
 | 4057-E | Workflow wording | In ja or zh-Hans, run `/workflow` help or slash menu description | Uses workflow terminology; no stale "swarm" wording | Terminology consistent |
@@ -228,9 +228,9 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 
 | ID | Objective | Steps | Expected | Pass criteria |
 | --- | --- | --- | --- | --- |
-| 4058-A | Unit regression | `cargo test -p codewhale-tui --bin codewhale-tui --locked pricing model_catalog -- --nocapture` | Pass | glm-5.2 and kimi-k2.7-code pricing tests green |
+| 4058-A | Unit regression | `for f in pricing model_catalog; do cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture; done` | Pass | glm-5.2 and kimi-k2.7-code pricing tests green |
 | 4058-B | Model picker hints | `/model` → search or scroll to `glm-5.2` and `kimi-k2.7-code` (or provider-qualified ids like `z-ai/glm-5.2`, `moonshotai/kimi-k2.7-code`) | Row hint includes **`priced`** (not `price unknown`) when catalog has data | Both models show priced hints |
-| 4058-C | Bundled catalog | `jq '.models["glm-5.2"], .models["kimi-k2.7-code"]' crates/tui/assets/model_catalog.bundled.json` | Entries exist with metadata | Non-null catalog entries |
+| 4058-C | Bundled catalog | `jq '.entries["glm-5.2"], .entries["kimi-k2.7-code"]' crates/tui/assets/model_catalog.bundled.json` | Entries exist with metadata | Non-null catalog entries |
 | 4058-D | LongCat label | Open provider picker `/provider`; locate LongCat | Labeled as Meituan LongCat (or equivalent professional label) | Provider facts not stale |
 
 ---
@@ -258,7 +258,7 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 | CON-C | Setup integration | `/setup` → Constitution step → `u` bundled/default **or** guided `g` flow | Checkpoint can complete; report at `/setup report` or `doctor --json .setup` | `constitution.choice` recorded |
 | CON-D | Secret-free doctor | `codewhale-tui doctor --json \| jq '.setup'` | No raw API keys in output | Redaction holds |
 
-**Headless:** `scripts/v0867-setup-qa.sh` (from repo) or `cargo test -p codewhale-tui --bin codewhale-tui --locked setup constitution doctor_setup -- --nocapture`
+**Headless:** `scripts/v0867-setup-qa.sh` (from repo) or `for f in setup constitution doctor_setup; do cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture; done`
 
 ---
 
@@ -286,7 +286,7 @@ Mark each row **PASS**, **FAIL**, or **SKIP** (with reason). For FAIL, capture a
 | FL-D | Sidebar detail | During active sub-agent/Fleet worker, open Agents sidebar (`Alt-@`) | Detail/hover shows worker **model** route | Model visible in sidebar |
 | FL-E | Operator routing | `/fleet roster` | Operator inherits session `/model` route | Not hardcoded `auto` only |
 
-**Headless:** `cargo test -p codewhale-tui --bin codewhale-tui --locked fleet_roster fleet_setup -- --nocapture`
+**Headless:** `for f in fleet_roster fleet_setup; do cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture; done`
 
 ---
 
@@ -337,23 +337,25 @@ Some behaviors **cannot** be fully verified without a live TUI + model route:
 | Onboarding provider UX (#4062) | Required once | Inspect `ONBOARDING_PROVIDER_OPTIONS` + `save_api_key_for` tests |
 | Setup scroll (#4063) | Required for overflow UX | `setup_wizard_body_scroll_resets_on_step_change` test |
 | Locale visuals (#4057) | Required for copy QA | `localization`/`missing_message` tests + `jq empty locales/*.json` |
-| Workflow/Fleet end-to-end | Requires provider + Agent mode | `codew exec --auto` with `--output-format stream-json` for partial traces; unit tests for command routing |
+| Workflow/Fleet end-to-end | Requires provider + Agent mode | `codewhale exec --auto` with `--output-format stream-json` for partial traces; unit tests for command routing |
 | Sub-agent child completion (#4050–#4053) | Requires Agent + API | `cargo test -p codewhale-tui --bin codewhale-tui --locked -- subagent` |
 
 **CLI automation path:**
 
 ```bash
-codew exec --auto --output-format stream-json "your prompt here"
+codewhale exec --auto --output-format stream-json "your prompt here"
 ```
 
-Plain `codew exec` is one-shot text only (no tools). Use `--auto` for tool-backed non-interactive runs.
+Plain `codewhale exec` is one-shot text only (no tools). Use `--auto` for tool-backed non-interactive runs.
 
 **Recommended regression bundle (from repo root):**
 
 ```bash
-cargo test -p codewhale-tui --bin codewhale-tui --locked -- \
-  subagent setup constitution localization experimental_config pricing model_catalog \
-  status_animation fleet_roster fleet_setup workflow -- --nocapture
+cargo test -p codewhale-tui --bin codewhale-tui --locked
+cargo test -p codewhale-tui --bin codewhale-tui --locked tools::workflow::tests -- --nocapture
+for f in subagent setup constitution localization experimental_config pricing model_catalog status_animation fleet_roster fleet_setup; do
+  cargo test -p codewhale-tui --bin codewhale-tui --locked "$f" -- --nocapture
+done
 scripts/v0867-setup-qa.sh
 ```
 
