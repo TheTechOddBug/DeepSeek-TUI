@@ -98,7 +98,7 @@ pub(crate) const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
 pub(crate) const DEFAULT_VLLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub(crate) const DEFAULT_VLLM_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub(crate) const DEFAULT_VLLM_BASE_URL: &str = "http://localhost:8000/v1";
-pub(crate) const DEFAULT_OLLAMA_MODEL: &str = "deepseek-coder:1.3b";
+pub(crate) const DEFAULT_OLLAMA_MODEL: &str = "deepseek-v4-flash";
 pub(crate) const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 
 // Z.ai (GLM Coding Plan) defaults

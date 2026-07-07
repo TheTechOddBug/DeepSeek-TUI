@@ -70,9 +70,10 @@ brew tap Hmbown/deepseek-tui
 brew install deepseek-tui
 ```
 
-Prebuilt archives for every platform — including Linux riscv64 — are attached
-to [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases). Checksums,
-China mirrors, Windows specifics, and troubleshooting live in
+Prebuilt archives for Linux x64/arm64, macOS x64/arm64, and Windows x64 are
+attached to [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases).
+Linux riscv64 prebuilts are temporarily paused while upstream QuickJS bindings
+catch up. Checksums, China mirrors, Windows specifics, and troubleshooting live in
 [docs/INSTALL.md](docs/INSTALL.md).
 
 **Upgrading from the legacy `deepseek-tui` package?** Your config, sessions,
@@ -221,6 +222,21 @@ product, not an afterthought.
   `/skills`.
 - **Embedded everywhere.** HTTP/SSE and ACP runtime APIs, a VS Code extension,
   and Telegram/Feishu bridges (Weixin experimental).
+
+## CodeWhale for VS Code — GUI frontend
+
+Prefer a graphical IDE experience over the terminal? [**CodeWhale for VS Code**](https://github.com/HengQuWorld/CodeWhale-VSCode) is a community-maintained GUI frontend that wraps the same CodeWhale engine into a native VS Code sidebar — chat, slash commands, threaded conversations, live diffs, task management, and a settings UI, all without leaving the editor.
+
+The GUI talks to the same local `codewhale` runtime over the [Runtime API](docs/RUNTIME_API.md), so sessions, providers, modes, and skills stay in sync between terminal and IDE. If you live in VS Code, give it a try:
+
+```bash
+npm install -g codewhale        # install the engine first
+# then search "CodeWhale" in the VS Code extensions panel
+```
+
+> The minimal scaffold under [`extensions/vscode/`](extensions/vscode/) in this
+> repo is a separate, read-only Phase 0 viewer. For the full chat experience,
+> use the linked GUI project above.
 
 ## How instructions are ranked
 

@@ -32,6 +32,7 @@ pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Re
     let current_exe =
         std::env::current_exe().context("failed to determine current executable path")?;
     let legacy_binary = is_legacy_binary(&current_exe);
+    ensure_supported_release_target(std::env::consts::OS, std::env::consts::ARCH)?;
 
     let targets = update_targets_for_exe(&current_exe);
     let channel = ReleaseChannel::from_beta_flag(beta);
@@ -186,6 +187,17 @@ struct FetchedRelease {
 enum UpdateReleaseSource {
     GitHub,
     Mirror { base_url: String },
+}
+
+fn ensure_supported_release_target(os: &str, arch: &str) -> Result<()> {
+    if os == "linux" && arch == "riscv64" {
+        bail!(
+            "Linux riscv64 release assets are temporarily unavailable because \
+             rquickjs-sys 0.12.0 does not ship riscv64gc-unknown-linux-gnu bindings. \
+             See docs/INSTALL.md for the current platform matrix."
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn release_arch_for_rust_arch(arch: &str) -> &str {
@@ -1044,6 +1056,17 @@ mod tests {
             !asset_arch.contains("aarch64") && !asset_arch.contains("x86_64"),
             "asset arch '{asset_arch}' still uses raw Rust constant name"
         );
+    }
+
+    #[test]
+    fn linux_riscv64_update_is_explicitly_unsupported() {
+        let err = ensure_supported_release_target("linux", "riscv64")
+            .expect_err("linux riscv64 should not claim a release asset");
+        let message = err.to_string();
+        assert!(message.contains("Linux riscv64 release assets are temporarily unavailable"));
+        assert!(message.contains("rquickjs-sys 0.12.0"));
+        ensure_supported_release_target("linux", "aarch64").unwrap();
+        ensure_supported_release_target("macos", "aarch64").unwrap();
     }
 
     /// Verify binary prefix detection for dispatcher vs TUI binary.

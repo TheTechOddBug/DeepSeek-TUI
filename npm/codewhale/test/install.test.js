@@ -119,7 +119,7 @@ test("glibc preflight message is CodeWhale-branded and actionable", () => {
   assert.match(message, /this system has glibc 2\.35/);
   assert.match(message, /cargo install codewhale-cli --locked/);
   assert.match(message, /Linux x64 release asset is a static \(musl\) build/);
-  assert.match(message, /arm64 and riscv64 assets are GNU libc builds/);
+  assert.match(message, /Linux arm64 asset is a GNU libc build/);
   assert.match(message, /CODEWHALE_SKIP_GLIBC_CHECK=1/);
 });
 

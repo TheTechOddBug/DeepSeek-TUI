@@ -703,6 +703,7 @@ impl Engine {
         messages_before: Option<usize>,
         messages_after: Option<usize>,
     ) {
+        let summary_prompt = self.rendered_compaction_summary();
         let _ = self
             .tx_event
             .send(Event::CompactionCompleted {
@@ -711,8 +712,28 @@ impl Engine {
                 message,
                 messages_before,
                 messages_after,
+                summary_prompt,
             })
             .await;
+    }
+
+    /// Render the accumulated compaction summary prompt to plain text so it
+    /// can travel in events and be persisted by host layers. All emit sites
+    /// run after `merge_compaction_summary`, so this reflects the summary
+    /// state the engine will use for subsequent requests.
+    fn rendered_compaction_summary(&self) -> Option<String> {
+        self.session
+            .compaction_summary_prompt
+            .as_ref()
+            .map(|prompt| match prompt {
+                SystemPrompt::Text(text) => text.clone(),
+                SystemPrompt::Blocks(blocks) => blocks
+                    .iter()
+                    .map(|block| block.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            })
+            .filter(|text| !text.trim().is_empty())
     }
 
     pub(super) async fn emit_compaction_failed(&mut self, id: String, auto: bool, message: String) {
@@ -1938,10 +1959,21 @@ impl Engine {
             self.active_route_limits,
             input_tokens,
         ) {
+            let usage_percent = budget.usage_percent();
+            let escalation = if usage_percent
+                >= crate::tui::context_inspector::CONTEXT_CRITICAL_THRESHOLD_PERCENT
+            {
+                " — CRITICAL: stop expanding scope; run /compact immediately or finish the current task"
+            } else if usage_percent
+                >= crate::tui::context_inspector::CONTEXT_WARNING_THRESHOLD_PERCENT
+            {
+                " — ESCALATED: prefer /compact, narrow scope, or finish the current task"
+            } else {
+                ""
+            };
             lines.push(format!(
-                "Context pressure: {} ({:.1}% used, {} / {} tokens; {} input tokens available)",
+                "Context pressure: {} ({usage_percent:.1}% used, {} / {} tokens; {} input tokens available){escalation}",
                 budget.pressure.label(),
-                budget.usage_percent(),
                 budget.input_tokens,
                 budget.window_tokens,
                 budget.available_input_tokens,
@@ -2051,6 +2083,9 @@ impl Engine {
         self.append_resource_metadata_lines(&mut lines, routed_model, current_text);
         if let Some(working_set_summary) = working_set_summary {
             lines.push(working_set_summary);
+        }
+        if let Some(git_snapshot) = crate::tui::workspace_context::collect(&self.config.workspace) {
+            lines.push(format!("Git workspace: {git_snapshot}"));
         }
         let summary = lines.join("\n");
 

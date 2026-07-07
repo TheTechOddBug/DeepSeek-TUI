@@ -1121,6 +1121,14 @@ enum SandboxCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Match the dispatcher entrypoint: Unix shells and supervisors may inherit
+    // SIGPIPE ignored, which turns short pipelines such as `codewhale doctor |
+    // head` into BrokenPipe panics once this delegated TUI binary prints.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     startup_trace::mark_process_start();
     configure_windows_console_utf8();
     install_rustls_crypto_provider();
@@ -1244,12 +1252,9 @@ async fn main() -> Result<()> {
                 // Honour DEEPSEEK_BASE_URL forwarded by the CLI dispatcher from --base-url.
                 if let Ok(env_url) = std::env::var("DEEPSEEK_BASE_URL") {
                     let trimmed = env_url.trim();
-                    eprintln!("DEBUG DEEPSEEK_BASE_URL='{trimmed}'");
                     if !trimmed.is_empty() {
                         config.base_url = Some(trimmed.to_string());
                     }
-                } else {
-                    eprintln!("DEBUG DEEPSEEK_BASE_URL not set");
                 }
                 let model = resolve_exec_model(&config, args.model.as_deref());
                 let prompt = join_prompt_parts(&args.prompt);

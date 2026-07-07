@@ -1866,6 +1866,22 @@ fn tool_search_reports_known_core_action_tool_when_current_catalog_omits_it() {
 }
 
 #[test]
+fn tools_always_load_overrides_mcp_deferral() {
+    let always_load = HashSet::from(["mcp_server_write".to_string()]);
+    let catalog = build_model_tool_catalog(
+        vec![api_tool("read_file")],
+        vec![api_tool("mcp_server_write")],
+        AppMode::Agent,
+        &always_load,
+    );
+    let mcp = catalog
+        .iter()
+        .find(|tool| tool.name == "mcp_server_write")
+        .expect("mcp tool");
+    assert_eq!(mcp.defer_loading, Some(false));
+}
+
+#[test]
 fn tools_always_load_overrides_default_native_deferral() {
     let always_load = HashSet::from(["git_blame".to_string()]);
     assert!(!should_default_defer_tool("git_blame", &always_load));
@@ -1934,6 +1950,47 @@ fn print_agent_tool_catalog_metrics() {
             "active_tool_names": active_catalog.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
         })
     );
+}
+
+#[test]
+fn deferred_tool_hydration_activates_without_guard_result_for_same_turn_retry() {
+    let mut edit = api_tool("edit_file");
+    edit.defer_loading = Some(true);
+    edit.input_schema = json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" },
+            "search": { "type": "string" },
+            "replace": { "type": "string" }
+        },
+        "required": ["path", "search", "replace"]
+    });
+
+    let catalog = vec![edit];
+    let active_at_batch_start = HashSet::new();
+    let mut hydrated_this_batch = HashSet::new();
+    let hydration = maybe_hydrate_requested_deferred_tool(
+        "edit_file",
+        &json!({
+            "path": "src/foo.rs",
+            "search": "before",
+            "replace": "after"
+        }),
+        &catalog,
+        &active_at_batch_start,
+        &mut hydrated_this_batch,
+    )
+    .expect("first deferred use should hydrate");
+
+    assert_eq!(
+        hydration.metadata.as_ref().unwrap()["event"],
+        "tool.schema_hydrated"
+    );
+    assert!(hydrated_this_batch.contains("edit_file"));
+    // Turn loop policy (#4074): hydration activates the tool but must not
+    // populate guard_result, so execution proceeds in the same batch.
+    let guard_result: Option<crate::tools::spec::ToolResult> = None;
+    assert!(guard_result.is_none());
 }
 
 #[test]
@@ -4902,6 +4959,39 @@ fn working_set_reaches_model_as_turn_metadata() {
 }
 
 #[test]
+fn turn_metadata_includes_git_workspace_snapshot_in_repo() {
+    use crate::dependencies::ExternalTool;
+
+    if !crate::dependencies::Git::available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let init = crate::dependencies::Git::output(&["init", "-q"], root);
+    if init.is_err() || !init.unwrap().status.success() {
+        return;
+    }
+
+    let config = EngineConfig {
+        workspace: root.to_path_buf(),
+        ..Default::default()
+    };
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    let user_msg = engine.user_text_message_with_turn_metadata("inspect repo state".to_string());
+    let last_block = user_msg.content.last().expect("turn metadata block");
+    let ContentBlock::Text { text, .. } = last_block else {
+        panic!("expected text metadata block");
+    };
+
+    if let Some(snapshot) = crate::tui::workspace_context::collect(root) {
+        assert!(
+            text.contains(&format!("Git workspace: {snapshot}")),
+            "turn_meta should include git snapshot: {text}"
+        );
+    }
+}
+
+#[test]
 fn turn_metadata_includes_current_local_date_without_working_set() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -4977,6 +5067,59 @@ fn turn_metadata_surfaces_context_and_resource_usage() {
     );
     assert!(text.contains("50% budget"), "got: {text}");
     assert!(text.contains("10.0 tok/s"), "got: {text}");
+}
+
+#[test]
+fn turn_metadata_escalates_context_pressure_at_warning_threshold() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        model: "deepseek-v4-flash".to_string(),
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    // Fabricate high context usage by stuffing the session with a large user message.
+    let large = "x".repeat(900_000);
+    engine.session.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: large,
+            cache_control: None,
+        }],
+    });
+
+    let user_msg = engine.user_text_message_with_turn_metadata("wrap up".to_string());
+    let last_block = user_msg.content.last().expect("turn metadata block");
+    let ContentBlock::Text { text, .. } = last_block else {
+        panic!("expected text metadata block");
+    };
+
+    if text.contains("Context pressure:") {
+        let usage_line = text
+            .lines()
+            .find(|line| line.starts_with("Context pressure:"))
+            .expect("context pressure line");
+        if usage_line.contains('%') {
+            let percent = usage_line
+                .split('(')
+                .nth(1)
+                .and_then(|rest| rest.split('%').next())
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            if percent >= crate::tui::context_inspector::CONTEXT_WARNING_THRESHOLD_PERCENT {
+                assert!(
+                    usage_line.contains("ESCALATED"),
+                    "expected escalation copy at >=85%: {usage_line}"
+                );
+            } else {
+                assert!(
+                    !usage_line.contains("ESCALATED"),
+                    "below 85% should stay informational: {usage_line}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

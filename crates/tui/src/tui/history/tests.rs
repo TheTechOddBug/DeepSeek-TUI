@@ -382,10 +382,7 @@ fn agent_renders_single_compact_line_in_live_mode() {
 }
 
 #[test]
-fn agent_pending_render_uses_placeholder_id() {
-    // No output yet → use the … placeholder so the user still sees a
-    // header line during the brief gap between tool-call-started and
-    // the spawn returning the agent_id.
+fn agent_pending_render_uses_fallback_token() {
     let cell = GenericToolCell {
         name: "agent".to_string(),
         status: ToolStatus::Running,
@@ -396,10 +393,13 @@ fn agent_pending_render_uses_placeholder_id() {
         output_summary: None,
         is_diff: false,
     };
-    let lines = cell.lines_with_mode(80, true, super::RenderMode::Live);
-    assert_eq!(lines.len(), 1);
-    let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(rendered.contains('\u{2026}'), "{rendered:?}"); // …
+    let rendered: String = cell.lines_with_mode(80, true, super::RenderMode::Live)[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(rendered.contains("do-thing"), "{rendered:?}");
+    assert!(!rendered.contains('\u{2026}'), "{rendered:?}");
 }
 
 #[test]

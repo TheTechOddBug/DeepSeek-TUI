@@ -9,25 +9,17 @@ use super::{
     GenericToolCell, render_tool_header_with_family_and_summary, tool_status_label, truncate_text,
 };
 
-/// Render `agent` as a single compact summary line for live mode. The
-/// companion `DelegateCard` already carries the live action tree, status, and
-/// final summary; this line is just the pointer that says "a spawn happened,
-/// here's the agent id".
-///
-/// Output shape (header):
-///   `◐ delegate · agent  agent-abc12  [running]`
-/// Falls back to a placeholder when the spawn is still pending and no agent id
-/// has been assigned yet.
 pub(super) fn render_agent_compact(cell: &GenericToolCell, low_motion: bool) -> Vec<Line<'static>> {
     let family = crate::tui::widgets::tool_card::ToolFamily::Delegate;
     let agent_id = cell
         .output
         .as_deref()
         .and_then(extract_agent_id)
-        .unwrap_or("…");
+        .map(str::to_string)
+        .unwrap_or_else(|| delegate_identity_fallback(cell));
     vec![render_tool_header_with_family_and_summary(
         family,
-        Some(agent_id),
+        Some(agent_id.as_str()),
         tool_status_label(cell.status),
         cell.status,
         None,
@@ -44,17 +36,40 @@ pub(super) fn render_activity_group(cell: &GenericToolCell, width: u16) -> Vec<L
     ))]
 }
 
-/// Pull the `agent_id` field out of a sub-agent open tool output. The tool
-/// emits structured JSON shaped like
-/// `{"agent_id": "agent-abc12", "nickname": "...", "model": "..."}` so we
-/// look for the `agent_id` key and return its string value.
-///
-/// Returns `None` for outputs we can't parse as JSON or that lack the expected
-/// key — the caller falls back to a placeholder so a still-pending spawn
-/// renders cleanly.
+fn delegate_identity_fallback(cell: &GenericToolCell) -> String {
+    if let Some(summary) = cell.input_summary.as_deref() {
+        let summary = summary.trim();
+        if let Some(rest) = summary.strip_prefix("role:") {
+            let role = rest.split_whitespace().next().unwrap_or(rest).trim();
+            if !role.is_empty() {
+                return role.to_string();
+            }
+        }
+        if let Some(rest) = summary.strip_prefix("prompt:") {
+            let title = rest.trim();
+            if !title.is_empty() {
+                let slug: String = title
+                    .chars()
+                    .take(24)
+                    .map(|ch| {
+                        if ch.is_ascii_alphanumeric() {
+                            ch.to_ascii_lowercase()
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+                let slug = slug.trim_matches('-');
+                if !slug.is_empty() {
+                    return slug.to_string();
+                }
+            }
+        }
+    }
+    "unknown child".to_string()
+}
+
 pub(super) fn extract_agent_id(output: &str) -> Option<&str> {
-    // Cheap, deterministic, no allocations: scan for the literal key.
-    // Avoids dragging serde_json into a render hot path on every frame.
     let key = "\"agent_id\"";
     let key_idx = output.find(key)?;
     let rest = &output[key_idx + key.len()..];

@@ -2344,12 +2344,11 @@ mod tests {
         // Explicit-user-override clause keeps the prompt useful for the
         // opposite preference (#1118 commenters who want English
         // thinking for token-cost reasons).
-        for phrase in ["think in English"] {
-            assert!(
-                lang.contains(phrase) && LOCALE_CLOSER_ZH_HANS.contains(phrase),
-                "expected the user-override example `{phrase}`"
-            );
-        }
+        let phrase = "think in English";
+        assert!(
+            lang.contains(phrase) && LOCALE_CLOSER_ZH_HANS.contains(phrase),
+            "expected the user-override example `{phrase}`"
+        );
     }
 
     #[test]
@@ -3033,7 +3032,7 @@ mod tests {
     fn agent_mode_tool_guidance_avoids_defensive_tool_suppression() {
         let prompt = compose_prompt(Personality::Calm);
         assert!(!prompt.contains("Tool Selection Guide"));
-        assert!(AGENT_MODE.contains("Delegate only independent work"));
+        assert!(AGENT_MODE.contains("Delegate only independent, fire-and-forget work"));
         assert!(AGENT_MODE.contains("Use `rlm_open`"));
         assert!(
             !AGENT_MODE.contains("When NOT to use certain tools"),
@@ -3219,10 +3218,6 @@ mod tests {
         assert!(prompt.contains("model_strength: \"same\""));
         assert!(prompt.contains("model_strength: \"faster\""));
         assert!(prompt.contains("type: \"explore\""));
-        assert!(prompt.contains("thinking: \"off\""));
-        assert!(prompt.contains("thinking: \"high\""));
-        assert!(prompt.contains("thinking: \"max\""));
-        assert!(prompt.contains("thinking: \"auto\""));
         assert!(include_str!("tools/subagent/mod.rs").contains("Overrides model_strength"));
         assert!(prompt.contains("defaults to `model_strength: \"faster\"`"));
         assert!(prompt.contains("2-4 `type: \"explore\"` sub-agents"));
@@ -3249,7 +3244,7 @@ mod tests {
                 "main prompt should include Subagent Brief field `{field}`"
             );
         }
-        assert!(prompt.contains("should not repeat them unless they find a"));
+        assert!(prompt.contains("Brief sub-agents with a compact Subagent Brief"));
     }
 
     #[test]
@@ -3259,8 +3254,7 @@ mod tests {
         assert!(prompt.contains("read-only"));
         assert!(prompt.contains("3-5 tool calls"));
         assert!(prompt.contains("Review/verifier children stop after decisive evidence"));
-        assert!(prompt.contains("Implementers are not forced into that cap"));
-        assert!(prompt.contains("checkpoints before scope"));
+        assert!(prompt.contains("No fan-out without a fan-in owner"));
     }
 
     #[test]

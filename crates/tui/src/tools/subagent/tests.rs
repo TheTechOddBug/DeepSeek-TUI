@@ -6,7 +6,7 @@ use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post
 use std::collections::HashSet;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tempfile::tempdir;
+use tempfile::{Builder as TempDirBuilder, tempdir};
 
 fn make_assignment() -> SubAgentAssignment {
     SubAgentAssignment::new("prompt".to_string(), Some("worker".to_string()))
@@ -3519,16 +3519,70 @@ fn parse_spawn_request_accepts_worktree_isolation() {
 }
 
 #[test]
-fn parse_spawn_request_rejects_cwd_with_worktree_isolation() {
+fn parse_spawn_request_accepts_cwd_with_worktree_isolation() {
     let input = json!({
         "prompt": "build feature A",
         "cwd": ".worktrees/manual",
         "worktree": true
     });
-    let err = parse_spawn_request(&input).expect_err("cwd and worktree should conflict");
+    let parsed = parse_spawn_request(&input).expect("cwd and worktree may be combined");
+    assert!(parsed.worktree.is_some());
+    assert!(parsed.cwd.is_some());
+}
+
+#[test]
+fn git_repo_root_finds_repo_from_direct_cwd() {
+    let repo = init_subagent_git_repo();
+    let root = git_repo_root(repo.path()).expect("direct repo cwd should resolve");
+    assert_eq!(
+        root.canonicalize().expect("canonical root"),
+        repo.path().canonicalize().expect("canonical repo")
+    );
+}
+
+#[test]
+fn git_repo_root_discovers_one_level_nested_repo_from_harness() {
+    let repo = init_subagent_git_repo();
+    let harness = tempdir().expect("harness dir");
+    let nested = harness.path().join("CodeWhale");
+    Command::new("git")
+        .args([
+            "clone",
+            repo.path().to_str().unwrap(),
+            nested.to_str().unwrap(),
+        ])
+        .output()
+        .expect("clone nested repo");
+    let root = git_repo_root(harness.path()).expect("harness cwd should discover nested repo");
+    assert_eq!(
+        root.canonicalize().expect("canonical root"),
+        nested.canonicalize().expect("canonical nested")
+    );
+}
+
+#[test]
+fn git_repo_root_reports_attempted_paths_when_no_repo_found() {
+    let repo_root = git_repo_root(&std::env::current_dir().expect("current dir"))
+        .expect("test should run inside the checkout");
+    let harness = TempDirBuilder::new()
+        .prefix(".codewhale-no-repo-")
+        .tempdir_in(repo_root.parent().expect("repo parent"))
+        .expect("empty harness outside checkout");
+    let empty = harness
+        .path()
+        .join("isolated")
+        .join("a")
+        .join("b")
+        .join("c")
+        .join("d")
+        .join("empty");
+    std::fs::create_dir_all(&empty).expect("empty nested dir");
+    let expected = empty.canonicalize().expect("canonical empty dir");
+    let err = git_repo_root(&empty).expect_err("missing repo should fail cleanly");
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("either cwd or worktree"),
-        "unexpected error: {err}"
+        message.contains("Tried:") && message.contains(expected.to_string_lossy().as_ref()),
+        "expected friendly attempted-path error, got: {message}"
     );
 }
 
@@ -3596,6 +3650,104 @@ fn create_isolated_worktree_rejects_invalid_branch_as_input() {
     assert!(
         err.to_string().contains("Invalid worktree_branch"),
         "unexpected error: {err}"
+    );
+}
+
+fn init_git_repo_at(path: &std::path::Path) {
+    let init = Command::new("git")
+        .arg("init")
+        .current_dir(path)
+        .output()
+        .expect("git init should run");
+    assert!(init.status.success(), "git init failed");
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=codewhale Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
+        .current_dir(path)
+        .output()
+        .expect("git commit should run");
+    assert!(commit.status.success(), "git commit failed");
+}
+
+#[test]
+fn create_isolated_worktree_discovers_nested_repo_from_harness_parent() {
+    let harness = tempdir().expect("harness");
+    let nested = harness.path().join("CodeWhale");
+    std::fs::create_dir_all(&nested).expect("nested checkout dir");
+    init_git_repo_at(&nested);
+    let worktree_home = tempdir().expect("worktree home");
+    let request = SubAgentWorktreeRequest {
+        branch: Some("codex/agent-harness-nested".to_string()),
+        path: Some(worktree_home.path().join("isolated")),
+        base_ref: None,
+    };
+
+    let path = create_isolated_worktree(
+        harness.path(),
+        &request,
+        Some("harness-nested"),
+        &SubAgentType::Explore,
+    )
+    .expect("harness parent should discover nested repo");
+
+    assert!(path.exists(), "worktree path should exist");
+    assert_eq!(
+        current_git_branch(&path).as_deref(),
+        Some("codex/agent-harness-nested")
+    );
+}
+
+#[test]
+fn create_isolated_worktree_reports_friendly_error_when_no_repo_found() {
+    let harness = tempdir().expect("harness");
+    std::fs::create_dir_all(harness.path().join("not-a-repo")).expect("mkdir");
+    let worktree_home = tempdir().expect("worktree home");
+    let request = SubAgentWorktreeRequest {
+        branch: Some("codex/agent-missing".to_string()),
+        path: Some(worktree_home.path().join("isolated")),
+        base_ref: None,
+    };
+
+    let err = create_isolated_worktree(harness.path(), &request, None, &SubAgentType::General)
+        .expect_err("missing repo should fail with friendly error");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("requires a git repository") && message.contains("Tried:"),
+        "expected actionable discovery error, got: {message}"
+    );
+}
+
+#[test]
+fn create_isolated_worktree_rejects_ambiguous_nested_repos() {
+    let harness = tempdir().expect("harness");
+    for name in ["RepoA", "RepoB"] {
+        let nested = harness.path().join(name);
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        init_git_repo_at(&nested);
+    }
+    let worktree_home = tempdir().expect("worktree home");
+    let request = SubAgentWorktreeRequest {
+        branch: Some("codex/agent-ambiguous".to_string()),
+        path: Some(worktree_home.path().join("isolated")),
+        base_ref: None,
+    };
+
+    let err = create_isolated_worktree(harness.path(), &request, None, &SubAgentType::General)
+        .expect_err("multiple nested repos should fail deterministically");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("Multiple git repositories found"),
+        "expected ambiguity diagnostic, got: {message}"
     );
 }
 
@@ -3761,7 +3913,14 @@ fn annotated_failure_message_composes_class_tag_and_model_hint() {
     ))
     .context("Responses API request failed");
 
-    let annotated = annotate_child_model_error(&subagent_failure_message(&err), "gpt-5.5-codex");
+    let provider = crate::config::ApiProvider::OpenaiCodex;
+    let route = ModelRoute::Fixed("gpt-5.5-codex".to_string());
+    let annotated = annotate_child_model_error(
+        &subagent_failure_message(&err),
+        "gpt-5.5-codex",
+        provider,
+        &route,
+    );
 
     // Class tag from subagent_failure_message.
     assert!(annotated.starts_with("[auth]"), "{annotated}");
@@ -3780,6 +3939,10 @@ fn annotated_failure_message_composes_class_tag_and_model_hint() {
             || annotated.contains("child-agent model config"),
         "{annotated}"
     );
+    // #4049: the failure now names the provider and the route source.
+    assert!(annotated.contains(provider.display_name()), "{annotated}");
+    assert!(annotated.contains("route:"), "{annotated}");
+    assert!(annotated.contains("explicit model id"), "{annotated}");
 }
 
 #[test]
@@ -3827,7 +3990,9 @@ fn subagent_failure_message_preserves_error_chain() {
 fn annotate_child_model_error_adds_actionable_hint() {
     // #2653: a bare provider 403 becomes actionable by naming the model and the
     // recovery path, while unrelated errors pass through unchanged.
-    let auth = annotate_child_model_error("403 Forbidden", "kimi-k2");
+    let provider = crate::config::ApiProvider::Moonshot;
+    let inherit = ModelRoute::Inherit;
+    let auth = annotate_child_model_error("403 Forbidden", "kimi-k2", provider, &inherit);
     assert!(auth.contains("kimi-k2"), "names the model: {auth}");
     assert!(
         auth.contains("child model override"),
@@ -3837,13 +4002,19 @@ fn annotate_child_model_error_adds_actionable_hint() {
         auth.contains("403 Forbidden"),
         "preserves the original: {auth}"
     );
+    // #4049: provider + route source are named in the hint.
+    assert!(auth.contains(provider.display_name()), "{auth}");
+    assert!(auth.contains("inherited from the parent"), "{auth}");
 
-    let unrelated = annotate_child_model_error("connection reset by peer", "kimi-k2");
+    // Unrelated errors still pass through completely unchanged (no provider
+    // /route noise on a network failure).
+    let unrelated =
+        annotate_child_model_error("connection reset by peer", "kimi-k2", provider, &inherit);
     assert_eq!(unrelated, "connection reset by peer");
 
     // #3020: provider rejections that classify as Internal (not
     // Authorization/State) still get the hint via raw-text matching.
-    let not_exist = annotate_child_model_error("Model Not Exist", "kimi-k2");
+    let not_exist = annotate_child_model_error("Model Not Exist", "kimi-k2", provider, &inherit);
     assert!(
         not_exist.contains("child-agent model config"),
         "DeepSeek-style rejection gets the hint: {not_exist}"
@@ -3852,10 +4023,56 @@ fn annotate_child_model_error_adds_actionable_hint() {
     let openai_style = annotate_child_model_error(
         "The model `gpt-5.5-nano` does not exist or you do not have access to it.",
         "gpt-5.5-nano",
+        crate::config::ApiProvider::OpenaiCodex,
+        &ModelRoute::Fixed("gpt-5.5-nano".to_string()),
     );
     assert!(
         openai_style.contains("child-agent model config"),
         "OpenAI-style rejection gets the hint: {openai_style}"
+    );
+}
+
+#[test]
+fn child_launch_error_names_provider_model_and_route_source() {
+    // #4049: a model-not-found child launch failure must name the provider
+    // that was used, the model that was requested, and the route that produced
+    // it, so the parent (and user) can tell whether the provider context was
+    // lost, the wrong model was requested, or an override needs adjusting.
+    let err = anyhow::Error::new(crate::llm_client::LlmError::ModelError(
+        "Model \"deepseek-v4-pro\" not found".to_string(),
+    ));
+    let provider = crate::config::ApiProvider::Deepseek;
+    let route = ModelRoute::Fixed("deepseek-v4-pro".to_string());
+    let annotated = annotate_child_model_error(
+        &subagent_failure_message(&err),
+        "deepseek-v4-pro",
+        provider,
+        &route,
+    );
+    assert!(
+        annotated.contains(provider.display_name()),
+        "provider: {annotated}"
+    );
+    assert!(annotated.contains("deepseek-v4-pro"), "model: {annotated}");
+    assert!(
+        annotated.contains("route:"),
+        "route label present: {annotated}"
+    );
+    assert!(
+        annotated.contains("explicit model id"),
+        "route source: {annotated}"
+    );
+
+    // The route label reflects an inherited route distinctly from a fixed one.
+    let inherited = annotate_child_model_error(
+        &subagent_failure_message(&err),
+        "deepseek-v4-pro",
+        provider,
+        &ModelRoute::Inherit,
+    );
+    assert!(
+        inherited.contains("inherited from the parent"),
+        "inherit route source: {inherited}"
     );
 }
 
@@ -5049,7 +5266,37 @@ async fn run_subagent_task_emits_parent_completion_before_terminal_update() {
             .get_result(&agent_id)
             .expect("completed agent should be present")
     };
-    assert_eq!(snapshot.status, SubAgentStatus::Completed);
+    assert!(
+        matches!(snapshot.status, SubAgentStatus::Failed(_)),
+        "0 max_steps cannot produce a final summary, so the child must fail: {:?}",
+        snapshot.status
+    );
+}
+
+#[test]
+fn summarize_subagent_result_diagnoses_missing_completed_payload() {
+    let snap = make_snapshot(SubAgentStatus::Completed);
+    let summary = summarize_subagent_result(&snap);
+    assert!(
+        summary.contains("no final summary"),
+        "Completed without payload must not read as silent success: {summary}"
+    );
+}
+
+#[test]
+fn summarize_subagent_result_budget_exhaustion_is_actionable_not_raw_done() {
+    let mut snap = make_snapshot(SubAgentStatus::BudgetExhausted);
+    snap.result = Some("partial findings from step 1".to_string());
+    let summary = summarize_subagent_result(&snap);
+    assert!(summary.contains("partial output preserved"), "{summary}");
+    assert!(!summary.eq("Token budget exhausted"), "{summary}");
+
+    let empty = make_snapshot(SubAgentStatus::BudgetExhausted);
+    let summary = summarize_subagent_result(&empty);
+    assert!(
+        summary.contains("retry with a smaller scoped task"),
+        "{summary}"
+    );
 }
 
 #[test]
@@ -5098,6 +5345,76 @@ fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
         root_rx.try_recv().is_err(),
         "root engine must not receive nested child completion directly"
     );
+}
+
+#[test]
+fn subagent_completion_from_result_surfaces_step_limit_not_silent_success() {
+    let snap = make_snapshot(SubAgentStatus::Failed(
+        "child reached its step limit (12 steps) without returning a final summary".to_string(),
+    ));
+    let completion = subagent_completion_from_result(&snap);
+    assert!(completion.payload.contains("step limit"), "{completion:?}");
+    assert!(!completion.payload.contains("Completed (no output)"));
+}
+
+#[test]
+fn subagent_completion_from_result_preserves_missing_final_summary_diagnostic() {
+    let snap = make_snapshot(SubAgentStatus::Completed);
+    let completion = subagent_completion_from_result(&snap);
+    assert!(
+        completion.payload.contains("no final summary"),
+        "{completion:?}"
+    );
+}
+
+#[test]
+fn subagent_budget_exhaustion_completion_carries_budget_exhausted_sentinel() {
+    let mut snap = make_snapshot(SubAgentStatus::BudgetExhausted);
+    snap.result = Some("partial findings from step 2".to_string());
+    let completion = subagent_completion_from_result(&snap);
+    assert!(
+        completion.payload.contains("partial output preserved"),
+        "{completion:?}"
+    );
+    let inner = completion
+        .payload
+        .split("<codewhale:subagent.done>")
+        .nth(1)
+        .and_then(|chunk| chunk.split("</codewhale:subagent.done>").next())
+        .expect("sentinel json");
+    let parsed: serde_json::Value = serde_json::from_str(inner).expect("sentinel parses");
+    assert_eq!(parsed["status"], "budget_exhausted");
+    assert_eq!(parsed["summary_location"], "previous_line");
+}
+
+#[test]
+fn subagent_completion_inlines_evidence_before_sentinel() {
+    let mut snap = make_snapshot(SubAgentStatus::Completed);
+    snap.result =
+        Some("VERDICT: pass\n### EVIDENCE\n- src/lib.rs:1-3 — init ok\n### GAPS\nnone".to_string());
+    let completion = subagent_completion_from_result(&snap);
+    let evidence_pos = completion
+        .payload
+        .find("### EVIDENCE")
+        .expect("evidence block");
+    let sentinel_pos = completion
+        .payload
+        .find("<codewhale:subagent.done>")
+        .expect("sentinel");
+    assert!(evidence_pos < sentinel_pos, "evidence before sentinel");
+    assert!(completion.payload.contains("src/lib.rs:1-3"));
+    assert!(
+        completion.payload.find("VERDICT: pass").unwrap_or(0) < evidence_pos,
+        "summary before evidence"
+    );
+}
+
+#[test]
+fn subagent_completion_skips_empty_evidence_on_failed_child() {
+    let mut snap = make_snapshot(SubAgentStatus::Failed("boom".to_string()));
+    snap.result = Some("### EVIDENCE\n- should-not-appear".to_string());
+    let completion = subagent_completion_from_result(&snap);
+    assert!(!completion.payload.contains("### EVIDENCE"));
 }
 
 #[test]

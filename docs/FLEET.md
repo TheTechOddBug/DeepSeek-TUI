@@ -41,13 +41,15 @@ logs and adapter logs are stored under `.codewhale/fleet/` and
 
 ## Authoring agent profiles (`/fleet setup`)
 
-`/fleet setup` (also `/fleet`, or the `roles`/`profiles`/`loadout`/`party`
-aliases) opens an in-TUI wizard for authoring a reusable agent-team profile.
-`/fleet status` opens the worker-status view instead; `/subagents` is a
+`/fleet setup` (also `/fleet setup edit` / `new`) opens an in-TUI wizard for
+authoring a reusable agent-team profile. Bare `/fleet` and the
+`roster`/`roles`/`profiles`/`loadout`/`party` aliases open the roster (the saved
+profiles). `/fleet status` opens the worker-status view; `/subagents` is a
 compatibility shortcut for that status view.
 
 The wizard is progressive: you make one focused choice at a time — a **role**,
-then a **model class** — and then review the full posture (model/route,
+then a **model** (`inherit`, or a concrete model from the active provider) — and
+then review the full posture (model/route,
 permissions, tools, workspace/org scope, and review policy) before doing
 anything. Pressing **Enter** ("start") on the review step inserts a safe
 profile-authoring prompt into the composer; it does not write a file itself.
@@ -63,7 +65,7 @@ drafting behind a ratify gate:
   nothing is saved until you press **`g`** to ratify (or press `m` again to
   redraft). Ratifying writes the profile to `.codewhale/agents/<role>`.
 
-## Naming: Modes, Workflow, Fleet, and Swarm
+## Naming: Modes, Workflow, and Fleet
 
 These names describe different layers, not competing systems. Agent, Plan, and
 YOLO stay the permission/work modes. Workflow is an orchestration overlay that
@@ -77,16 +79,36 @@ can run on top of those modes when the task needs a continuous workflow.
 - **Fleet** is the durable sub-agent configuration and execution substrate:
   slots, profiles, per-slot models, tool posture, local/SSH hosts, trust
   policy, leases, heartbeats, logs, receipts, and status APIs.
-- **Swarm** is the high-fanout behavior inside Workflow. It is gated in
-  v0.8.61: `/swarm` must not revive prompt-only sub-agent fanout. It should
-  compile into a Workflow-backed fleet run once the durable worker and goal
-  re-dispatch substrate is available.
+- **High fan-out** is a behavior of a Workflow run, not a separate system:
+  when a phase needs many workers at once, Workflow dispatches them as a
+  Fleet-backed run (durable workers, receipts, goal re-dispatch) rather than
+  reviving prompt-only sub-agent fanout.
+- **Fan-in is mandatory:** no fan-out without an owner that waits, aggregates,
+  verifies, and synthesizes one result. The operator should depend on one
+  manager or workflow receipt, not N loose `agent` children scattered across
+  the transcript.
 
 UI guidance: keep the main transcript calm. A Workflow run should appear as a
 compact progress card plus Work/Agents sidebar rows with phase names, worker
 counts, receipts, and nested indentation for child workers. Use the whale mark
 sparingly as an active header/status signal; avoid repeating emoji-heavy rows
 for every worker.
+
+## Manager-owned operations
+
+When parallel work must return one combined answer, use a manager-owned
+operation instead of a flat `agent` fan-out:
+
+1. **Cast one manager** (operator or workflow orchestrator).
+2. **Fan out** child tasks through `workflow` (`task()`, `parallel()`,
+   `pipeline()`, `phase()`) or a single manager session that owns the children.
+3. **Wait** for child receipts or completion events.
+4. **Aggregate and verify** load-bearing claims before treating them as facts.
+5. **Synthesize** one result the operator can depend on.
+
+Raw `agent` fan-out is appropriate only for independent, fire-and-forget work
+where no single fan-in result is required. If results must be merged, compared,
+or verified, route through `workflow` so the manager owns fan-in.
 
 ## Workflow on Fleet
 

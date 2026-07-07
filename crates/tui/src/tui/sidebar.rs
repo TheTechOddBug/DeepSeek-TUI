@@ -2511,6 +2511,7 @@ pub struct SidebarAgentRow {
     pub spawn_depth: u32,
     pub name: String,
     pub role: String,
+    pub model: Option<String>,
     pub status: String,
     pub objective: Option<String>,
     pub git_branch: Option<String>,
@@ -2565,6 +2566,7 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                 spawn_depth: agent.spawn_depth,
                 name: display_name,
                 role: agent.agent_type.as_str().to_string(),
+                model: Some(agent.model.clone()).filter(|model| !model.trim().is_empty()),
                 status: agent
                     .worker_status
                     .map(sidebar_worker_status_text)
@@ -2609,6 +2611,7 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                     } else {
                         "agent".to_string()
                     },
+                    model: None,
                     status: sidebar_progress_status_text(progress).to_string(),
                     objective: None,
                     git_branch: None,
@@ -2834,6 +2837,9 @@ fn subagent_panel_rows(
         // #3030: keep raw agent ids out of the compact detail line — the
         // full id remains available in the hover text.
         let mut detail_parts = Vec::new();
+        if let Some(model) = row.model.as_deref() {
+            detail_parts.push(format!("model {model}"));
+        }
         if row.steps_taken > 0 {
             detail_parts.push(format!("{} step(s)", row.steps_taken));
         }
@@ -3022,6 +3028,9 @@ fn agent_row_hover_text(row: &SidebarAgentRow) -> String {
     }
     if row.spawn_depth > 0 {
         let _ = write!(text, "\ndepth: {}", row.spawn_depth);
+    }
+    if let Some(model) = row.model.as_deref() {
+        let _ = write!(text, "\nmodel: {model}");
     }
     let mut status_line = format!("status: {}", row.status);
     if let Some(duration) = row.duration_ms {
@@ -4558,7 +4567,10 @@ mod tests {
             "background shell headline should show the command, not only the shell id: {text:?}"
         );
         assert!(
-            text.iter().any(|line| line.contains("⠋ Bash running")),
+            text.iter().any(|line| line.contains(&format!(
+                "{} Bash running",
+                crate::tui::spinner::BRAILLE_SPINNER_FRAMES[0]
+            ))),
             "running background shell should show a braille spinner prefix: {text:?}"
         );
         assert!(
@@ -4608,13 +4620,22 @@ mod tests {
             owner_agent_name: None,
         };
 
-        assert_eq!(background_task_spinner_prefix(&task), Some("⠋"));
+        assert_eq!(
+            background_task_spinner_prefix(&task),
+            Some(crate::tui::spinner::BRAILLE_SPINNER_FRAMES[0])
+        );
 
         task.duration_ms = Some(BRAILLE_SPINNER_FRAME_MS - 1);
-        assert_eq!(background_task_spinner_prefix(&task), Some("⠋"));
+        assert_eq!(
+            background_task_spinner_prefix(&task),
+            Some(crate::tui::spinner::BRAILLE_SPINNER_FRAMES[0])
+        );
 
         task.duration_ms = Some(BRAILLE_SPINNER_FRAME_MS);
-        assert_eq!(background_task_spinner_prefix(&task), Some("⠙"));
+        assert_eq!(
+            background_task_spinner_prefix(&task),
+            Some(crate::tui::spinner::BRAILLE_SPINNER_FRAMES[1])
+        );
     }
 
     #[test]
@@ -4712,7 +4733,10 @@ mod tests {
             "auto Tasks should keep live background jobs visible: {text:?}"
         );
         assert!(
-            text.iter().any(|line| line.contains("⠋ Bash running")),
+            text.iter().any(|line| line.contains(&format!(
+                "{} Bash running",
+                crate::tui::spinner::BRAILLE_SPINNER_FRAMES[0]
+            ))),
             "auto Tasks should animate running background jobs: {text:?}"
         );
         for hidden in [
@@ -5000,6 +5024,7 @@ mod tests {
         };
         let rows = vec![SidebarAgentRow {
             id: "agent_0123456789".to_string(),
+            model: None,
             parent_run_id: None,
             spawn_depth: 1,
             name: "investigator".to_string(),
@@ -5051,6 +5076,7 @@ mod tests {
         };
         let rows = vec![SidebarAgentRow {
             id: "agent_fedcba987654".to_string(),
+            model: None,
             parent_run_id: None,
             spawn_depth: 1,
             name: "scout".to_string(),
@@ -5097,6 +5123,7 @@ mod tests {
             .enumerate()
             .map(|(idx, status)| SidebarAgentRow {
                 id: format!("agent_terminal_{idx}"),
+                model: None,
                 parent_run_id: None,
                 spawn_depth: 1,
                 name: format!("worker-{idx}"),
@@ -5147,6 +5174,7 @@ mod tests {
         };
         let rows = vec![SidebarAgentRow {
             id: "agent_cancelled".to_string(),
+            model: None,
             parent_run_id: None,
             spawn_depth: 1,
             name: "worker-cancelled".to_string(),
@@ -5195,6 +5223,7 @@ mod tests {
         let rows = vec![
             SidebarAgentRow {
                 id: "agent_grandchild".to_string(),
+                model: None,
                 parent_run_id: Some("agent_parent".to_string()),
                 spawn_depth: 2,
                 name: "nested-reader".to_string(),
@@ -5209,6 +5238,7 @@ mod tests {
             },
             SidebarAgentRow {
                 id: "agent_parent".to_string(),
+                model: None,
                 parent_run_id: None,
                 spawn_depth: 1,
                 name: "nested-parent".to_string(),
@@ -5634,6 +5664,7 @@ mod tests {
         let rows = vec![
             SidebarAgentRow {
                 id: "agent_a5e674dc".to_string(),
+                model: None,
                 parent_run_id: None,
                 spawn_depth: 1,
                 name: "check-docs-mcp".to_string(),
@@ -5648,6 +5679,7 @@ mod tests {
             },
             SidebarAgentRow {
                 id: "agent_850aa63f".to_string(),
+                model: None,
                 parent_run_id: None,
                 spawn_depth: 1,
                 name: "check-install-docs".to_string(),
@@ -5947,6 +5979,7 @@ mod tests {
             "currently reviewing sidebar hover popover wrapping and hitbox metadata";
         let rows = vec![SidebarAgentRow {
             id: long_id.to_string(),
+            model: None,
             parent_run_id: None,
             spawn_depth: 1,
             name: "sidebar-detail-worker-with-long-name".to_string(),
@@ -5972,6 +6005,65 @@ mod tests {
     }
 
     #[test]
+    fn subagent_expanded_detail_line_shows_model() {
+        // #D (0.8.67 dogfood): the model each worker runs on must be visible
+        // in the expanded detail line so Hunter can tell per-agent routes apart.
+        let summary = SidebarSubagentSummary {
+            cached_total: 1,
+            cached_running: 1,
+            ..SidebarSubagentSummary::default()
+        };
+        let rows = vec![SidebarAgentRow {
+            id: "agent_model_detail".to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
+            name: "model-worker".to_string(),
+            role: "worker".to_string(),
+            model: Some("kimi-k2.6".to_string()),
+            status: "running".to_string(),
+            objective: None,
+            git_branch: None,
+            progress: Some("working".to_string()),
+            steps_taken: 3,
+            duration_ms: Some(1_000),
+            expanded: true,
+        }];
+
+        let (lines, _) =
+            subagent_panel_rows(&summary, &rows, Locale::En, 72, 8, &palette::UI_THEME);
+        let text = lines_to_text(&lines);
+        assert!(
+            text.iter().any(|line| line.contains("model kimi-k2.6")),
+            "expanded detail line should surface the agent model: {text:?}"
+        );
+    }
+
+    #[test]
+    fn agent_row_hover_includes_model() {
+        // #D (0.8.67 dogfood): the hover dossier should also carry the model.
+        let row = SidebarAgentRow {
+            id: "agent_model_hover".to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
+            name: "hover-worker".to_string(),
+            role: "worker".to_string(),
+            model: Some("deepseek-v4".to_string()),
+            status: "running".to_string(),
+            objective: None,
+            git_branch: None,
+            progress: Some("reading".to_string()),
+            steps_taken: 1,
+            duration_ms: Some(500),
+            expanded: false,
+        };
+        let hover = agent_row_hover_text(&row);
+        assert!(
+            hover.contains("model: deepseek-v4"),
+            "hover dossier should include the model line: {hover:?}"
+        );
+    }
+
+    #[test]
     fn subagent_label_hover_carries_full_agent_dossier() {
         let mut role_counts = std::collections::BTreeMap::new();
         role_counts.insert("worker".to_string(), 1);
@@ -5983,6 +6075,7 @@ mod tests {
         };
         let rows = vec![SidebarAgentRow {
             id: "019e9142-83f6-7713-87f1-28902e74bf05".to_string(),
+            model: None,
             parent_run_id: None,
             spawn_depth: 1,
             name: "doc-checker".to_string(),

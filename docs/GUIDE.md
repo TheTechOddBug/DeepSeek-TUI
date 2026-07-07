@@ -414,8 +414,7 @@ If a repository has its own instructions, treat them as part of the active
 work. Read the local guidance before editing, and keep any contribution within
 the repository's conventions.
 
-Next: see [SKILL_INVOCATION_DESIGN.md](SKILL_INVOCATION_DESIGN.md) for skill
-activation behavior, [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md) for
+Next: see [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md) for
 Claude Code skill/plugin compatibility, and [CONFIGURATION.md](CONFIGURATION.md)
 for config paths and project authority.
 

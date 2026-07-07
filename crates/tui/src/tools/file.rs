@@ -869,6 +869,18 @@ fn line_start_before(input: &str, idx: usize) -> usize {
         .map_or(0, |newline| newline.saturating_add(1))
 }
 
+fn next_char_boundary(input: &str, idx: usize) -> usize {
+    if idx >= input.len() {
+        return input.len();
+    }
+
+    let mut next = idx.saturating_add(1);
+    while next < input.len() && !input.is_char_boundary(next) {
+        next = next.saturating_add(1);
+    }
+    next
+}
+
 fn leading_whitespace_fuzzy_matches(contents: &str, search: &str) -> Vec<(usize, usize)> {
     let (normalized_contents, byte_map) = strip_line_leading_whitespace_with_map(contents);
     let (normalized_search, _) = strip_line_leading_whitespace_with_map(search);
@@ -898,7 +910,7 @@ fn leading_whitespace_fuzzy_matches(contents: &str, search: &str) -> Vec<(usize,
             };
         let original_end = byte_map.get(norm_end).copied().unwrap_or(contents.len());
         matches.push((original_start, original_end));
-        cursor = norm_start.saturating_add(1);
+        cursor = next_char_boundary(&normalized_contents, norm_start);
     }
     matches
 }
@@ -960,7 +972,7 @@ fn punctuation_normalized_matches(contents: &str, search: &str) -> Vec<(usize, u
         };
         let original_end = byte_map.get(norm_end).copied().unwrap_or(contents.len());
         matches.push((original_start, original_end));
-        cursor = norm_start.saturating_add(1);
+        cursor = next_char_boundary(&norm_contents, norm_start);
     }
     matches
 }
@@ -2000,6 +2012,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_edit_file_fuzz_tolerates_leading_whitespace_after_multibyte_start() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let test_file = tmp.path().join("fuzzy_cjk.txt");
+        fs::write(&test_file, "数据\n").expect("write");
+        read_before_edit(&ctx, "fuzzy_cjk.txt").await;
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(
+                json!({
+                    "path": "fuzzy_cjk.txt",
+                    "search": "    数据",
+                    "replace": "记录",
+                    "fuzz": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.success, "{}", result.content);
+        assert!(result.content.contains("fuzzy indentation match"));
+        let edited = fs::read_to_string(&test_file).expect("read");
+        assert_eq!(edited, "记录\n");
+    }
+
+    #[tokio::test]
     async fn test_edit_file_fuzz_tolerates_smart_quote_substitution() {
         // The file on disk has ASCII quotes. The search comes from a
         // browser paste with curly quotes. Exact match fails; the
@@ -2034,6 +2075,35 @@ mod tests {
         );
         let edited = fs::read_to_string(&test_file).expect("read");
         assert_eq!(edited, "let s = \"hello universe\";\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_fuzz_tolerates_smart_quote_after_multibyte_start() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let test_file = tmp.path().join("smart_cjk.md");
+        fs::write(&test_file, "数据 \"x\"\n").expect("write");
+        read_before_edit(&ctx, "smart_cjk.md").await;
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(
+                json!({
+                    "path": "smart_cjk.md",
+                    "search": "数据 \u{201C}x\u{201D}",
+                    "replace": "数据 y",
+                    "fuzz": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.success, "{}", result.content);
+        assert!(result.content.contains("fuzzy punctuation match"));
+        let edited = fs::read_to_string(&test_file).expect("read");
+        assert_eq!(edited, "数据 y\n");
     }
 
     #[tokio::test]

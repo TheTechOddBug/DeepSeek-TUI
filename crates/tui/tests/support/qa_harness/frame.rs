@@ -52,7 +52,7 @@ impl Frame {
         let mut out = String::with_capacity(cols as usize);
         for x in 0..cols {
             if let Some(cell) = self.parser.screen().cell(y, x) {
-                out.push_str(&cell.contents());
+                out.push_str(cell.contents());
             }
         }
         out

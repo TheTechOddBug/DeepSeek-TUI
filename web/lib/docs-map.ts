@@ -138,18 +138,6 @@ export const DOC_TOPICS: DocTopic[] = [
     category: "extending",
   },
   {
-    id: "skills",
-    slug: "skills",
-    label: { en: "Skills", zh: "技能" },
-    description: {
-      en: "Skill loading, invocation design, and the community skill ecosystem.",
-      zh: "技能加载、调用设计和社区技能生态。",
-    },
-    repoSource: ["docs/SKILL_INVOCATION_DESIGN.md"],
-    hasPage: false,
-    category: "extending",
-  },
-  {
     id: "hooks",
     slug: "hooks",
     label: { en: "Hooks", zh: "钩子" },

@@ -213,8 +213,7 @@ The publish helper is idempotent for reruns: already-published crate versions ar
 
 `.github/workflows/release.yml` builds these binaries:
 
-- `codewhale-*` CLI binaries for Linux x64/arm64/riscv64, macOS x64/arm64,
-  and Windows x64
+- `codewhale-*` CLI binaries for Linux x64/arm64, macOS x64/arm64, and Windows x64
 - `codewhale-tui-*` TUI binaries for the same target matrix
 - `codew-*` shortcut binaries for the same target matrix
 - `codewhale.bat` for the Windows npm launcher

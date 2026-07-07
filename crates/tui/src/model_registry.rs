@@ -160,6 +160,11 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("trinity-large-thinking", ModelProvider::Arcee),
     ("arcee-ai/trinity-large-thinking", ModelProvider::Arcee),
     ("trinity-mini", ModelProvider::Arcee),
+    // --- Sakana / Fugu (config DEFAULT_SAKANA_MODEL) ---
+    ("fugu-ultra-20260615", ModelProvider::Other),
+    ("fugu-ultra", ModelProvider::Other),
+    // --- StepFun (config DEFAULT_STEPFUN_MODEL) ---
+    ("step-3.7-flash", ModelProvider::Other),
     // --- Xiaomi MiMo (config DEFAULT_XIAOMI_MIMO_MODEL) ---
     ("mimo-v2.5-pro", ModelProvider::XiaomiMimo),
     ("mimo-v2.5-pro-ultraspeed", ModelProvider::XiaomiMimo),

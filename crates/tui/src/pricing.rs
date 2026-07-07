@@ -419,6 +419,31 @@ mod tests {
     }
 
     #[test]
+    fn catalog_sourced_models_have_usd_pricing() {
+        for (model, input, output) in [
+            ("glm-5.2", 1.4, 4.4),
+            ("z-ai/glm-5.2", 1.4, 4.4),
+            ("kimi-k2.7-code", 0.95, 4.0),
+            ("moonshotai/kimi-k2.7-code", 0.95, 4.0),
+            ("minimax-m2.7", 0.3, 1.2),
+            ("minimax/minimax-m2.7", 0.3, 1.2),
+            ("trinity-mini", 0.045, 0.15),
+            ("arcee-ai/trinity-mini", 0.045, 0.15),
+            ("claude-opus-4-8", 5.0, 25.0),
+            ("claude-sonnet-4-6", 3.0, 15.0),
+            ("claude-haiku-4-5", 1.0, 5.0),
+            ("step-3.7-flash", 0.2, 1.15),
+            ("fugu-ultra-20260615", 5.0, 30.0),
+            ("fugu-ultra", 5.0, 30.0),
+        ] {
+            let pricing = pricing_for_model_at(model, Utc::now()).expect(model);
+            assert_eq!(pricing.usd.input_cache_miss_per_million, input, "{model}");
+            assert_eq!(pricing.usd.output_per_million, output, "{model}");
+            assert!(has_pricing_for_model(model));
+        }
+    }
+
+    #[test]
     fn curated_usd_only_models_have_pricing_and_accrue_cost() {
         let usage = Usage {
             input_tokens: 1_000_000,

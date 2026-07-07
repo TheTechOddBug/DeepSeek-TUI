@@ -52,7 +52,7 @@ brew tap Hmbown/deepseek-tui
 brew install deepseek-tui
 ```
 
-Linux riscv64 を含む全プラットフォーム向けのビルド済みアーカイブは [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases) に添付されています。チェックサム、中国ミラー、Windows 固有の手順、トラブルシューティングは [docs/INSTALL.md](docs/INSTALL.md) を見てください。
+Linux x64/arm64、macOS x64/arm64、Windows x64 向けのビルド済みアーカイブは [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases) に添付されています。Linux riscv64 の prebuilt は upstream QuickJS bindings の対応待ちで一時停止しています。チェックサム、中国ミラー、Windows 固有の手順、トラブルシューティングは [docs/INSTALL.md](docs/INSTALL.md) を見てください。
 
 ## 最初の起動
 

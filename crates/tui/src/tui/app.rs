@@ -17,7 +17,7 @@ use crate::client::{CacheWarmupKey, PromptInspection};
 use crate::compaction::CompactionConfig;
 use crate::config::{
     ApiProvider, Config, DEFAULT_TEXT_MODEL, SavedCredential, has_api_key, has_api_key_for,
-    save_api_key,
+    save_api_key, save_api_key_for,
 };
 use crate::config_ui::ConfigUiMode;
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
@@ -58,6 +58,7 @@ pub enum OnboardingState {
     /// Defaults to auto-detection from `LC_ALL` / `LANG`; explicit picks
     /// land in the persisted settings.toml via `Settings::set("locale", …)`.
     Language,
+    Provider,
     ApiKey,
     TrustDirectory,
     Tips,
@@ -1848,6 +1849,7 @@ pub struct App {
     // Onboarding
     pub onboarding: OnboardingState,
     pub onboarding_needs_api_key: bool,
+    pub onboarding_provider: ApiProvider,
     pub onboarding_workspace_trust_gate: bool,
     pub api_key_env_only: bool,
     pub api_key_input: String,
@@ -2783,6 +2785,7 @@ impl App {
             theme_id,
             onboarding,
             onboarding_needs_api_key: needs_api_key,
+            onboarding_provider: provider,
             onboarding_workspace_trust_gate,
             api_key_env_only,
             api_key_input: String::new(),
@@ -2954,16 +2957,21 @@ impl App {
             return Err(ApiKeyError::Empty);
         }
 
-        match save_api_key(&key) {
-            Ok(saved) => {
-                self.api_key_input.clear();
-                self.api_key_cursor = 0;
-                self.onboarding_needs_api_key = false;
-                self.api_key_env_only = false;
-                Ok(saved)
-            }
-            Err(source) => Err(ApiKeyError::SaveFailed { source }),
-        }
+        let saved = if matches!(
+            self.onboarding_provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN
+        ) {
+            save_api_key(&key).map_err(|source| ApiKeyError::SaveFailed { source })?
+        } else {
+            let path = save_api_key_for(self.onboarding_provider, &key)
+                .map_err(|source| ApiKeyError::SaveFailed { source })?;
+            SavedCredential::ConfigFile(path)
+        };
+        self.api_key_input.clear();
+        self.api_key_cursor = 0;
+        self.onboarding_needs_api_key = false;
+        self.api_key_env_only = false;
+        Ok(saved)
     }
 
     pub fn finish_onboarding_without_feature_intro(&mut self) {

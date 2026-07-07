@@ -8,6 +8,7 @@ use crate::palette;
 use crate::tui::app::App;
 
 pub fn lines(app: &App) -> Vec<Line<'static>> {
+    let provider = app.onboarding_provider;
     let mut lines = vec![
         Line::from(Span::styled(
             app.tr(MessageId::OnboardApiKeyTitle).to_string(),
@@ -17,9 +18,26 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            app.tr(MessageId::OnboardApiKeyStep1).to_string(),
+            format!(
+                "{} ({})",
+                app.tr(MessageId::OnboardApiKeyStep1),
+                provider.display_name()
+            ),
             Style::default().fg(palette::TEXT_PRIMARY),
         )),
+    ];
+    if let Some(url) = provider.credential_url() {
+        lines.push(Line::from(Span::styled(
+            url.to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            app.tr(MessageId::OnboardApiKeyLocalHint).to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+    }
+    lines.extend([
         Line::from(Span::styled(
             app.tr(MessageId::OnboardApiKeyStep2).to_string(),
             Style::default().fg(palette::TEXT_PRIMARY),
@@ -34,7 +52,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
             Style::default().fg(palette::TEXT_MUTED),
         )),
         Line::from(""),
-    ];
+    ]);
 
     let masked = mask_key(&app.api_key_input);
     let placeholder = app.tr(MessageId::OnboardApiKeyPlaceholder).to_string();
@@ -97,7 +115,7 @@ fn mask_key(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
     use crate::tui::app::TuiOptions;
     use std::path::PathBuf;
@@ -126,6 +144,7 @@ mod tests {
         };
         let mut app = App::new(options, &Config::default());
         app.ui_locale = locale;
+        app.onboarding_provider = ApiProvider::Zai;
         app
     }
 
@@ -141,7 +160,14 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(body.contains("DeepSeek API"), "title carries DeepSeek API");
+        assert!(
+            body.contains("连接你的 API 密钥"),
+            "title is provider-neutral and localized for zh-Hans"
+        );
+        assert!(
+            body.contains("z.ai/model-api"),
+            "expected default provider credential URL, got: {body}"
+        );
         assert!(
             body.contains("密钥"),
             "expected zh-Hans 'key' label, got: {body}"

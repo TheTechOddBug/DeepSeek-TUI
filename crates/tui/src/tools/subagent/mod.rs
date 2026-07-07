@@ -2866,6 +2866,10 @@ impl SubAgentManager {
             self.attach_budget_scope(&agent_id, scope);
         }
 
+        if let Some(mb) = runtime.mailbox.as_ref() {
+            let _ = mb.send(MailboxMessage::started(&agent_id, agent_type.clone()));
+        }
+
         if let Some(event_tx) = runtime.event_tx.clone() {
             let _ = event_tx.try_send(Event::AgentSpawned {
                 id: agent_id.clone(),
@@ -4310,7 +4314,12 @@ async fn run_subagent_task(task: SubAgentTask) {
             // parent model can branch on `summary_kind`.
             let raw = summarize_subagent_result(res);
             let (summary, truncated) = stamp_subagent_summary(&raw);
-            let sentinel = subagent_done_sentinel(&task.agent_id, res, truncated);
+            let sentinel = match &res.status {
+                SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted => {
+                    subagent_failed_sentinel(&task.agent_id, &raw)
+                }
+                _ => subagent_done_sentinel(&task.agent_id, res, truncated),
+            };
             (summary, sentinel)
         }
         Err(err) => {
@@ -4318,7 +4327,12 @@ async fn run_subagent_task(task: SubAgentTask) {
                 "sub-agent {} model request failed: {err:#}",
                 task.agent_id
             ));
-            let annotated = annotate_child_model_error(&subagent_failure_message(err), &model_id);
+            let annotated = annotate_child_model_error(
+                &subagent_failure_message(err),
+                &model_id,
+                task.runtime.client.api_provider(),
+                &task.runtime.worker_profile.model,
+            );
             (
                 format!("Failed: {annotated}"),
                 subagent_failed_sentinel(&task.agent_id, &annotated),
@@ -4328,13 +4342,26 @@ async fn run_subagent_task(task: SubAgentTask) {
 
     if let Some(mb) = task.runtime.mailbox.as_ref() {
         let envelope = match &result {
-            Ok(_) => MailboxMessage::Completed {
-                agent_id: task.agent_id.clone(),
-                summary: summary.clone(),
+            Ok(res) => match &res.status {
+                SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted => {
+                    MailboxMessage::Failed {
+                        agent_id: task.agent_id.clone(),
+                        error: summary.clone(),
+                    }
+                }
+                _ => MailboxMessage::Completed {
+                    agent_id: task.agent_id.clone(),
+                    summary: summary.clone(),
+                },
             },
             Err(err) => MailboxMessage::Failed {
                 agent_id: task.agent_id.clone(),
-                error: annotate_child_model_error(&subagent_failure_message(err), &model_id),
+                error: annotate_child_model_error(
+                    &subagent_failure_message(err),
+                    &model_id,
+                    task.runtime.client.api_provider(),
+                    &task.runtime.worker_profile.model,
+                ),
             },
         };
         let _ = mb.send(envelope);
@@ -4356,7 +4383,12 @@ async fn run_subagent_task(task: SubAgentTask) {
         Err(err) => {
             manager.update_failed(
                 &agent_id,
-                annotate_child_model_error(&subagent_failure_message(err), &model_id),
+                annotate_child_model_error(
+                    &subagent_failure_message(err),
+                    &model_id,
+                    task.runtime.client.api_provider(),
+                    &task.runtime.worker_profile.model,
+                ),
             );
         }
     }
@@ -4444,15 +4476,99 @@ pub(crate) fn emit_parent_completion(
 
 pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAgentCompletion {
     let raw = summarize_subagent_result(result);
-    let (summary, truncated) = stamp_subagent_summary(&raw);
+    let mut evidence_truncated = false;
+    let evidence_block = match &result.status {
+        SubAgentStatus::Failed(_)
+        | SubAgentStatus::BudgetExhausted
+        | SubAgentStatus::Cancelled
+        | SubAgentStatus::Interrupted(_) => None,
+        _ => result
+            .result
+            .as_deref()
+            .and_then(extract_evidence_block)
+            .map(|block| {
+                let (clipped, ev_trunc) = clip_evidence_block(&block);
+                evidence_truncated = ev_trunc;
+                clipped
+            })
+            .filter(|evidence| !evidence.trim().is_empty()),
+    };
+    let summary_source = evidence_block
+        .as_ref()
+        .map(|_| strip_evidence_block(&raw))
+        .unwrap_or(raw);
+    let (summary, truncated) = stamp_subagent_summary(&summary_source);
+    let summary_truncated = truncated || evidence_truncated;
     let sentinel = match &result.status {
         SubAgentStatus::Failed(error) => subagent_failed_sentinel(&result.agent_id, error),
-        _ => subagent_done_sentinel(&result.agent_id, result, truncated),
+        _ => subagent_done_sentinel(&result.agent_id, result, summary_truncated),
+    };
+    let payload = match evidence_block {
+        Some(evidence) => format!("{summary}\n{evidence}\n{sentinel}"),
+        None => format!("{summary}\n{sentinel}"),
     };
     SubAgentCompletion {
         agent_id: result.agent_id.clone(),
-        payload: format!("{summary}\n{sentinel}"),
+        payload,
     }
+}
+
+const SUBAGENT_EVIDENCE_CHAR_BUDGET: usize = 4_000;
+
+fn clip_evidence_block(block: &str) -> (String, bool) {
+    let total = block.chars().count();
+    if total <= SUBAGENT_EVIDENCE_CHAR_BUDGET {
+        return (block.to_string(), false);
+    }
+    let clipped: String = block.chars().take(SUBAGENT_EVIDENCE_CHAR_BUDGET).collect();
+    (format!("{clipped}…"), true)
+}
+
+fn extract_evidence_block(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let markers = ["### evidence", "## evidence", "evidence:"];
+    for marker in markers {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let block = &text[start..];
+        let tail = &block[marker.len()..];
+        let end = tail
+            .find("\n### ")
+            .or_else(|| tail.find("\n## "))
+            .or_else(|| tail.to_ascii_lowercase().find("\ngaps"))
+            .or_else(|| tail.to_ascii_lowercase().find("\nnext"))
+            .unwrap_or(tail.len());
+        let extracted = format!("{}{}", &block[..marker.len()], &tail[..end])
+            .trim()
+            .to_string();
+        if !extracted.is_empty() {
+            return Some(extracted);
+        }
+    }
+    None
+}
+
+fn strip_evidence_block(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let markers = ["### evidence", "## evidence", "evidence:"];
+    for marker in markers {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let block = &text[start..];
+        let tail = &block[marker.len()..];
+        let end = tail
+            .find("\n### ")
+            .or_else(|| tail.find("\n## "))
+            .or_else(|| tail.to_ascii_lowercase().find("\ngaps"))
+            .or_else(|| tail.to_ascii_lowercase().find("\nnext"))
+            .unwrap_or(tail.len());
+        let mut without = format!("{}{}", &text[..start], &block[marker.len() + end..]);
+        without = without.trim().to_string();
+        return without;
+    }
+    text.trim().to_string()
 }
 
 /// Build a `<codewhale:subagent.done>` JSON sentinel for a successful child.
@@ -5005,6 +5121,12 @@ async fn run_subagent(
     let mut consecutive_truncated_responses = 0;
     let mut latest_checkpoint: Option<SubAgentCheckpoint> = None;
     let mut tokens_used: u64 = 0;
+    // #4050: distinguish a real "the model chose to stop" exit (the `break`
+    // below) from loop exhaustion (running out of `max_steps` while still
+    // tool-calling). Only the former, with a non-empty final summary, is a
+    // genuine success; everything else must surface its stop reason instead of
+    // reporting a completed child with no payload.
+    let mut stopped_naturally = false;
 
     for _step in 0..max_steps {
         // Cooperative cancellation: bail if this session's token was cancelled
@@ -5466,6 +5588,7 @@ async fn run_subagent(
                     &agent_id,
                     format!("{}: complete", format_step_counter(steps, max_steps)),
                 );
+                stopped_naturally = true;
                 break;
             }
             continue;
@@ -5567,11 +5690,28 @@ async fn run_subagent(
     }
 
     release_resident_leases_for(&agent_id);
-    let status = SubAgentStatus::Completed;
+    let has_final_summary = final_result
+        .as_deref()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false);
+    // #4050: only a natural stop with a final summary is a real success.
+    let status = if stopped_naturally {
+        if has_final_summary {
+            SubAgentStatus::Completed
+        } else {
+            SubAgentStatus::Failed(
+                "child stopped without returning a final summary (its last turn produced no assistant text)".to_string(),
+            )
+        }
+    } else {
+        SubAgentStatus::Failed(format!(
+            "child reached its step limit ({steps} steps) without returning a final summary"
+        ))
+    };
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     latest_checkpoint = Some(build_subagent_checkpoint(
         &agent_id,
-        "completed",
+        subagent_status_name(&status),
         &messages,
         steps,
         false,
@@ -5818,11 +5958,6 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
 
     let cwd = parse_optional_cwd(input)?;
     let worktree = parse_optional_worktree_request(input)?;
-    if cwd.is_some() && worktree.is_some() {
-        return Err(ToolError::invalid_input(
-            "Use either cwd or worktree isolation, not both".to_string(),
-        ));
-    }
     let model = parse_optional_subagent_model(input, "model")?;
     let explicit_model_strength = optional_input_str(input, &["model_strength", "modelStrength"])
         .map(SubAgentModelStrength::parse)
@@ -6153,13 +6288,11 @@ pub(crate) fn normalize_requested_subagent_model(
 }
 
 fn provider_name_for_error(provider: crate::config::ApiProvider) -> &'static str {
-    match provider {
-        crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN => "DeepSeek",
-        crate::config::ApiProvider::Openai | crate::config::ApiProvider::OpenaiCodex => "OpenAI",
-        crate::config::ApiProvider::Moonshot => "Moonshot",
-        crate::config::ApiProvider::Ollama => "Ollama",
-        _ => "this provider",
-    }
+    // Reuse the canonical picker/status label so every provider is named
+    // concretely (DeepSeek, Sakana, Zhipu, …) instead of collapsing the long
+    // tail to "this provider", and so error copy stays in sync with the model
+    // picker labels (#4049).
+    provider.display_name()
 }
 
 pub(crate) fn configured_model_for_role_or_type(
@@ -6500,18 +6633,28 @@ fn prepare_child_workspace(
     parent_workspace: &Path,
     request: &SpawnRequest,
 ) -> Result<Option<PathBuf>, ToolError> {
-    if let Some(requested_cwd) = request.cwd.as_ref() {
-        return validate_existing_child_cwd(parent_workspace, requested_cwd).map(Some);
-    }
+    let discovery_anchor = if let Some(requested_cwd) = request.cwd.as_ref() {
+        validate_existing_child_cwd(parent_workspace, requested_cwd)?
+    } else {
+        parent_workspace
+            .canonicalize()
+            .unwrap_or_else(|_| parent_workspace.to_path_buf())
+    };
+
     if let Some(worktree) = request.worktree.as_ref() {
         return create_isolated_worktree(
-            parent_workspace,
+            &discovery_anchor,
             worktree,
             request.session_name.as_deref(),
             &request.agent_type,
         )
         .map(Some);
     }
+
+    if request.cwd.is_some() {
+        return Ok(Some(discovery_anchor));
+    }
+
     Ok(None)
 }
 
@@ -6592,18 +6735,85 @@ fn create_isolated_worktree(
 }
 
 fn git_repo_root(workspace: &Path) -> Result<PathBuf, ToolError> {
-    let output = run_git_checked(
-        workspace,
-        &["rev-parse".to_string(), "--show-toplevel".to_string()],
-        "resolve git repository root",
-    )?;
-    let root = output.trim();
-    if root.is_empty() {
-        return Err(ToolError::invalid_input(
-            "worktree=true requires a git repository workspace".to_string(),
-        ));
+    const MAX_PARENT_LEVELS: usize = 4;
+    let start = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut paths_tried = Vec::new();
+    let mut current = Some(start.as_path());
+    let mut levels = 0usize;
+
+    while let Some(dir) = current {
+        paths_tried.push(dir.display().to_string());
+
+        if let Some(root) = try_git_toplevel(dir) {
+            return Ok(root);
+        }
+
+        if let Ok(entries) = fs::read_dir(dir) {
+            let mut nested_roots = Vec::new();
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if !child.is_dir() || !path_looks_like_git_checkout(&child) {
+                    continue;
+                }
+                if child
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.'))
+                {
+                    continue;
+                }
+                if let Some(root) = try_git_toplevel(&child) {
+                    nested_roots.push(root);
+                }
+            }
+            match nested_roots.len() {
+                0 => {}
+                1 => return Ok(nested_roots.into_iter().next().expect("single nested root")),
+                _ => {
+                    let repos = nested_roots
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(ToolError::invalid_input(format!(
+                        "Multiple git repositories found under {}. Specify cwd to disambiguate: {repos}",
+                        dir.display()
+                    )));
+                }
+            }
+        }
+
+        levels += 1;
+        if levels > MAX_PARENT_LEVELS {
+            break;
+        }
+        current = dir.parent();
     }
-    Ok(PathBuf::from(root))
+
+    Err(ToolError::invalid_input(format!(
+        "worktree=true requires a git repository. Tried: {}",
+        paths_tried.join(", ")
+    )))
+}
+
+fn path_looks_like_git_checkout(path: &Path) -> bool {
+    let git_path = path.join(".git");
+    git_path.is_dir() || git_path.is_file()
+}
+
+fn try_git_toplevel(path: &Path) -> Option<PathBuf> {
+    let output = Git::output(&["rev-parse", "--show-toplevel"], path).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
 }
 
 fn validate_git_branch_name(repo_root: &Path, branch: &str) -> Result<(), ToolError> {
@@ -7260,17 +7470,42 @@ fn subagent_failure_message(err: &anyhow::Error) -> String {
     }
 }
 
+/// Human label for how a child's model was selected, so a launch failure can
+/// name the route that produced the failing model — inherited from the parent,
+/// a faster same-family sibling, or an explicit id (#4049).
+fn route_source_label(route: &ModelRoute) -> String {
+    match route {
+        ModelRoute::Inherit => "inherited from the parent/session model".to_string(),
+        ModelRoute::Faster => "faster same-family sibling of the parent model".to_string(),
+        ModelRoute::Auto => "auto (legacy route, treated as a faster sibling)".to_string(),
+        ModelRoute::Fixed(id) => format!("explicit model id `{id}`"),
+    }
+}
+
 /// When a child agent fails because its model is unavailable under the current
 /// access profile, a bare provider 403/404 (classified `Authorization` or
-/// `State`) is unactionable. Annotate it so the parent knows the likely cause
-/// and how to recover (#2653) without re-classifying the underlying error.
-fn annotate_child_model_error(err: &str, model: &str) -> String {
+/// `State`) is unactionable. Annotate it so the parent knows which provider and
+/// route produced the failing model and how to recover (#2653, #4049) without
+/// re-classifying the underlying error. Errors unrelated to model availability
+/// pass through unchanged.
+fn annotate_child_model_error(
+    err: &str,
+    model: &str,
+    provider: crate::config::ApiProvider,
+    route: &ModelRoute,
+) -> String {
+    let hint = || {
+        format!(
+            "{err}\n(provider `{}` · requested model `{model}` · route: {} — \
+             the model may be unavailable under the current access profile; remove the explicit \
+             child model override or adjust child-agent model config before retrying)",
+            provider_name_for_error(provider),
+            route_source_label(route),
+        )
+    };
     match crate::error_taxonomy::classify_error_message(err) {
         crate::error_taxonomy::ErrorCategory::Authorization
-        | crate::error_taxonomy::ErrorCategory::State => format!(
-            "{err}\n(child model `{model}` may be unavailable under the current access profile — \
-             remove the explicit child model override or adjust child-agent model config before retrying)"
-        ),
+        | crate::error_taxonomy::ErrorCategory::State => hint(),
         _ => {
             // #3020 (#2653): Provider rejections like "Model Not Exist" or
             // "does not exist or you do not have access" often classify as
@@ -7283,10 +7518,7 @@ fn annotate_child_model_error(err: &str, model: &str) -> String {
                 || lower.contains("no such model")
                 || lower.contains("invalid model")
             {
-                format!(
-                    "{err}\n(child model `{model}` may be unavailable under the current access profile — \
-                     remove the explicit child model override or adjust child-agent model config before retrying)"
-                )
+                hint()
             } else {
                 err.to_string()
             }
@@ -7352,10 +7584,15 @@ fn summarize_subagent_result(result: &SubAgentResult) -> String {
     }
     match (&result.status, result.result.as_ref()) {
         (SubAgentStatus::Completed, Some(text)) => text.clone(),
-        (SubAgentStatus::Completed, None) => "Completed (no output)".to_string(),
+        (SubAgentStatus::Completed, None) => "Completed (no final summary returned)".to_string(),
         (SubAgentStatus::Interrupted(error), _) => format!("Interrupted: {error}"),
         (SubAgentStatus::Cancelled, _) => "Cancelled".to_string(),
-        (SubAgentStatus::BudgetExhausted, _) => "Token budget exhausted".to_string(),
+        (SubAgentStatus::BudgetExhausted, Some(text)) => format!(
+            "Child token budget exhausted before finishing; partial output preserved below.\n{text}"
+        ),
+        (SubAgentStatus::BudgetExhausted, None) => {
+            "Child token budget exhausted before returning a final summary; retry with a smaller scoped task or split the work.".to_string()
+        }
         (SubAgentStatus::Failed(error), _) => format!("Failed: {error}"),
         (SubAgentStatus::Running, _) => "Running".to_string(),
     }

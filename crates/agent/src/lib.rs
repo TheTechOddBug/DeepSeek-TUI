@@ -609,11 +609,11 @@ impl Default for ModelRegistry {
                 supports_reasoning: true,
             },
             ModelInfo {
-                id: "deepseek-coder:1.3b".to_string(),
+                id: "deepseek-v4-flash".to_string(),
                 provider: ProviderKind::Ollama,
                 aliases: vec![],
                 supports_tools: true,
-                supports_reasoning: false,
+                supports_reasoning: true,
             },
             ModelInfo {
                 id: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
@@ -1590,8 +1590,8 @@ mod tests {
         let resolved = registry.resolve(None, Some(ProviderKind::Ollama));
 
         assert_eq!(resolved.resolved.provider, ProviderKind::Ollama);
-        assert_eq!(resolved.resolved.id, "deepseek-coder:1.3b");
-        assert!(!resolved.resolved.supports_reasoning);
+        assert_eq!(resolved.resolved.id, "deepseek-v4-flash");
+        assert!(resolved.resolved.supports_reasoning);
     }
 
     #[test]

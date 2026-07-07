@@ -24,13 +24,14 @@ verifies them against `codewhale-artifacts-sha256.txt`, installs to
 
 CodeWhale ships matched `codewhale`, `codew`, and `codewhale-tui` prebuilt binaries for
 these platform/architecture combinations. Linux ARM64 is available from
-v0.8.8 onward; Linux RISC-V starts with the first release after v0.8.47.
+v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
+`rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
 
 | Platform     | Architecture | npm install | `cargo install` | GitHub release asset                                  |
 | ------------ | ------------ | :---------: | :-------------: | ----------------------------------------------------- |
 | Linux        | x64 (x86_64) |     ✅      |       ✅        | `codewhale-linux-x64`, `codew-linux-x64`, `codewhale-tui-linux-x64`        |
 | Linux        | arm64        |     ✅      |       ✅        | `codewhale-linux-arm64`, `codew-linux-arm64`, `codewhale-tui-linux-arm64`    |
-| Linux        | riscv64      |     ✅      |       ✅        | `codewhale-linux-riscv64`, `codew-linux-riscv64`, `codewhale-tui-linux-riscv64`|
+| Linux        | riscv64      |     ❌¹     |       ❌³       | temporarily unsupported until upstream bindings land |
 | macOS        | x64          |     ✅      |       ✅        | `codewhale-macos-x64`, `codew-macos-x64`, `codewhale-tui-macos-x64`        |
 | macOS        | arm64 (M-series) | ✅      |       ✅        | `codewhale-macos-arm64`, `codew-macos-arm64`, `codewhale-tui-macos-arm64`    |
 | Windows      | x64          |     ✅      |       ✅        | `codewhale-windows-x64.exe`, `codew-windows-x64.exe`, `codewhale-tui-windows-x64.exe` |
@@ -41,24 +42,25 @@ v0.8.8 onward; Linux RISC-V starts with the first release after v0.8.47.
 ¹ The npm package will exit with a clear error and point you here.
 ² Provided your toolchain can compile a recent Rust workspace; see
   [Build from source](#7-build-from-source) below.
+³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
+  a bindgen-enabled dependency build.
 
 The Linux **x64** release assets have been **static (musl) builds** since v0.8.65.
 They have no glibc dependency and run on any x86_64 Linux, including Ubuntu
 22.04, Debian stable, RHEL/CentOS, and Alpine/musl. SQLite is bundled into the
 binary through `rusqlite`, so no separate `libsqlite3` runtime package is needed.
 
-The Linux **arm64** and **riscv64** release assets are still GNU libc (glibc)
-builds. They dynamically link normal Linux runtime libraries such as
-`libdbus-1` and `libc`, and are built on Ubuntu 24.04, so they can require
-`GLIBC_2.39`.
+The Linux **arm64** release assets are still GNU libc (glibc) builds. They
+dynamically link normal Linux runtime libraries such as `libdbus-1` and `libc`,
+and are built on Ubuntu 24.04, so they can require `GLIBC_2.39`.
 
-### Linux glibc floor (arm64 / riscv64)
+### Linux glibc floor (arm64)
 
-This floor applies only to the **GNU libc** assets (arm64, riscv64). The static
-x64 (musl) asset has no `GLIBC_*` symbols, so it passes the install preflight
-and runs on older systems without error. In the current v0.8.67 release lane,
-the GNU assets are built on Ubuntu 24.04 and can require `GLIBC_2.39`. Ubuntu
-22.04 ships glibc 2.35, so those arm64/riscv64 binaries fail with errors such as:
+This floor applies only to the **GNU libc** arm64 asset. The static x64 (musl)
+asset has no `GLIBC_*` symbols, so it passes the install preflight and runs on
+older systems without error. In the current v0.8.67 release lane, the GNU asset
+is built on Ubuntu 24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
+2.35, so those arm64 binaries fail with errors such as:
 
 ```text
 version `GLIBC_2.39' not found
@@ -74,9 +76,9 @@ cargo install codewhale-cli --locked
 cargo install codewhale-tui --locked
 ```
 
-Future release engineering may add static (musl) arm64/riscv64 assets so the
-glibc floor goes away entirely; until then, x64 is static and arm64/riscv64
-build from source on older distros.
+Future release engineering may add static (musl) arm64 assets so the glibc floor
+goes away entirely; until then, x64 is static and arm64 users on older distros
+should build from source.
 
 > **Linux ARM64 note (v0.8.7 and earlier).** v0.8.7 and earlier do **not**
 > publish a Linux ARM64 prebuilt; users on HarmonyOS thin-and-light, Asahi
@@ -458,8 +460,10 @@ commands.
 
 ## 7. Build from source
 
-This is the catch-all for any platform we don't ship — including musl, riscv64,
-LoongArch, FreeBSD, and pre-2024 ARM64 distros.
+This is the catch-all for platforms we don't ship, including musl non-x64,
+LoongArch, FreeBSD, and pre-2024 ARM64 distros. Linux RISC-V currently also
+needs upstream `rquickjs-sys` RISC-V bindings or a bindgen-enabled dependency
+build before source builds are expected to work.
 
 ### Prerequisites
 

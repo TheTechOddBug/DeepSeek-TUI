@@ -181,9 +181,9 @@ const TURN_STALL_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(600);
 // Forced repaint cadence while a turn is live (model loading, compacting,
 // sub-agents running). Drives the footer water-spout animation as well as
-// the per-tool spinner pulse — keep this fast enough that the spout reads as
-// motion (~12 fps) instead of teleport-frames.
-const UI_STATUS_ANIMATION_MS: u64 = 80;
+// the per-tool spinner pulse — keep this fast enough that the whale-spout
+// braille pattern reads as continuous motion instead of teleport-frames.
+const UI_STATUS_ANIMATION_MS: u64 = crate::tui::spinner::BRAILLE_SPINNER_FRAME_MS;
 pub(crate) const SIDEBAR_VISIBLE_MIN_WIDTH: u16 = 64;
 const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
 const PERIODIC_FULL_REPAINT_EVERY_N: u64 = 50;
@@ -319,9 +319,9 @@ enum TranslationEvent {
 // plus ratatui's `terminal.clear()` are sufficient to repaint cleanly.
 const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H";
 // Xterm alternate-scroll mode keeps wheel events inside the alternate-screen
-// viewport. Crossterm's mouse-capture command does not enable this DEC private
-// mode, so terminals can still scroll the host scrollback if mouse capture is
-// disabled, dropped during focus changes, or unavailable in the host.
+// viewport when mouse capture is requested but unavailable or temporarily
+// dropped. Leave it off with `--no-mouse-capture` so the host terminal owns
+// raw mouse selection behavior end-to-end.
 const ENABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007h";
 const DISABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007l";
 /// Begin synchronized update (DEC 2026): tell the terminal to defer
@@ -667,9 +667,14 @@ fn complete_trust_directory_onboarding(app: &mut App, config: &Config) -> Result
 }
 
 fn back_from_api_key_onboarding(app: &mut App) {
-    app.onboarding = OnboardingState::Language;
+    app.onboarding = OnboardingState::Provider;
     app.api_key_input.clear();
     app.api_key_cursor = 0;
+    app.status_message = None;
+}
+
+fn back_from_provider_onboarding(app: &mut App) {
+    app.onboarding = OnboardingState::Language;
     app.status_message = None;
 }
 
@@ -3068,6 +3073,15 @@ async fn run_event_loop(
                         // observed — assign the stable label on first sight.
                         let label = app.ensure_agent_label(&id);
                         app.status_message = Some(format!("{label}: {display}"));
+                        // A progress-first agent (its AgentSpawned was dropped
+                        // under channel pressure) exists only in agent_progress
+                        // until a ListSubAgents refresh promotes it into
+                        // subagent_cache. Request that refresh like the
+                        // AgentSpawned arm does, so the sidebar row survives
+                        // reconciliation instead of flickering out.
+                        if !app.subagent_cache.iter().any(|agent| agent.agent_id == id) {
+                            subagent_list_refresh_requested = true;
+                        }
                         // #3033: Throttle redraws from rapid AgentProgress events.
                         // When 4+ sub-agents are running concurrently, each firing
                         // progress events, the per-event `needs_redraw = true` saturates
@@ -3124,9 +3138,15 @@ async fn run_event_loop(
                         ));
                         let should_recapture_terminal =
                             !has_other_running_subagents && app.use_alt_screen;
-                        if !has_other_running_subagents
-                            && let Some((method, threshold, include_summary)) =
-                                notifications::settings(config)
+                        let subagent_notification_mode =
+                            config.notifications_config().subagent_completion;
+                        let workflow_tool_running = workflow_tool_is_running(app);
+                        if should_notify_subagent_completion(
+                            subagent_notification_mode,
+                            has_other_running_subagents,
+                            workflow_tool_running,
+                        ) && let Some((method, threshold, include_summary)) =
+                            notifications::settings(config)
                         {
                             let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
                             let msg = notifications::subagent_completion_message(
@@ -3491,9 +3511,15 @@ async fn run_event_loop(
             app.needs_redraw = true;
         }
         maybe_throttled_recovery_snapshot(app, Instant::now(), &mut last_recovery_snapshot_at);
-        if (app.is_loading || has_running_agents || app.is_compacting || app.is_purging)
-            && last_status_frame.elapsed()
-                >= Duration::from_millis(status_animation_interval_ms(app))
+        let history_has_live_motion = history_has_live_motion(&app.history);
+        let active_cell_has_live_motion = active_cell_has_live_motion(app);
+        if should_tick_status_animation(
+            app,
+            has_running_agents,
+            history_has_live_motion,
+            active_cell_has_live_motion,
+        ) && last_status_frame.elapsed()
+            >= Duration::from_millis(status_animation_interval_ms(app))
         {
             if streaming_thinking::animate_pending_translation(
                 app,
@@ -3501,7 +3527,7 @@ async fn run_event_loop(
             ) {
                 app.mark_history_updated();
             }
-            if !app.low_motion && history_has_live_motion(&app.history) {
+            if !app.low_motion && (history_has_live_motion || active_cell_has_live_motion) {
                 app.mark_history_updated();
             }
             app.needs_redraw = true;
@@ -3925,6 +3951,9 @@ async fn run_event_loop(
                     KeyCode::Esc if app.onboarding == OnboardingState::ApiKey => {
                         back_from_api_key_onboarding(app);
                     }
+                    KeyCode::Esc if app.onboarding == OnboardingState::Provider => {
+                        back_from_provider_onboarding(app);
+                    }
                     KeyCode::Esc if app.onboarding == OnboardingState::Language => {
                         app.onboarding = OnboardingState::Welcome;
                         app.status_message = None;
@@ -3958,6 +3987,22 @@ async fn run_event_loop(
                             }
                         }
                     }
+                    KeyCode::Char(c)
+                        if app.onboarding == OnboardingState::Provider && c.is_ascii_digit() =>
+                    {
+                        if let Some((_, provider)) = onboarding::ONBOARDING_PROVIDER_OPTIONS
+                            .iter()
+                            .find(|(hotkey, _)| *hotkey == c)
+                        {
+                            onboarding::select_onboarding_provider(app, *provider);
+                        }
+                    }
+                    KeyCode::Up if app.onboarding == OnboardingState::Provider => {
+                        onboarding::move_onboarding_provider_selection(app, -1);
+                    }
+                    KeyCode::Down if app.onboarding == OnboardingState::Provider => {
+                        onboarding::move_onboarding_provider_selection(app, 1);
+                    }
                     KeyCode::Enter => match app.onboarding {
                         OnboardingState::Welcome => {
                             onboarding::advance_onboarding_from_welcome(app);
@@ -3966,6 +4011,9 @@ async fn run_event_loop(
                             // Enter without a digit pick keeps the existing
                             // setting (which defaults to "auto").
                             onboarding::advance_onboarding_after_language(app);
+                        }
+                        OnboardingState::Provider => {
+                            onboarding::advance_onboarding_from_provider(app);
                         }
                         OnboardingState::ApiKey => {
                             let key = app.api_key_input.trim().to_string();
@@ -3990,38 +4038,22 @@ async fn run_event_loop(
                                         Some(4_000),
                                     );
                                     app.status_message = None;
-                                    // Recreate the engine so it picks up the newly saved key
-                                    // without requiring a full process restart.
-                                    let _ = engine_handle.send(Op::Shutdown).await;
-                                    // Stamp the new key on the long-lived
-                                    // `Config` reference so any future clone
-                                    // (e.g. a subsequent /provider switch)
-                                    // sees it; the explicit-override path
-                                    // in `deepseek_api_key` (#343) makes
-                                    // this win immediately.
-                                    config.api_key = Some(key.clone());
-                                    let mut refreshed_config = config.clone();
-                                    refreshed_config.api_key = Some(key);
-                                    let engine_config = build_engine_config(app, &refreshed_config);
-                                    engine_handle = spawn_engine(engine_config, &refreshed_config);
+                                    mirror_saved_api_key_in_config(
+                                        config,
+                                        app.onboarding_provider,
+                                        key.clone(),
+                                    );
+                                    switch_provider(
+                                        app,
+                                        &mut engine_handle,
+                                        config,
+                                        app.onboarding_provider,
+                                        None,
+                                    )
+                                    .await;
                                     app.offline_mode = false;
-                                    app.api_key_env_only = false;
 
-                                    if !app.api_messages.is_empty() {
-                                        let _ = engine_handle
-                                            .send(Op::SyncSession {
-                                                session_id: app.current_session_id.clone(),
-                                                messages: app.api_messages.clone(),
-                                                system_prompt: app.system_prompt.clone(),
-                                                system_prompt_override: false,
-                                                model: app.model.clone(),
-                                                workspace: app.workspace.clone(),
-                                                mode: app.mode,
-                                            })
-                                            .await;
-                                    }
-
-                                    onboarding::advance_onboarding_after_language(app);
+                                    onboarding::advance_onboarding_after_api_key(app);
                                 }
                                 Err(e) => {
                                     app.status_message = Some(e.to_string());
@@ -5673,7 +5705,7 @@ async fn handle_fleet_profile_model_draft(
     app: &mut App,
     config: &Config,
     role: String,
-    model_class: String,
+    model: String,
     locale: crate::localization::Locale,
 ) {
     // Do NOT await the network call on the event loop — that parks the whole
@@ -5728,7 +5760,7 @@ async fn handle_fleet_profile_model_draft(
                 &client,
                 &request_model,
                 &role,
-                &model_class,
+                &model,
                 locale,
                 &fingerprint,
             ),
@@ -9418,7 +9450,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             crate::config::ApiProvider::Stepfun => Some("StepFun"),
             crate::config::ApiProvider::Minimax => Some("MiniMax"),
             crate::config::ApiProvider::Sakana => Some("Sakana"),
-            crate::config::ApiProvider::LongCat => Some("LongCat"),
+            crate::config::ApiProvider::LongCat => Some("Meituan LongCat"),
             crate::config::ApiProvider::Custom => Some("Custom"),
         };
         let status_indicator_started_at = if app.low_motion {
@@ -10312,10 +10344,10 @@ async fn handle_view_events(
             }
             ViewEvent::FleetProfileModelDraftRequested {
                 role,
-                model_class,
+                model,
                 locale,
             } => {
-                handle_fleet_profile_model_draft(app, config, role, model_class, locale).await;
+                handle_fleet_profile_model_draft(app, config, role, model, locale).await;
             }
             ViewEvent::FleetRosterOpenSetupRequested => {
                 // The roster view hands off to the authoring wizard (same
@@ -11099,63 +11131,60 @@ async fn apply_provider_picker_api_key(
         }
     }
 
-    // Mirror the saved key into the in-memory config so the engine sees it
-    // immediately without a reload — `save_api_key_for` only touches disk.
+    mirror_saved_api_key_in_config(config, provider, api_key);
+    switch_provider(app, engine_handle, config, provider, None).await;
+}
+
+fn mirror_saved_api_key_in_config(config: &mut Config, provider: ApiProvider, api_key: String) {
     if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
         config.api_key = Some(api_key);
-    } else {
-        // Capture the custom entry key before borrowing `providers` (#1519).
-        let custom_key = (provider == ApiProvider::Custom).then(|| {
-            config
-                .provider
-                .clone()
-                .unwrap_or_else(|| "__custom__".to_string())
-        });
-        let providers = config
-            .providers
-            .get_or_insert_with(ProvidersConfig::default);
-        let entry: &mut ProviderConfig = match provider {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-                // Guarded by the outer `if` above; safety net against refactors.
-                return;
-            }
-            ApiProvider::Custom => providers
-                .custom
-                .entry(custom_key.expect("custom key captured for custom provider"))
-                .or_default(),
-            ApiProvider::DeepseekAnthropic => &mut providers.deepseek_anthropic,
-            ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
-            ApiProvider::Openai => &mut providers.openai,
-            ApiProvider::Atlascloud => &mut providers.atlascloud,
-            ApiProvider::WanjieArk => &mut providers.wanjie_ark,
-            ApiProvider::Volcengine => &mut providers.volcengine,
-            ApiProvider::Openrouter => &mut providers.openrouter,
-            ApiProvider::XiaomiMimo => &mut providers.xiaomi_mimo,
-            ApiProvider::Novita => &mut providers.novita,
-            ApiProvider::Fireworks => &mut providers.fireworks,
-            ApiProvider::Siliconflow | ApiProvider::SiliconflowCn => &mut providers.siliconflow,
-            ApiProvider::Arcee => &mut providers.arcee,
-            ApiProvider::Moonshot => &mut providers.moonshot,
-            ApiProvider::Sglang => &mut providers.sglang,
-            ApiProvider::Vllm => &mut providers.vllm,
-            ApiProvider::Ollama => &mut providers.ollama,
-            ApiProvider::Huggingface => &mut providers.huggingface,
-            ApiProvider::Deepinfra => &mut providers.deepinfra,
-            ApiProvider::Together => &mut providers.together,
-            ApiProvider::Qianfan => &mut providers.qianfan,
-            ApiProvider::OpenaiCodex => &mut providers.openai_codex,
-            ApiProvider::Anthropic => &mut providers.anthropic,
-            ApiProvider::Openmodel => &mut providers.openmodel,
-            ApiProvider::Zai => &mut providers.zai,
-            ApiProvider::Stepfun => &mut providers.stepfun,
-            ApiProvider::Minimax => &mut providers.minimax,
-            ApiProvider::Sakana => &mut providers.sakana,
-            ApiProvider::LongCat => &mut providers.longcat,
-        };
-        entry.api_key = Some(api_key);
+        return;
     }
-
-    switch_provider(app, engine_handle, config, provider, None).await;
+    let custom_key = (provider == ApiProvider::Custom).then(|| {
+        config
+            .provider
+            .clone()
+            .unwrap_or_else(|| "__custom__".to_string())
+    });
+    let providers = config
+        .providers
+        .get_or_insert_with(ProvidersConfig::default);
+    let entry: &mut ProviderConfig = match provider {
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN => return,
+        ApiProvider::Custom => providers
+            .custom
+            .entry(custom_key.expect("custom key captured for custom provider"))
+            .or_default(),
+        ApiProvider::DeepseekAnthropic => &mut providers.deepseek_anthropic,
+        ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
+        ApiProvider::Openai => &mut providers.openai,
+        ApiProvider::Atlascloud => &mut providers.atlascloud,
+        ApiProvider::WanjieArk => &mut providers.wanjie_ark,
+        ApiProvider::Volcengine => &mut providers.volcengine,
+        ApiProvider::Openrouter => &mut providers.openrouter,
+        ApiProvider::XiaomiMimo => &mut providers.xiaomi_mimo,
+        ApiProvider::Novita => &mut providers.novita,
+        ApiProvider::Fireworks => &mut providers.fireworks,
+        ApiProvider::Siliconflow | ApiProvider::SiliconflowCn => &mut providers.siliconflow,
+        ApiProvider::Arcee => &mut providers.arcee,
+        ApiProvider::Moonshot => &mut providers.moonshot,
+        ApiProvider::Sglang => &mut providers.sglang,
+        ApiProvider::Vllm => &mut providers.vllm,
+        ApiProvider::Ollama => &mut providers.ollama,
+        ApiProvider::Huggingface => &mut providers.huggingface,
+        ApiProvider::Deepinfra => &mut providers.deepinfra,
+        ApiProvider::Together => &mut providers.together,
+        ApiProvider::Qianfan => &mut providers.qianfan,
+        ApiProvider::OpenaiCodex => &mut providers.openai_codex,
+        ApiProvider::Anthropic => &mut providers.anthropic,
+        ApiProvider::Openmodel => &mut providers.openmodel,
+        ApiProvider::Zai => &mut providers.zai,
+        ApiProvider::Stepfun => &mut providers.stepfun,
+        ApiProvider::Minimax => &mut providers.minimax,
+        ApiProvider::Sakana => &mut providers.sakana,
+        ApiProvider::LongCat => &mut providers.longcat,
+    };
+    entry.api_key = Some(api_key);
 }
 
 async fn apply_provider_picker_auth_mode(
@@ -11726,9 +11755,13 @@ pub(crate) fn recover_terminal_modes<W: Write>(
 
     pop_keyboard_enhancement_flags(writer);
     push_keyboard_enhancement_flags(writer);
-    enable_alternate_scroll_mode(writer);
-    if use_mouse_capture && let Err(err) = execute!(writer, EnableMouseCapture) {
-        tracing::debug!(?err, "EnableMouseCapture ignored");
+    if use_mouse_capture {
+        enable_alternate_scroll_mode(writer);
+        if let Err(err) = execute!(writer, EnableMouseCapture) {
+            tracing::debug!(?err, "EnableMouseCapture ignored");
+        }
+    } else {
+        disable_alternate_scroll_mode(writer);
     }
     if use_bracketed_paste {
         try_enable_bracketed_paste_mode(writer);
@@ -12111,26 +12144,70 @@ fn clamp_event_poll_timeout(timeout: Duration) -> Duration {
     timeout.max(MIN_EVENT_POLL_TIMEOUT)
 }
 
+/// True while a `workflow` tool is executing in the foreground (active cell)
+/// or still shown as running in history. Used to keep per-subagent completion
+/// notifications quiet during a workflow run under `final-only`.
+fn workflow_tool_is_running(app: &App) -> bool {
+    fn is_running_workflow(cell: &HistoryCell) -> bool {
+        matches!(
+            cell,
+            HistoryCell::Tool(ToolCell::Generic(tool))
+                if tool.name == "workflow" && tool.status == ToolStatus::Running
+        )
+    }
+    app.history.iter().any(is_running_workflow)
+        || app
+            .active_cell
+            .as_ref()
+            .is_some_and(|active| active.entries().iter().any(is_running_workflow))
+}
+
+/// Decide whether an `AgentComplete` event should fire a subagent-completion
+/// desktop notification, per the `[notifications].subagent_completion` mode.
+/// `settings()` still has the final say (method=off / condition=never).
+fn should_notify_subagent_completion(
+    mode: crate::config::SubagentCompletionNotification,
+    has_other_running_subagents: bool,
+    workflow_tool_running: bool,
+) -> bool {
+    use crate::config::SubagentCompletionNotification as Mode;
+    match mode {
+        Mode::Off => false,
+        Mode::Always => true,
+        Mode::FinalOnly => !has_other_running_subagents && !workflow_tool_running,
+    }
+}
+
+fn should_tick_status_animation(
+    app: &App,
+    has_running_agents: bool,
+    history_has_live_motion: bool,
+    active_cell_has_live_motion: bool,
+) -> bool {
+    app.is_loading
+        || has_running_agents
+        || app.is_compacting
+        || app.is_purging
+        || history_has_live_motion
+        || active_cell_has_live_motion
+}
+
+fn active_cell_has_live_motion(app: &App) -> bool {
+    app.active_cell.as_ref().is_some_and(|active| {
+        active.entries().iter().any(|cell| match cell {
+            HistoryCell::Thinking { streaming, .. } => *streaming,
+            HistoryCell::Tool(tool) => tool_cell_is_running(tool),
+            _ => false,
+        })
+    })
+}
+
 fn history_has_live_motion(history: &[HistoryCell]) -> bool {
     use crate::tui::history::SubAgentCell;
     use crate::tui::widgets::agent_card::AgentLifecycle;
     history.iter().any(|cell| match cell {
         HistoryCell::Thinking { streaming, .. } => *streaming,
-        HistoryCell::Tool(tool) => match tool {
-            ToolCell::Exec(cell) => cell.status == ToolStatus::Running,
-            ToolCell::Exploring(cell) => cell
-                .entries
-                .iter()
-                .any(|entry| entry.status == ToolStatus::Running),
-            ToolCell::PlanUpdate(cell) => cell.status == ToolStatus::Running,
-            ToolCell::PatchSummary(cell) => cell.status == ToolStatus::Running,
-            ToolCell::Review(cell) => cell.status == ToolStatus::Running,
-            ToolCell::DiffPreview(_) => false,
-            ToolCell::Mcp(cell) => cell.status == ToolStatus::Running,
-            ToolCell::ViewImage(_) => false,
-            ToolCell::WebSearch(cell) => cell.status == ToolStatus::Running,
-            ToolCell::Generic(cell) => cell.status == ToolStatus::Running,
-        },
+        HistoryCell::Tool(tool) => tool_cell_is_running(tool),
         HistoryCell::SubAgent(SubAgentCell::Delegate(card)) => matches!(
             card.status,
             AgentLifecycle::Pending | AgentLifecycle::Running
@@ -13049,7 +13126,7 @@ fn version_hint_from_latest_tag(tag: &str, current: &str) -> Option<String> {
     }
 
     Some(format!(
-        "v{latest} available - run `codewhale update` and restart"
+        "v{latest} available - run `codewhale update` and restart, then /change for what's new"
     ))
 }
 

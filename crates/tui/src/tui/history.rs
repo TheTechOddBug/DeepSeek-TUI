@@ -1305,8 +1305,8 @@ impl GenericToolCell {
         }
 
         // #4038: give the `workflow` tool a purpose-built run card (run_id,
-        // status, goal, children, progress) instead of collapsing to a
-        // one-line generic header or dumping raw JSON.
+        // status, goal, children, progress, schema errors) instead of
+        // collapsing to a one-line generic header or dumping raw JSON.
         if let Some(lines) = self.try_render_as_workflow(width, low_motion) {
             return lines;
         }
@@ -1489,8 +1489,14 @@ impl GenericToolCell {
         ))
     }
 
-    /// Render the `workflow` tool as a compact run card rather than the generic
-    /// one-line header (live) or a large JSON dump (transcript).
+    /// Render the `workflow` tool as a compact run card rather than the
+    /// generic one-line header (live) or a large JSON dump (transcript).
+    /// Fields are parsed defensively from the tool's JSON output, which is
+    /// either a single `WorkflowRunRecord` or a `{action:"status",
+    /// runs:[...]}` list; anything that does not parse falls back to the
+    /// generic renderer. The header owns the lifecycle label (Wave 5c #7);
+    /// the body deliberately carries no `status:` KV. Full live overlay
+    /// (#4038) is future work.
     fn try_render_as_workflow(&self, width: u16, low_motion: bool) -> Option<Vec<Line<'static>>> {
         if self.name != "workflow" {
             return None;

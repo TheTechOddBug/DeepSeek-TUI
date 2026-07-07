@@ -2184,6 +2184,31 @@ fn save_api_key_writes_config_file_under_cfg_test() -> Result<()> {
 }
 
 #[test]
+fn save_api_key_onboarding_routes_openrouter_key_to_provider_table() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-onboarding-provider-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    let path = save_api_key_for(ApiProvider::Openrouter, "onboarding-openrouter-key")?;
+    let contents = fs::read_to_string(&path)?;
+    assert!(
+        contents.contains("openrouter"),
+        "expected OpenRouter provider table, got: {contents}"
+    );
+    assert!(contents.contains("onboarding-openrouter-key"));
+    Ok(())
+}
+
+#[test]
 fn ensure_config_file_exists_creates_first_run_template() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
@@ -6872,7 +6897,7 @@ fn provider_capability_openrouter_recent_large_models_are_reasoning_aware() {
         (OPENROUTER_QWEN_3_6_PLUS_MODEL, 1_000_000, 65_536),
         (OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL, 1_000_000, 131_072),
         (OPENROUTER_MINIMAX_M3_MODEL, 1_000_000, 524_288),
-        (OPENROUTER_MINIMAX_M2_7_MODEL, 204_800, 4096),
+        (OPENROUTER_MINIMAX_M2_7_MODEL, 204_800, 131_072),
         (OPENROUTER_GLM_5_1_MODEL, 202_752, 131_072),
         (OPENROUTER_GLM_5_2_MODEL, 1_000_000, 131_072),
         (OPENROUTER_NEMOTRON_3_ULTRA_MODEL, 1_000_000, 16_384),
@@ -6930,8 +6955,13 @@ fn provider_capability_arcee_direct_models_use_api_docs_shape() {
         } else {
             128_000
         };
+        let expected_output = if model == ARCEE_TRINITY_LARGE_PREVIEW_MODEL {
+            4096
+        } else {
+            64_000
+        };
         assert_eq!(cap.context_window, expected_window);
-        assert_eq!(cap.max_output, 4096);
+        assert_eq!(cap.max_output, expected_output);
         assert!(!cap.thinking_supported);
         assert!(!cap.cache_telemetry_supported);
         assert_eq!(

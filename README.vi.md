@@ -58,10 +58,11 @@ brew tap Hmbown/deepseek-tui
 brew install deepseek-tui
 ```
 
-Archive dựng sẵn cho mọi nền tảng — bao gồm cả Linux riscv64 — được đính kèm
-trong [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases).
-Checksum, mirror Trung Quốc, chi tiết riêng cho Windows và troubleshooting nằm
-trong [docs/INSTALL.md](docs/INSTALL.md).
+Archive dựng sẵn cho Linux x64/arm64, macOS x64/arm64 và Windows x64 được đính
+kèm trong [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases).
+Linux riscv64 prebuilt tạm dừng trong lúc chờ upstream QuickJS bindings. Checksum,
+mirror Trung Quốc, chi tiết riêng cho Windows và troubleshooting nằm trong
+[docs/INSTALL.md](docs/INSTALL.md).
 
 ## Lần chạy đầu tiên
 

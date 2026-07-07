@@ -1,7 +1,7 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                         CodeWhale Configuration                               ║
 # ║                                                                              ║
-# ║  Terminal coding agent for DeepSeek.                                          ║
+# ║  Terminal coding agent for any model — open models first.                ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 # See `docs/CONFIGURATION.md` for how config is loaded (profiles, env overrides, etc.).
@@ -529,7 +529,7 @@ max_subagents = 10 # optional (1-20)
 [providers.ollama]
 # api_key = "OPTIONAL_OLLAMA_TOKEN"
 # base_url = "http://localhost:11434/v1"
-# model = "deepseek-coder:1.3b"             # or any local Ollama tag
+# model = "deepseek-v4-flash"                # or any local Ollama tag
 
 # Hugging Face Inference Providers (https://huggingface.co/docs/api-inference)
 # Provider aliases: huggingface, hugging-face, hugging_face, hf
@@ -784,8 +784,8 @@ exponential_base = 2.0
 # `[compaction]` table yet; runtime compaction budgets are chosen by the TUI
 # from the active model/context window.
 
-# Append-only Flash seams are experimental and opt-in while the v0.7.5
-# context/cache audit validates prefix-cache behavior.
+# Append-only Flash seams (layered context). Opt-in; defaults to off.
+# See `crates/tui/src/seam_manager.rs` for the implementation.
 [context]
 enabled = false
 verbatim_window_turns = 16
@@ -891,12 +891,17 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 #                 off:  disable entirely
 # threshold_secs = 30      # only notify when the turn took >= this many seconds
 # include_summary = false  # include elapsed time + cost in the notification body
+# subagent_completion = "final-only" # always | final-only | off — per-subagent
+#                          notifications during fleet/workflow runs. final-only
+#                          (default) stays quiet mid-run and fires once when the
+#                          batch drains; off silences them entirely.
 # completion_sound = "beep" # off | beep | bell | file — sound on turn completion (✅ marker)
 # sound_file = "E:\\google\\downloads\\notify.wav" # WAV used when completion_sound = "file" (Windows)
 [notifications]
 # method = "auto"
 # threshold_secs = 30
 # include_summary = false
+# subagent_completion = "final-only"
 # completion_sound = "beep"
 # sound_file = "E:\\google\\downloads\\notify.wav"
 

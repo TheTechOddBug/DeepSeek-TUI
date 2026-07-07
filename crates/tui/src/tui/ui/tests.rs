@@ -218,8 +218,16 @@ fn recover_terminal_modes_emits_expected_csi_sequences_with_gating() {
         "Kitty keyboard disambiguation flag must be re-pushed regardless of gating"
     );
     assert!(
-        on.contains("\x1b[?1007h") && off.contains("\x1b[?1007h"),
-        "alternate-scroll mode must be re-armed regardless of mouse-capture gating"
+        on.contains("\x1b[?1007h"),
+        "alternate-scroll mode must be re-armed when mouse capture is active"
+    );
+    assert!(
+        !off.contains("\x1b[?1007h"),
+        "alternate-scroll mode must stay off when mouse capture is disabled"
+    );
+    assert!(
+        off.contains("\x1b[?1007l"),
+        "alternate-scroll mode must be reset when mouse capture is disabled"
     );
 
     assert!(
@@ -5312,15 +5320,27 @@ fn reconcile_subagent_activity_state_trims_stale_progress_and_sets_anchor() {
         make_subagent("agent_a", crate::tools::subagent::SubAgentStatus::Running),
         make_subagent("agent_b", crate::tools::subagent::SubAgentStatus::Completed),
     ];
+    // Progress rows for ids the cache does not know survive reconciliation:
+    // a progress-first agent whose AgentSpawned/AgentList delivery was
+    // dropped must not flicker out of the sidebar. Eviction happens once the
+    // authoritative cache reports the agent as non-running.
     app.agent_progress
-        .insert("agent_stale".to_string(), "old".to_string());
+        .insert("agent_pending".to_string(), "old".to_string());
 
     reconcile_subagent_activity_state(&mut app);
     assert!(app.agent_progress.contains_key("agent_a"));
-    assert!(!app.agent_progress.contains_key("agent_stale"));
+    assert!(app.agent_progress.contains_key("agent_pending"));
     assert!(app.agent_activity_started_at.is_some());
 
-    app.subagent_cache.clear();
+    // Once the cache authoritatively knows both agents as terminal, their
+    // progress rows are trimmed and the activity anchor clears.
+    app.subagent_cache = vec![
+        make_subagent("agent_a", crate::tools::subagent::SubAgentStatus::Completed),
+        make_subagent(
+            "agent_pending",
+            crate::tools::subagent::SubAgentStatus::Completed,
+        ),
+    ];
     reconcile_subagent_activity_state(&mut app);
     assert!(app.agent_progress.is_empty());
     assert!(app.agent_activity_started_at.is_none());
@@ -7644,7 +7664,7 @@ fn onboarding_after_api_key_save_does_not_repeat_language_step() {
     app.trust_mode = true;
     app.status_message = Some("saved".to_string());
 
-    crate::tui::onboarding::advance_onboarding_after_language(&mut app);
+    crate::tui::onboarding::advance_onboarding_after_api_key(&mut app);
 
     assert_eq!(app.onboarding, OnboardingState::Tips);
     assert_eq!(app.status_message, None);
@@ -7659,13 +7679,13 @@ fn onboarding_after_api_key_save_routes_to_trust_when_needed() {
     app.onboarding_needs_api_key = false;
     app.trust_mode = false;
 
-    crate::tui::onboarding::advance_onboarding_after_language(&mut app);
+    crate::tui::onboarding::advance_onboarding_after_api_key(&mut app);
 
     assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
 }
 
 #[test]
-fn api_key_escape_returns_to_language_step() {
+fn api_key_escape_returns_to_provider_step() {
     let mut app = create_test_app();
     app.onboarding = OnboardingState::ApiKey;
     app.api_key_input = "sk-test-value".to_string();
@@ -7674,7 +7694,7 @@ fn api_key_escape_returns_to_language_step() {
 
     back_from_api_key_onboarding(&mut app);
 
-    assert_eq!(app.onboarding, OnboardingState::Language);
+    assert_eq!(app.onboarding, OnboardingState::Provider);
     assert!(app.api_key_input.is_empty());
     assert_eq!(app.api_key_cursor, 0);
     assert_eq!(app.status_message, None);
@@ -9042,6 +9062,7 @@ async fn model_picker_persists_model_and_reasoning_effort() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn model_picker_skips_setup_receipt_when_settings_persistence_fails() {
     let _lock = crate::test_support::lock_test_env();
     let tmp = TempDir::new().expect("settings tempdir");
@@ -11713,6 +11734,7 @@ fn notification_settings_tui_always_keeps_configured_method_no_threshold() {
             completion_sound: crate::config::CompletionSound::Beep,
             sound_file: None,
             include_summary: true,
+            subagent_completion: crate::config::SubagentCompletionNotification::default(),
         }),
         ..Config::default()
     };
@@ -11746,6 +11768,7 @@ fn notification_settings_no_tui_override_uses_notifications_block() {
             completion_sound: crate::config::CompletionSound::Beep,
             sound_file: None,
             include_summary: false,
+            subagent_completion: crate::config::SubagentCompletionNotification::default(),
         }),
         ..Config::default()
     };
@@ -12323,6 +12346,111 @@ fn throttled_progress_event_does_not_cancel_other_events_redraw() {
         !received_engine_event,
         "a lone throttled progress event must not trigger a repaint"
     );
+}
+
+fn running_generic_tool_cell(name: &str) -> HistoryCell {
+    HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+        name: name.to_string(),
+        status: ToolStatus::Running,
+        input_summary: Some("action: run".to_string()),
+        output: None,
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    }))
+}
+
+#[test]
+fn status_animation_ticks_for_lone_running_history_tool() {
+    let mut app = create_test_app();
+    app.history.push(running_generic_tool_cell("workflow"));
+
+    let history_motion = history_has_live_motion(&app.history);
+    let active_motion = active_cell_has_live_motion(&app);
+
+    assert!(
+        history_motion,
+        "running workflow tool should count as live motion"
+    );
+    assert!(
+        should_tick_status_animation(&app, false, history_motion, active_motion),
+        "a lone running tool in history must force timed redraws for the spout"
+    );
+}
+
+#[test]
+fn status_animation_ticks_for_lone_running_active_tool() {
+    let mut app = create_test_app();
+    let mut active = ActiveCell::new();
+    active.push_tool("tool-1", running_generic_tool_cell("exec_shell"));
+    app.active_cell = Some(active);
+
+    let history_motion = history_has_live_motion(&app.history);
+    let active_motion = active_cell_has_live_motion(&app);
+
+    assert!(
+        active_motion,
+        "running active-cell tool should count as live motion"
+    );
+    assert!(
+        should_tick_status_animation(&app, false, history_motion, active_motion),
+        "a lone running active tool must force timed redraws for the spout"
+    );
+}
+
+#[test]
+fn status_animation_stays_idle_without_live_motion() {
+    let app = create_test_app();
+
+    assert!(!history_has_live_motion(&app.history));
+    assert!(!active_cell_has_live_motion(&app));
+    assert!(
+        !should_tick_status_animation(&app, false, false, false),
+        "idle sessions should not wake the animation timer"
+    );
+}
+
+#[test]
+fn subagent_completion_notification_modes_gate_correctly() {
+    use crate::config::SubagentCompletionNotification as Mode;
+    // off: never notify.
+    assert!(!should_notify_subagent_completion(Mode::Off, false, false));
+    assert!(!should_notify_subagent_completion(Mode::Off, true, true));
+    // always: notify regardless of what else is running.
+    assert!(should_notify_subagent_completion(Mode::Always, true, true));
+    assert!(should_notify_subagent_completion(
+        Mode::Always,
+        false,
+        false
+    ));
+    // final-only: only when nothing else is running and no workflow is active.
+    assert!(should_notify_subagent_completion(
+        Mode::FinalOnly,
+        false,
+        false
+    ));
+    assert!(
+        !should_notify_subagent_completion(Mode::FinalOnly, true, false),
+        "final-only stays quiet while other subagents run"
+    );
+    assert!(
+        !should_notify_subagent_completion(Mode::FinalOnly, false, true),
+        "final-only stays quiet while a workflow run is active"
+    );
+}
+
+#[test]
+fn workflow_tool_is_running_detects_running_workflow_cell() {
+    let mut app = create_test_app();
+    assert!(!workflow_tool_is_running(&app));
+    app.history.push(running_generic_tool_cell("read_file"));
+    assert!(
+        !workflow_tool_is_running(&app),
+        "a non-workflow running tool must not count as a workflow run"
+    );
+    app.history.push(running_generic_tool_cell("workflow"));
+    assert!(workflow_tool_is_running(&app));
 }
 
 #[test]

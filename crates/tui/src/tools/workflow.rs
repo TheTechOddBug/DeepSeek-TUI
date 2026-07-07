@@ -94,6 +94,7 @@ struct WorkflowRunSummary {
     workflow_goal: Option<String>,
     token_budget: Option<u64>,
     child_count: usize,
+    schema_error_count: usize,
     progress_count: usize,
     last_progress: Option<String>,
     leaf_count: usize,
@@ -101,6 +102,12 @@ struct WorkflowRunSummary {
     control_count: usize,
     execution_status: Option<IrWorkflowRunStatus>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowSchemaError {
+    task_id: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +122,7 @@ struct WorkflowRunRecord {
     token_budget: Option<u64>,
     child_ids: Vec<String>,
     progress: Vec<String>,
+    schema_errors: Vec<WorkflowSchemaError>,
     result: Option<Value>,
     execution: Option<IrWorkflowExecution>,
     error: Option<String>,
@@ -142,6 +150,7 @@ impl WorkflowRunRecord {
             token_budget,
             child_ids: Vec::new(),
             progress: Vec::new(),
+            schema_errors: Vec::new(),
             result: None,
             execution: None,
             error: None,
@@ -161,6 +170,7 @@ impl WorkflowRunRecord {
             workflow_goal: self.workflow_goal.clone(),
             token_budget: self.token_budget,
             child_count: self.child_ids.len(),
+            schema_error_count: self.schema_errors.len(),
             progress_count: self.progress.len(),
             last_progress: self.progress.last().cloned(),
             leaf_count: self
@@ -552,6 +562,7 @@ fn workflow_result_for(
         "status": summary.status,
         "terminal": summary.status != WorkflowRunStatus::Running,
         "child_count": summary.child_count,
+        "schema_error_count": summary.schema_error_count,
         "leaf_count": summary.leaf_count,
         "branch_count": summary.branch_count,
         "control_count": summary.control_count,
@@ -672,11 +683,14 @@ fn adapt_workflow_source(
 }
 
 fn looks_like_declarative_workflow(source: &str) -> bool {
-    let trimmed = source.trim_start();
-    trimmed.starts_with("workflow(")
-        || trimmed.starts_with("export default workflow(")
-        || source.contains("\nworkflow(")
-        || source.contains("\nexport default workflow(")
+    // Match a top-level `workflow(...)` / `export default workflow(...)` call on
+    // any line, ignoring leading indentation, so an indented (non-column-0)
+    // declarative call is still recognized rather than misrun as an imperative
+    // script (#dogfood 0.8.67).
+    source.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("workflow(") || trimmed.starts_with("export default workflow(")
+    })
 }
 
 fn lower_declarative_workflow_to_imperative_js(spec: &WorkflowSpec) -> Result<String, ToolError> {
@@ -1039,6 +1053,7 @@ struct RuntimeTaskRecord {
     label: Option<String>,
     status: IrWorkflowRunStatus,
     output: Option<String>,
+    schema_error: Option<String>,
 }
 
 struct SubAgentWorkflowDriver {
@@ -1114,6 +1129,7 @@ impl SubAgentWorkflowDriver {
                     label: request.label.clone(),
                     status: IrWorkflowRunStatus::Running,
                     output: None,
+                    schema_error: None,
                 },
             );
         }
@@ -1145,6 +1161,16 @@ impl SubAgentWorkflowDriver {
             };
             record.status = status;
             record.output = output;
+        }
+    }
+
+    fn record_schema_validation_failure(&self, agent_id: &str, message: String) {
+        if let Ok(mut records) = self.task_records.lock()
+            && let Some(record) = records.get_mut(agent_id)
+        {
+            record.status = IrWorkflowRunStatus::Failed;
+            record.schema_error = Some(message.clone());
+            record.output = Some(message);
         }
     }
 
@@ -1231,14 +1257,26 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
     }
 
     fn progress(&self, event: ProgressEvent) {
+        let mut schema_error = None;
         let message = match event {
             ProgressEvent::Log { message } => format!("log: {message}"),
             ProgressEvent::Phase { title } => format!("phase: {title}"),
+            ProgressEvent::TaskSchemaValidationFailed { task_id, message } => {
+                self.record_schema_validation_failure(&task_id, message.clone());
+                schema_error = Some(WorkflowSchemaError {
+                    task_id: task_id.clone(),
+                    message: message.clone(),
+                });
+                format!("schema validation failed for {task_id}: {message}")
+            }
         };
         if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
             record.progress.push(message.clone());
+            if let Some(schema_error) = schema_error {
+                record.schema_errors.push(schema_error);
+            }
         }
         self.state.record_progress(&self.run_id, &message);
     }
@@ -1347,6 +1385,7 @@ fn push_leaf_execution(
         memo_usage: WorkflowMemoUsage::default(),
         output: record.and_then(|record| record.output.clone()),
         artifacts: Vec::new(),
+        schema_error: record.and_then(|record| record.schema_error.clone()),
     });
 }
 
@@ -1774,6 +1813,7 @@ mod journal {
                 token_budget: None,
                 child_ids: Vec::new(),
                 progress: Vec::new(),
+                schema_errors: Vec::new(),
                 result: None,
                 execution: None,
                 error: None,
@@ -1850,6 +1890,25 @@ mod tests {
     use crate::tools::subagent::{SubAgentRuntime, new_shared_subagent_manager};
     use axum::{Json, Router, routing::post};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn declarative_detection_matches_indented_and_nonleading_workflow_calls() {
+        // column-0 forms
+        assert!(looks_like_declarative_workflow("workflow({ tasks: [] })"));
+        assert!(looks_like_declarative_workflow(
+            "export default workflow({})"
+        ));
+        // #dogfood 0.8.67: a leading statement/comment followed by an INDENTED
+        // top-level workflow( call must still be detected as declarative.
+        assert!(looks_like_declarative_workflow(
+            "// build the run\n  workflow({\n    tasks: [],\n  })"
+        ));
+        // imperative scripts must not be misdetected as declarative
+        assert!(!looks_like_declarative_workflow(
+            "return await parallel([() => task({ description: \"x\" })]);"
+        ));
+        assert!(!looks_like_declarative_workflow("const x = myworkflow(1);"));
+    }
 
     #[test]
     fn workflow_action_defaults_to_start() {
@@ -1929,7 +1988,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn workflow_run_dispatches_task_through_subagent_manager() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -1974,7 +2033,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn declarative_parallel_spawn_failure_fails_before_reduce() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -2044,7 +2103,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn declarative_dependency_results_are_forwarded_to_downstream_prompt() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -2110,7 +2169,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn workflow_status_lists_compact_typed_receipts() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -2173,7 +2232,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn workflow_status_survives_tool_rebuild_via_journal() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -2229,8 +2288,69 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn workflow_status_surfaces_schema_failure_instead_of_null_success() {
+        let _retry_guard = workflow_test_retry_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (client, _calls) = fake_chat_client(r#"{"refuted":"yes"}"#).await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let tool = WorkflowTool::new(manager, runtime);
+
+        let run = tool
+            .execute(
+                json!({
+                    "action": "run",
+                    "script": r#"
+                    return await parallel([
+                        () => task({
+                            description: "Return the schema fixture.",
+                            responseSchema: {
+                                type: "object",
+                                properties: { refuted: { type: "boolean" } },
+                                required: ["refuted"],
+                            },
+                        }),
+                    ]);
+                    "#
+                }),
+                &ctx,
+            )
+            .await
+            .expect("workflow run returns a record");
+        let run_payload: Value = serde_json::from_str(&run.content).expect("run json");
+
+        assert_eq!(run_payload["status"], "failed");
+        assert!(run_payload["result"].is_null());
+        assert!(
+            run_payload["error"]
+                .as_str()
+                .unwrap()
+                .contains("responseSchema validation")
+        );
+        assert!(
+            run_payload["progress"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message
+                    .as_str()
+                    .is_some_and(|message| message.contains("schema validation failed"))),
+            "schema validation error should be visible in the run receipt: {run_payload}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn declarative_issue_audit_fixture_runs_through_subagent_driver() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let workflow_dir = tmp.path().join("workflows");
         std::fs::create_dir_all(&workflow_dir).expect("workflow dir");
@@ -2325,7 +2445,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn workflow_cancel_interrupts_vm_and_blocks_further_spawns() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
@@ -2390,7 +2510,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn workflow_budget_spent_delegates_to_manager_scope() {
-        let _rate_limit_window = rate_limit_window_guard();
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -2425,14 +2545,6 @@ mod tests {
         assert_eq!(payload["result"]["spent"], 2);
         assert_eq!(payload["result"]["total"], 1000);
         assert_eq!(payload["result"]["remaining"], 998);
-    }
-
-    /// Serialize spawn-path tests with the subagent tests that open the
-    /// process-wide provider rate-limit window (`retry_status`): while that
-    /// window is open, every concurrent sub-agent spawn is rejected with
-    /// "sub-agent spawning is paused", failing workflows that should succeed.
-    fn rate_limit_window_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::retry_status::test_guard()
     }
 
     fn stub_client() -> DeepSeekClient {
@@ -2507,5 +2619,12 @@ mod tests {
             calls,
             bodies,
         )
+    }
+
+    fn workflow_test_retry_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::retry_status::test_guard();
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+        guard
     }
 }

@@ -140,10 +140,20 @@ pub(super) fn reconcile_subagent_activity_state_at(app: &mut App, now: Instant) 
 
     let running_ids: std::collections::HashSet<String> =
         running_agents.iter().map(|(id, _)| id.clone()).collect();
+    // Evict a progress row only when the authoritative cache actually knows
+    // the agent and reports it non-running. A progress-only entry — an agent
+    // whose AgentSpawned/AgentList delivery was dropped under channel
+    // pressure so the cache has never seen it — must survive until the cache
+    // supersedes it, or spawned agents flicker in and out of the sidebar.
+    let cached_ids: std::collections::HashSet<&str> = app
+        .subagent_cache
+        .iter()
+        .map(|agent| agent.agent_id.as_str())
+        .collect();
     app.agent_progress
-        .retain(|id, _| running_ids.contains(id.as_str()));
+        .retain(|id, _| running_ids.contains(id.as_str()) || !cached_ids.contains(id.as_str()));
     app.agent_progress_meta
-        .retain(|id, _| running_ids.contains(id.as_str()));
+        .retain(|id, _| running_ids.contains(id.as_str()) || !cached_ids.contains(id.as_str()));
     for (id, objective) in running_agents {
         app.agent_progress.entry(id.clone()).or_insert(objective);
         if let Some(agent) = app.subagent_cache.iter().find(|agent| agent.agent_id == id) {
@@ -370,8 +380,13 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
     // No existing card — only `Started` reasonably opens one. Anything else
     // for an unknown agent_id is dropped (likely arrived after the cell was
     // cleared, e.g. session-resume edge cases).
-    let MailboxMessage::Started { agent_type, .. } = message else {
-        return false;
+    let agent_type = match message {
+        MailboxMessage::Started { agent_type, .. } => agent_type.clone(),
+        MailboxMessage::Completed { .. }
+        | MailboxMessage::Failed { .. }
+        | MailboxMessage::Interrupted { .. }
+        | MailboxMessage::Cancelled { .. } => "unknown".to_string(),
+        _ => return false,
     };
 
     let dispatch_kind = app.pending_subagent_dispatch.as_deref();
@@ -760,6 +775,67 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_keeps_progress_only_rows_until_cache_knows_the_agent() {
+        let mut app = App::new(test_options(), &Config::default());
+
+        // A progress-first agent: its AgentSpawned/AgentList delivery was
+        // dropped under channel pressure, so the authoritative cache has
+        // never seen it. Its sidebar row must survive reconciliation.
+        app.agent_progress
+            .insert("agent_orphan".to_string(), "step 2/10".to_string());
+        app.agent_progress_meta.insert(
+            "agent_orphan".to_string(),
+            AgentProgressMeta {
+                parent_run_id: None,
+                spawn_depth: 0,
+            },
+        );
+
+        // A terminal agent the cache DOES know about: its stale progress row
+        // must still be evicted.
+        app.subagent_cache
+            .push(subagent_result("agent_done", SubAgentStatus::Completed));
+        app.agent_progress
+            .insert("agent_done".to_string(), "step 9/10".to_string());
+        app.agent_progress_meta.insert(
+            "agent_done".to_string(),
+            AgentProgressMeta {
+                parent_run_id: None,
+                spawn_depth: 0,
+            },
+        );
+
+        reconcile_subagent_activity_state_at(&mut app, Instant::now());
+
+        assert!(
+            app.agent_progress.contains_key("agent_orphan"),
+            "progress-only agent unknown to the cache must survive reconcile"
+        );
+        assert!(
+            app.agent_progress_meta.contains_key("agent_orphan"),
+            "progress-only meta unknown to the cache must survive reconcile"
+        );
+        assert!(
+            !app.agent_progress.contains_key("agent_done"),
+            "cache-known terminal agent progress must still be evicted"
+        );
+        assert!(
+            !app.agent_progress_meta.contains_key("agent_done"),
+            "cache-known terminal agent meta must still be evicted"
+        );
+
+        // Once the authoritative cache reports the orphan as terminal, the
+        // normal eviction applies and the row is released.
+        app.subagent_cache
+            .push(subagent_result("agent_orphan", SubAgentStatus::Completed));
+        reconcile_subagent_activity_state_at(&mut app, Instant::now());
+        assert!(
+            !app.agent_progress.contains_key("agent_orphan"),
+            "cache supersedes the progress-only row once it knows the agent"
+        );
+    }
+
+    #[test]
     fn apply_subagent_terminal_projection_clears_live_progress_and_card_state() {
         let mut app = App::new(test_options(), &Config::default());
         let started = MailboxMessage::started("agent_done", SubAgentType::General);
@@ -807,5 +883,56 @@ mod tests {
             }
             cell => panic!("expected delegate card, got {cell:?}"),
         }
+    }
+
+    #[test]
+    fn completion_before_started_allocates_recovery_delegate_card() {
+        let mut app = App::new(test_options(), &Config::default());
+        let completed = MailboxMessage::Completed {
+            agent_id: "agent_early".to_string(),
+            summary: "recovered after early completion".to_string(),
+        };
+        assert!(
+            handle_subagent_mailbox(&mut app, 1, &completed),
+            "completion-first delivery must still open a card"
+        );
+        assert!(app.subagent_card_index.contains_key("agent_early"));
+
+        let started = MailboxMessage::started("agent_early", SubAgentType::General);
+        assert!(handle_subagent_mailbox(&mut app, 2, &started));
+        match app.history.last() {
+            Some(HistoryCell::SubAgent(SubAgentCell::Delegate(card))) => {
+                assert_eq!(card.agent_id, "agent_early");
+                assert_ne!(card.agent_type, "…");
+            }
+            other => panic!("expected delegate card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fanout_completion_burst_preserves_started_to_done_ordering() {
+        let mut app = App::new(test_options(), &Config::default());
+        app.pending_subagent_dispatch = Some("rlm_eval".to_string());
+        for (seq, id) in ["agent_a", "agent_b"].into_iter().enumerate() {
+            assert!(handle_subagent_mailbox(
+                &mut app,
+                seq as u64 + 1,
+                &MailboxMessage::started(id, SubAgentType::Explore),
+            ));
+        }
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            3,
+            &MailboxMessage::Completed {
+                agent_id: "agent_a".to_string(),
+                summary: "a done".to_string(),
+            },
+        ));
+        let Some(HistoryCell::SubAgent(SubAgentCell::Fanout(card))) = app.history.last() else {
+            panic!("expected fanout card");
+        };
+        assert_eq!(card.workers.len(), 2);
+        assert_eq!(card.workers[0].status, AgentLifecycle::Completed);
+        assert_eq!(card.workers[1].status, AgentLifecycle::Running);
     }
 }

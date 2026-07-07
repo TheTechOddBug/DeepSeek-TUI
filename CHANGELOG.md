@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inventory now enumerate configured providers' models from the bundled
   catalog (with an `A` toggle to browse the full catalog), replacing the
   hardcoded per-provider model table (#3830 follow-up).
+- Added Cursor-integrated-terminal dogfood evidence for the published v0.8.67
+  release, covering installed binary provenance, release/publication checks,
+  headless runtime smoke, setup QA, and remaining manual visual TUI checks.
+- README and README.zh-CN now point users to the community-maintained
+  CodeWhale for VS Code GUI frontend while clarifying that this repository's
+  `extensions/vscode/` scaffold remains the read-only Phase 0 viewer (#4035).
 
 ### Fixed
 
@@ -64,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors instead of loading empty state; the session index compacts instead
   of growing unbounded; and recording thread-goal usage no longer
   self-deadlocks the state store.
+- Runtime compaction summaries are now persisted into `/v1` thread records so
+  engine reloads and restarts preserve compacted context. Contributed by
+  MXAntian (@MXAntian) (#4091).
+- The TUI leaves xterm alternate-scroll mode off when mouse capture is disabled,
+  preserving native terminal text selection in light-theme/no-mouse-capture
+  sessions. Contributed by Nightt (@nightt5879) (#4088, #4026).
+- The public `/api/github/feed` endpoint is now forced dynamic on Cloudflare so
+  it returns live GitHub activity instead of a build-time empty feed.
 
 ### Changed
 
@@ -71,6 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   footer hints use a higher-contrast tier (#3380); status/mode copy is
   disclosed once across header, footer, cards, and sidebar instead of
   repeated per layer.
+- Removed the unused `tui::whale_routes` taxonomy module and its tests.
+  Contributed by Darrell Thomas (@DarrellThomas) (#4041, #3852).
 
 ### Deprecated
 
@@ -78,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now map to Act + Full Access permissions via a compatibility shim and
   show a one-shot deprecation notice; removal is planned for 0.9.0.
 
-## [0.8.67] - 2026-07-05
+## [0.8.67] - 2026-07-06
 
 ### Added
 
@@ -129,6 +145,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks. Harvested from #3763 by @idling11 (#3090).
 - Added `doctor` detection of half-applied setup state, and startup milestone
   tracing for boot-performance diagnosis.
+- Added a v0.8.67 computer-use dogfood prompt that covers the Cursor-terminal
+  QA flow, headless gates, setup, sub-agent completion, Fleet, Workflow, model
+  pricing, and release evidence collection.
 - Fleet: local worker memory usage is now reported, including retained memory
   while a task is in Running status. Contributed by @cyq1017 (#3901).
 - Website: community hub, constitution thesis page and constitution-centered
@@ -160,9 +179,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subagent limits, launch concurrency, and admission caps are derived from
   config without hardcoding any single provider.
 - Added Workflow runtime foundations: the internal JS authoring/runtime crates
-  compile and replay example workflows. 0.8.67 ships usable Fleet and Workflow
-  setup; the product-ready `/workflow` runner and TUI run view remain tracked
-  for v0.8.68 (#2974, #4038).
+  compile and replay example workflows. 0.8.67 ships the `/workflow` opt-in,
+  production-driver dispatch path, sub-agent task handoff, and typed run/status
+  receipts; richer authoring UX and the full TUI run view remain tracked for
+  v0.8.68 (#2974, #4038).
 
 ### Changed
 
@@ -194,6 +214,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changelog and retro-ledger entries keep the old name as a record.
 - Documented the Homebrew rollout strategy and added a distribution-channel
   check to the release checklist. Harvested from #3760 by @idling11 (#3489).
+- Paused Linux RISC-V prebuilt release and nightly artifacts because
+  `rquickjs-sys` 0.12.0 does not ship `riscv64gc-unknown-linux-gnu` bindings;
+  installers, docs, and update paths now treat RISC-V as unsupported until
+  upstream bindings or a bindgen-enabled build lands.
 - Made the approval prompt calm, compact, and honest, and centered the
   first-run follow-up on the constitution; first-run onboarding now hands off
   into the setup wizard, and the language picker offers every shipped locale
@@ -210,6 +234,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docs. Docs contribution by @greyfreedom.
 - Bumped web dependencies: wrangler 4.103.0 → 4.107.0, mermaid 11.15.0 →
   11.16.0, vitest 4.1.8 → 4.1.9 (@dependabot).
+- Backfilled v0.8.67 regression coverage across sub-agent completion, budget
+  exhaustion, delegate ordering, provider onboarding, setup scroll, model
+  catalog pricing, Fleet routing, and Workflow gates (#4076).
+- Split the large TUI debug command group and palette/theme internals into
+  smaller modules without changing user-visible behavior (#4078, #4081).
 
 ### Fixed
 
@@ -221,6 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed paused goals silently un-freezing their sidebar timer: usage keeps
   accruing while paused, and the next goal snapshot used to clear the frozen
   instant. Paused goals now stay frozen until an explicit resume.
+- Fixed durable `/goal` progress accounting so usage and continuation updates
+  release the shared SQLite connection before re-reading the updated goal,
+  unblocking resumed goal loops and full workspace release tests.
 - Fixed a scheduled-automation race where deleting an automation while its
   run was being enqueued left the already-created task running untracked;
   the run record is now persisted unconditionally.
@@ -285,6 +317,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Retry-After` pause could strand unrelated budget-capped workers for the
   full stale window; requests now re-poll the global pause in bounded slices
   and the rate-limit test clears the window on drop.
+- Sub-agent and Fleet reliability now fail empty, step-limited, and
+  budget-exhausted children with explicit diagnostics instead of silent
+  `Completed (no output)` success; budget exhaustion preserves partial output,
+  `worktree: true` discovers one-level nested repos from harness directories,
+  and completion-before-start delegate events recover into named rows instead
+  of ellipsis-only identities (#4050, #4051, #4052, #4053).
+- Goal-mode writing and research tasks can complete with
+  `verification.status = "not_applicable"` without triggering continuation
+  loops (#4054).
+- First-run onboarding routes API keys through the selected provider, setup
+  wizard bodies scroll with PageUp/PageDown, shipped locale packs are back to
+  `en.json` parity with zh-Hant explicitly partial, stable feature flags stay
+  out of Experimental, and model/provider rows include current LongCat and
+  sourced-pricing hints (#4056, #4057, #4058, #4062, #4063).
+- Running tool rows animate while a lone foreground tool is active, and
+  workflow receipts render run/status/failure cards instead of one-line or
+  null-success output (#4059).
+- Model-facing turn metadata now includes a compact git workspace snapshot and
+  escalates context pressure at the same thresholds as the TUI, helping agents
+  narrow scope or compact before truncation (#4071, #4073).
+- Successful child sub-agent completions inline the child's `EVIDENCE` block
+  before the completion sentinel, so parents can cite child findings without
+  re-running tools (#4072).
+- Deferred tools hydrate and execute in the same batch when the original
+  arguments are valid, and `[tools].always_load` now keeps configured MCP tools
+  active instead of forcing the first-call retry. Thanks @SparkofSpike for the
+  hot-path MCP report (#4074, #4027).
+- New commit-range co-author checks reject bot/tool trailers on newly pushed
+  commits; historical release-range cleanup remains a separate maintenance
+  concern (#4075).
+- Fixed fuzzy `edit_file` matching so matches that begin with multibyte UTF-8
+  characters, including CJK text, advance on character boundaries instead of
+  panicking. Contributed by Nightt (@nightt5879), reported by Taixin Guo
+  (@taixinguo) (#3971, #4045).
+- Fixed Unix dispatcher/TUI output under early-closing pipes such as
+  `codewhale doctor | head` by restoring the default `SIGPIPE` handler before
+  printing and propagating signal exits quietly. Contributed by @aznikline,
+  reported by @BrathonBai (#4030, #4043).
 - Suppressed dead_code warnings in the unused plugin registry module and
   fixed formatting across the command-group files. Contributed by Paulo Aboim
   Pinto (@aboimpinto).

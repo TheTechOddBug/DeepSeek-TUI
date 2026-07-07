@@ -12,9 +12,9 @@ a concrete model and thinking level; they are not TUI modes and are not part of
 the `Tab` cycle.
 
 Workflow is also separate from the `Tab` mode cycle. It is the visible
-continuous-work layer for repeatable workflows and fleet workers. Swarm-style
-high-fanout remains gated in v0.8.61 until it routes through durable
-Fleet-backed workers instead of prompt-only sub-agent fanout. The active mode
+continuous-work layer for repeatable workflows and fleet workers. High fan-out
+routes through durable Fleet-backed workers instead of prompt-only sub-agent
+fanout. The active mode
 still controls permissions; Workflow controls whether a large task is planned
 into a resumable workflow with its own progress view.
 
@@ -149,7 +149,7 @@ Run `codewhale --help` for the canonical list. Common flags:
 - `--yolo`: start in YOLO mode
 - `-r, --resume <ID|PREFIX|latest>`: resume a saved session
 - `-c, --continue`: resume the most recent session in this workspace
-- `--max-subagents <N>`: clamp to `1..=20`
+- `--max-subagents <N>`: clamp to `1..=128`
 - `--mouse-capture` / `--no-mouse-capture`: opt in or out of internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. Mouse capture is enabled by default on non-Windows terminals and on Windows Terminal/ConEmu/Cmder so drag selection copies only transcript text, removes visual wrap-column line breaks from paragraphs, and stays scoped to the transcript pane; hold Shift while dragging or use `--no-mouse-capture` for raw terminal selection. It defaults off on legacy Windows console (CMD without `WT_SESSION` / `ConEmuPID`) and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where the terminal advertises mouse support but forwards SGR mouse events as raw text (#878, #898). Use `--mouse-capture` to opt in anywhere it's defaulted off. Raw terminal selection may cross the right sidebar and include visual wraps because the terminal, not the TUI, owns the selection.
 - `--profile <NAME>`: select config profile
 - `--config <PATH>`: config file path
