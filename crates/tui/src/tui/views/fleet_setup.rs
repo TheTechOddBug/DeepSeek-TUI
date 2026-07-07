@@ -12,6 +12,7 @@
 //! provider/model picker that will churn most of this text. The command entry
 //! (`CmdFleetDescription`) is already localized.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -36,9 +37,9 @@ const PROFILE_DIR: &str = ".codewhale/agents";
 /// A selectable choice in a wizard step: a short identifier `label`, a one-line
 /// `summary`, and a longer `description` shown (wrapped) in the detail pane.
 struct Choice {
-    label: &'static str,
-    summary: &'static str,
-    description: &'static str,
+    label: Cow<'static, str>,
+    summary: Cow<'static, str>,
+    description: Cow<'static, str>,
 }
 
 const CHOICE_LIST_WIDTH: u16 = 22;
@@ -49,54 +50,73 @@ const CHOICE_TWO_COLUMN_MIN_WIDTH: u16 = CHOICE_LIST_WIDTH + CHOICE_DETAIL_MIN_W
 /// so these strings are part of the generated-profile contract.
 const ROLES: [Choice; 8] = [
     Choice {
-        label: "manager",
-        summary: "Plan & split queued work",
-        description: "Coordinates the Fleet run: plans the work, splits it into bounded tasks, and dispatches workers.",
+        label: Cow::Borrowed("manager"),
+        summary: Cow::Borrowed("Plan & split queued work"),
+        description: Cow::Borrowed(
+            "Coordinates the Fleet run: plans the work, splits it into bounded tasks, and dispatches workers.",
+        ),
     },
     Choice {
-        label: "scout",
-        summary: "Read-first research",
-        description: "Research and repo reconnaissance. Reads and summarizes before anything is written.",
+        label: Cow::Borrowed("scout"),
+        summary: Cow::Borrowed("Read-first research"),
+        description: Cow::Borrowed(
+            "Research and repo reconnaissance. Reads and summarizes before anything is written.",
+        ),
     },
     Choice {
-        label: "builder",
-        summary: "Implements bounded changes",
-        description: "Implements changes strictly inside its assigned task scope; writes only what the slice needs.",
+        label: Cow::Borrowed("builder"),
+        summary: Cow::Borrowed("Implements bounded changes"),
+        description: Cow::Borrowed(
+            "Implements changes strictly inside its assigned task scope; writes only what the slice needs.",
+        ),
     },
     Choice {
-        label: "reviewer",
-        summary: "Read-only review",
-        description: "Checks regressions, tests, and diffs. Read-only — it never writes.",
+        label: Cow::Borrowed("reviewer"),
+        summary: Cow::Borrowed("Read-only review"),
+        description: Cow::Borrowed(
+            "Checks regressions, tests, and diffs. Read-only — it never writes.",
+        ),
     },
     Choice {
-        label: "verifier",
-        summary: "Runs focused validation",
-        description: "Runs targeted validation and reports receipts back to the orchestrator.",
+        label: Cow::Borrowed("verifier"),
+        summary: Cow::Borrowed("Runs focused validation"),
+        description: Cow::Borrowed(
+            "Runs targeted validation and reports receipts back to the orchestrator.",
+        ),
     },
     Choice {
-        label: "synthesizer",
-        summary: "Reduce receipts to handoff",
-        description: "Turns worker receipts into bounded handoff state instead of raw transcript replay.",
+        label: Cow::Borrowed("synthesizer"),
+        summary: Cow::Borrowed("Reduce receipts to handoff"),
+        description: Cow::Borrowed(
+            "Turns worker receipts into bounded handoff state instead of raw transcript replay.",
+        ),
     },
     Choice {
-        label: "general",
-        summary: "General-purpose worker",
-        description: "A flexible worker with no specialized posture — use it when the task doesn't fit a named role.",
+        label: Cow::Borrowed("general"),
+        summary: Cow::Borrowed("General-purpose worker"),
+        description: Cow::Borrowed(
+            "A flexible worker with no specialized posture — use it when the task doesn't fit a named role.",
+        ),
     },
     Choice {
-        label: "custom",
-        summary: "Author a profile by hand",
-        description: "Define the posture yourself in a workspace agent TOML profile under .codewhale/agents/.",
+        label: Cow::Borrowed("custom"),
+        summary: Cow::Borrowed("Author a profile by hand"),
+        description: Cow::Borrowed(
+            "Define the posture yourself in a workspace agent TOML profile under .codewhale/agents/.",
+        ),
     },
 ];
 
 /// The `inherit` row shown first in the Model step (#3167). Concrete provider
-/// models follow it, built per-run from the active provider's catalog, so the
-/// user picks a real model instead of an abstract class.
+/// models follow it, built per-run from EVERY configured provider's catalog
+/// (#4093), so the user picks a real route — including cross-provider ones —
+/// instead of an abstract class or only the active provider's models.
 const MODEL_INHERIT: Choice = Choice {
-    label: "inherit",
-    summary: "Same model as now",
-    description: "Reuse the active provider, model, and reasoning for this worker — the operator's route. Recommended default.",
+    label: Cow::Borrowed("inherit"),
+    summary: Cow::Borrowed("Same model as now"),
+    description: Cow::Borrowed(
+        "Reuse the active provider, model, and reasoning for this worker — the operator's route. Recommended default.",
+    ),
 };
 
 #[derive(Debug, Clone)]
@@ -122,9 +142,11 @@ pub struct FleetSetupSnapshot {
     /// config / project), so the wizard can say when a chosen role would
     /// override an existing roster member.
     roster_members: Vec<(String, String)>,
-    /// Concrete model ids selectable for a worker on the active provider,
-    /// shown after `inherit` in the Model step.
-    available_models: Vec<&'static str>,
+    /// `(provider display name, model id)` pairs selectable for a worker,
+    /// drawn from ALL configured providers — not only the active one (#4093).
+    /// Shown after `inherit` in the Model step so a Fleet worker can be pinned
+    /// to a route independent of the parent/current provider.
+    available_models: Vec<(String, String)>,
 }
 
 impl FleetSetupSnapshot {
@@ -170,9 +192,27 @@ impl FleetSetupSnapshot {
             heartbeat_timeout_secs: config
                 .subagent_heartbeat_timeout_secs_for_provider(app.api_provider),
             roster_members,
-            available_models: crate::config::model_completion_names_for_provider(app.api_provider),
+            available_models: cross_provider_model_routes(config, app.api_provider),
         }
     }
+}
+
+/// Build the `(provider display name, model id)` pairs selectable for a worker
+/// from EVERY configured provider — not only the active one (#4093). Fleet
+/// workers can be pinned to a route independent of the parent/current provider,
+/// so the Model step must offer the same cross-provider catalog the model
+/// picker does, instead of the active provider's models alone.
+fn cross_provider_model_routes(
+    config: &Config,
+    active: crate::config::ApiProvider,
+) -> Vec<(String, String)> {
+    let mut routes = Vec::new();
+    for provider in crate::provider_lake::configured_providers(config, active) {
+        for model in crate::provider_lake::models_for_provider(config, active, provider) {
+            routes.push((provider.display_name().to_string(), model));
+        }
+    }
+    routes
 }
 
 /// Which focused screen of the wizard is showing.
@@ -198,8 +238,13 @@ pub struct FleetSetupView {
     model_draft: Option<Box<crate::fleet::profile::FleetProfileDraft>>,
     /// Display label of the model that authored `model_draft`.
     model_draft_label: Option<String>,
-    /// Model-step rows: `inherit` followed by the active provider's models.
+    /// Model-step rows: `inherit` followed by one row per concrete model from
+    /// every configured provider (#4093).
     model_choices: Vec<Choice>,
+    /// `(provider, model)` aligned with `model_choices`. Index 0 is `inherit`
+    /// (the active route); later rows pin a concrete, possibly cross-provider
+    /// route. Drives the review/copy so a pinned route names its own provider.
+    model_routes: Vec<(String, String)>,
 }
 
 impl FleetSetupView {
@@ -210,12 +255,18 @@ impl FleetSetupView {
 
     fn from_snapshot(snapshot: FleetSetupSnapshot) -> Self {
         let mut model_choices = vec![MODEL_INHERIT];
-        for &name in &snapshot.available_models {
+        // `inherit` (index 0) maps to the active route; every later row pins a
+        // concrete (provider, model) drawn from all configured providers.
+        let mut model_routes = vec![(snapshot.provider.clone(), snapshot.model.clone())];
+        for (provider, model) in &snapshot.available_models {
             model_choices.push(Choice {
-                label: name,
-                summary: "Pin this model",
-                description: "Route this worker to this specific model on the active provider instead of inheriting the session route.",
+                label: Cow::Owned(model.clone()),
+                summary: Cow::Owned(format!("Pin this model ({provider})")),
+                description: Cow::Owned(format!(
+                    "Route this worker to {model} on {provider} instead of inheriting the session route."
+                )),
             });
+            model_routes.push((provider.clone(), model.clone()));
         }
         Self {
             snapshot,
@@ -226,6 +277,7 @@ impl FleetSetupView {
             model_draft: None,
             model_draft_label: None,
             model_choices,
+            model_routes,
         }
     }
 
@@ -260,8 +312,8 @@ impl FleetSetupView {
     }
 
     /// The planner role chosen (drives the profile file name and `role_hint`).
-    fn selected_role(&self) -> &'static str {
-        ROLES[self.role_idx.min(ROLES.len() - 1)].label
+    fn selected_role(&self) -> String {
+        ROLES[self.role_idx.min(ROLES.len() - 1)].label.to_string()
     }
 
     /// Copy note when the chosen role would override an existing roster
@@ -276,13 +328,20 @@ impl FleetSetupView {
             .map(|(id, origin)| format!("Overrides the {origin} '{id}' roster member."))
     }
 
-    /// The concrete model chosen for this worker, or `None` for `inherit`
-    /// (reuse the session route). Written to the profile `model` field.
+    /// The concrete model chosen for this worker, written to the profile
+    /// `model` field. `None` means `inherit` (reuse the session route).
     fn selected_model(&self) -> Option<String> {
-        match self.model_choices.get(self.model_idx) {
-            Some(choice) if choice.label != "inherit" => Some(choice.label.to_string()),
-            _ => None,
+        self.selected_route().map(|(_, model)| model)
+    }
+
+    /// The concrete `(provider, model)` chosen for this worker — a pinned route
+    /// independent of the parent/current provider (#4093) — or `None` when
+    /// `inherit` is selected (reuse the session route).
+    fn selected_route(&self) -> Option<(String, String)> {
+        if self.model_idx == 0 {
+            return None;
         }
+        self.model_routes.get(self.model_idx).cloned()
     }
 
     /// Number of selectable rows on the current step (0 on the review step).
@@ -391,7 +450,7 @@ impl FleetSetupView {
     fn starter_profile_draft(&self) -> Box<crate::fleet::profile::FleetProfileDraft> {
         let role = &ROLES[self.role_idx.min(ROLES.len() - 1)];
         Box::new(crate::fleet::profile::FleetProfileDraft {
-            id: profile_file_stem(role.label),
+            id: profile_file_stem(&role.label),
             display_name: Some(role.label.to_string()),
             description: Some(format!("{} - {}", role.summary, role.description)),
             role_hint: role.label.to_string(),
@@ -613,7 +672,7 @@ impl FleetSetupView {
     fn render_review(&self, area: Rect, buf: &mut Buffer) {
         let role = &ROLES[self.role_idx.min(ROLES.len() - 1)];
         let (profile_value, _) = profile_file_status(&self.snapshot.workspace);
-        let file_stem = profile_file_stem(role.label);
+        let file_stem = profile_file_stem(&role.label);
         let token_budget = self
             .snapshot
             .token_budget
@@ -772,12 +831,12 @@ fn render_choice_step(
     let choice = &choices[selected.min(choices.len().saturating_sub(1))];
     let mut detail_lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            choice.summary,
+            choice.summary.clone(),
             Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            choice.description,
+            choice.description.clone(),
             Style::default().fg(palette::TEXT_PRIMARY),
         )),
     ];
@@ -869,7 +928,10 @@ mod tests {
                 .iter()
                 .map(|member| (member.id.to_lowercase(), member.origin.to_string()))
                 .collect(),
-            available_models: vec!["deepseek-v4-pro", "deepseek-v4-flash"],
+            available_models: vec![
+                ("deepseek".to_string(), "deepseek-v4-pro".to_string()),
+                ("deepseek".to_string(), "deepseek-v4-flash".to_string()),
+            ],
         }
     }
 
