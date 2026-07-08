@@ -347,7 +347,8 @@ fn extract_agent_id_returns_none_for_empty_id() {
 }
 
 #[test]
-fn agent_renders_single_compact_line_in_live_mode() {
+fn agent_spawn_suppresses_generic_card_in_live_mode() {
+    // #4133: spawn cards yield entirely to DelegateCard — no generic tool row.
     let cell = GenericToolCell {
         name: "agent".to_string(),
         status: ToolStatus::Running,
@@ -362,19 +363,38 @@ fn agent_renders_single_compact_line_in_live_mode() {
         is_diff: false,
     };
     let lines = cell.lines_with_mode(80, true, super::RenderMode::Live);
-    // One header line, no details/args/output expansion.
+    assert!(
+        lines.is_empty(),
+        "spawn generic tool card must be suppressed: {lines:?}"
+    );
+}
+
+#[test]
+fn agent_inspection_renders_single_compact_line_in_live_mode() {
+    let cell = GenericToolCell {
+        name: "agent".to_string(),
+        status: ToolStatus::Running,
+        input_summary: Some("action: peek agent_id: agent-abc12".to_string()),
+        output: Some(
+            r#"{"agent_id": "agent-abc12", "nickname": "Beluga", "model": "deepseek-v4-flash"}"#
+                .to_string(),
+        ),
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    };
+    let lines = cell.lines_with_mode(80, true, super::RenderMode::Live);
     assert_eq!(lines.len(), 1, "expected exactly 1 line, got {lines:?}");
     let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-    // Header carries the agent id and the running status.
     assert!(
         rendered.contains("agent-abc12"),
         "expected agent id in header: {rendered:?}"
     );
     assert!(
-        rendered.contains("running"),
-        "expected status in header: {rendered:?}"
+        rendered.contains("checking"),
+        "expected inspection status in header: {rendered:?}"
     );
-    // No verbose `args:` / `name:` rows.
     assert!(
         !rendered.contains("args"),
         "args should be hidden: {rendered:?}"
@@ -382,30 +402,32 @@ fn agent_renders_single_compact_line_in_live_mode() {
 }
 
 #[test]
-fn agent_pending_render_uses_fallback_token() {
+fn agent_pending_inspection_uses_fallback_token() {
+    // Pending inspection (no agent_id yet) still renders a compact check line.
     let cell = GenericToolCell {
         name: "agent".to_string(),
         status: ToolStatus::Running,
-        input_summary: Some("prompt: do thing".to_string()),
+        input_summary: Some("action: peek prompt: do thing".to_string()),
         output: None,
         prompts: None,
         spillover_path: None,
         output_summary: None,
         is_diff: false,
     };
-    let rendered: String = cell.lines_with_mode(80, true, super::RenderMode::Live)[0]
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
-    assert!(rendered.contains("do-thing"), "{rendered:?}");
+    let lines = cell.lines_with_mode(80, true, super::RenderMode::Live);
+    assert_eq!(lines.len(), 1, "inspection must stay compact: {lines:?}");
+    let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        rendered.contains("checking") || rendered.contains("subagent"),
+        "{rendered:?}"
+    );
     assert!(!rendered.contains('\u{2026}'), "{rendered:?}");
 }
 
 #[test]
-fn agent_transcript_mode_keeps_full_block() {
-    // Transcript mode is for replay/debug — preserve the full block
-    // so session export still carries the args/output verbatim.
+fn agent_spawn_suppresses_generic_card_in_transcript_mode() {
+    // #4133: spawn cards are suppressed in both Live and Transcript; DelegateCard
+    // is the sole visible spawn artifact.
     let cell = GenericToolCell {
         name: "agent".to_string(),
         status: ToolStatus::Success,
@@ -417,9 +439,10 @@ fn agent_transcript_mode_keeps_full_block() {
         is_diff: false,
     };
     let lines = cell.lines_with_mode(80, true, super::RenderMode::Transcript);
-    // Transcript mode emits header + name kv + (no args, output present)
-    // + output rows. At minimum more than the live one-liner.
-    assert!(lines.len() > 1, "expected verbose transcript render");
+    assert!(
+        lines.is_empty(),
+        "spawn generic tool card must be suppressed in transcript: {lines:?}"
+    );
 }
 
 #[test]
@@ -442,23 +465,21 @@ fn other_tools_are_unaffected_by_agent_compact_path() {
 
 #[test]
 fn agent_compact_header_omits_unknown_child_fallback() {
-    // #4148: an agent whose identity can't be resolved must not leak the raw
-    // internal "unknown child" token into the default transcript.
+    // #4148: an inspection whose identity can't be resolved must not leak the
+    // raw internal "unknown child" token into the default transcript.
     let cell = GenericToolCell {
         name: "agent".to_string(),
         status: ToolStatus::Running,
-        input_summary: Some("agent_type: delegate".to_string()),
+        input_summary: Some("action: peek agent_type: delegate".to_string()),
         output: None,
         prompts: None,
         spillover_path: None,
         output_summary: None,
         is_diff: false,
     };
-    let rendered: String = cell.lines_with_mode(80, true, super::RenderMode::Live)[0]
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
+    let lines = cell.lines_with_mode(80, true, super::RenderMode::Live);
+    assert_eq!(lines.len(), 1, "inspection must stay compact: {lines:?}");
+    let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
         !rendered.contains("unknown child"),
         "raw fallback token must not leak: {rendered:?}"
@@ -472,28 +493,24 @@ fn agent_compact_header_omits_unknown_child_fallback() {
 #[test]
 fn agent_compact_header_does_not_duplicate_delegate_verb() {
     // #4148: when the resolved identity collapses to the "delegate" verb, the
-    // compact header must not render a redundant "delegate · delegate".
+    // compact inspection header must not render a redundant "delegate · delegate".
     let cell = GenericToolCell {
         name: "agent".to_string(),
         status: ToolStatus::Running,
-        input_summary: Some("role: delegate".to_string()),
+        input_summary: Some("action: peek role: delegate".to_string()),
         output: None,
         prompts: None,
         spillover_path: None,
         output_summary: None,
         is_diff: false,
     };
-    let rendered: String = cell.lines_with_mode(80, true, super::RenderMode::Live)[0]
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
+    let lines = cell.lines_with_mode(80, true, super::RenderMode::Live);
+    assert_eq!(lines.len(), 1, "inspection must stay compact: {lines:?}");
+    let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
         !rendered.contains("delegate delegate"),
         "no adjacent duplicate: {rendered:?}"
     );
-    // The verb sits before the status; the redundant summary tail is dropped,
-    // so "delegate" appears exactly once.
     assert_eq!(
         rendered.matches("delegate").count(),
         1,
@@ -1338,10 +1355,12 @@ fn exec_cell_header_includes_compact_command_summary() {
 
 #[test]
 fn generic_tool_cell_picks_family_from_tool_name() {
+    // Use an inspection call so the compact Delegate header still renders;
+    // spawn cards are suppressed entirely (#4133).
     let cell = GenericToolCell {
         name: "agent".to_string(),
         status: ToolStatus::Running,
-        input_summary: Some("foo".to_string()),
+        input_summary: Some("action: peek foo".to_string()),
         output: None,
         prompts: None,
         spillover_path: None,
@@ -1349,6 +1368,7 @@ fn generic_tool_cell_picks_family_from_tool_name() {
         is_diff: false,
     };
     let lines = cell.lines_with_mode(80, true, super::RenderMode::Live);
+    assert_eq!(lines.len(), 1, "inspection must stay compact: {lines:?}");
     let header_visible: String = lines[0]
         .spans
         .iter()
@@ -2857,15 +2877,17 @@ fn agent_inspection_stays_compact_in_transcript_mode() {
 }
 
 #[test]
-fn agent_spawn_keeps_full_block_in_transcript_mode() {
+fn agent_spawn_suppresses_generic_card_in_favor_of_delegate_card() {
     let cell = agent_cell(
         Some("prompt: map the repo"),
         ToolStatus::Success,
         Some(r#"{"agent_id":"agent_scout_1","status":"running"}"#),
     );
-    let lines = cell.lines_with_mode(120, true, super::RenderMode::Transcript);
-    assert!(
-        lines.len() > 1,
-        "spawns keep the full block for session replay: {lines:?}"
-    );
+    for mode in [super::RenderMode::Live, super::RenderMode::Transcript] {
+        let lines = cell.lines_with_mode(120, true, mode);
+        assert!(
+            lines.is_empty(),
+            "spawn generic tool card must yield to DelegateCard (#4133): {mode:?} {lines:?}"
+        );
+    }
 }

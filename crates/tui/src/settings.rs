@@ -373,24 +373,25 @@ impl Default for Settings {
             // making long-session continuity the default runtime behavior.
             auto_compact: false,
             auto_compact_threshold_percent: 80.0,
-            calm_mode: false,
+            // #4095: default presentation is compact/calm; verbose detail is opt-in.
+            calm_mode: true,
             tool_collapse_mode: "compact".to_string(),
-            low_motion: false,
-            fancy_animations: true,
+            low_motion: true,
+            fancy_animations: false,
             bracketed_paste: true,
             paste_burst_detection: true,
             mention_menu_limit: 128,
             mention_walk_depth: 10,
             mention_menu_behavior: "fuzzy".to_string(),
             show_thinking: true,
-            show_tool_details: true,
+            show_tool_details: false,
             locale: "auto".to_string(),
             theme: "system".to_string(),
             background_color: None,
             composer_density: "comfortable".to_string(),
             composer_border: true,
             composer_vim_mode: "normal".to_string(),
-            transcript_spacing: "comfortable".to_string(),
+            transcript_spacing: "compact".to_string(),
             default_mode: "agent".to_string(),
             sidebar_width_percent: 28,
             sidebar_focus: "pinned".to_string(),
@@ -421,7 +422,7 @@ impl Default for Settings {
 pub const CALM_PRESET_FIELDS: &[(&str, &str)] = &[
     ("calm_mode", "true"),
     ("tool_collapse", "calm"),
-    ("transcript_spacing", "comfortable"),
+    ("transcript_spacing", "compact"),
     ("low_motion", "true"),
     ("fancy_animations", "false"),
     ("show_tool_details", "false"),
@@ -1522,11 +1523,22 @@ fn env_truthy(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Explicit animated baseline for env-force tests (#4095 flipped defaults to calm).
+    fn animated_settings() -> Settings {
+        let mut s = Settings::default();
+        s.calm_mode = false;
+        s.low_motion = false;
+        s.fancy_animations = true;
+        s.show_tool_details = true;
+        s.transcript_spacing = "comfortable".to_string();
+        s
+    }
+
     #[test]
     fn apply_preset_calm_sets_bundle_and_preserves_evidence() {
         let mut settings = Settings::default();
-        // Defaults are the debug-visible posture.
-        assert!(!settings.calm_mode);
+        // Defaults are already the calm/compact posture (#4095).
+        assert!(settings.calm_mode);
         assert!(settings.show_thinking);
 
         let changed = settings.apply_preset("CALM").expect("calm preset applies");
@@ -1540,7 +1552,7 @@ mod tests {
 
         assert!(settings.calm_mode);
         assert_eq!(settings.tool_collapse_mode, "calm");
-        assert_eq!(settings.transcript_spacing, "comfortable");
+        assert_eq!(settings.transcript_spacing, "compact");
         assert!(settings.low_motion);
         assert!(!settings.fancy_animations);
         assert!(!settings.show_tool_details);
@@ -1550,6 +1562,19 @@ mod tests {
             settings.show_thinking,
             "calm preset must keep thinking visible"
         );
+    }
+
+    #[test]
+    fn default_settings_are_compact_presentation() {
+        let settings = Settings::default();
+        assert!(settings.calm_mode);
+        assert!(!settings.show_tool_details);
+        assert!(settings.low_motion);
+        assert!(!settings.fancy_animations);
+        assert_eq!(settings.transcript_spacing, "compact");
+        assert_eq!(settings.tool_collapse_mode, "compact");
+        // Thinking stays visible — compact is not "hide evidence".
+        assert!(settings.show_thinking);
     }
 
     #[test]
@@ -1595,7 +1620,10 @@ mod tests {
     #[test]
     fn default_settings_show_footer_water_strip() {
         let settings = Settings::default();
-        assert!(settings.fancy_animations);
+        assert!(
+            !settings.fancy_animations,
+            "default presentation is calm (#4095)"
+        );
     }
 
     #[test]
@@ -1901,7 +1929,7 @@ mod tests {
         unsafe {
             std::env::set_var("NO_ANIMATIONS", "1");
         }
-        let mut settings = Settings::default();
+        let mut settings = animated_settings();
         assert!(!settings.low_motion, "default is animated");
         assert!(settings.fancy_animations, "default shows the water strip");
         settings.apply_env_overrides();
@@ -1980,7 +2008,7 @@ mod tests {
             unsafe {
                 std::env::set_var("NO_ANIMATIONS", truthy);
             }
-            let mut s = Settings::default();
+            let mut s = animated_settings();
             s.apply_env_overrides();
             assert!(s.low_motion, "{truthy:?} should be truthy");
         }
@@ -1989,7 +2017,7 @@ mod tests {
             unsafe {
                 std::env::set_var("NO_ANIMATIONS", falsy);
             }
-            let mut s = Settings::default();
+            let mut s = animated_settings();
             s.apply_env_overrides();
             assert!(!s.low_motion, "{falsy:?} should be falsy");
         }
@@ -2038,7 +2066,7 @@ mod tests {
     /// Serialise tests that mutate `TERM_PROGRAM` through this guard.
     /// Uses the process-wide test env lock so this serializes not just
     /// with itself but with every other env-mutating test in the suite
-    /// — otherwise a concurrent test that calls `Settings::default()`
+    /// — otherwise a concurrent test that calls `animated_settings()`
     /// can read whatever value our two `set_var`s have raced into the
     /// env at that instant.
     fn term_program_test_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -2053,7 +2081,7 @@ mod tests {
         unsafe {
             std::env::set_var("TERM_PROGRAM", "vscode");
         }
-        let mut settings = Settings::default();
+        let mut settings = animated_settings();
         assert!(!settings.low_motion, "default is animated");
         settings.apply_env_overrides();
         assert!(
@@ -2081,7 +2109,7 @@ mod tests {
         unsafe {
             std::env::set_var("TERM_PROGRAM", "Ghostty");
         }
-        let mut settings = Settings::default();
+        let mut settings = animated_settings();
         assert!(!settings.low_motion, "default is animated");
         settings.apply_env_overrides();
         assert!(
@@ -2163,7 +2191,7 @@ mod tests {
             unsafe {
                 std::env::set_var("TERM_PROGRAM", program);
             }
-            let mut s = Settings::default();
+            let mut s = animated_settings();
             s.apply_env_overrides();
             assert!(
                 !s.low_motion,
@@ -2219,7 +2247,7 @@ mod tests {
                 std::env::remove_var("TERMINATOR_UUID");
                 std::env::set_var(var, val);
             }
-            let mut settings = Settings::default();
+            let mut settings = animated_settings();
             assert!(!settings.low_motion, "default is animated");
             settings.apply_env_overrides();
             assert!(
@@ -2257,7 +2285,7 @@ mod tests {
         unsafe {
             std::env::set_var("TERM_PROGRAM", "Termius");
         }
-        let mut settings = Settings::default();
+        let mut settings = animated_settings();
         assert!(!settings.low_motion, "default is animated");
         settings.apply_env_overrides();
         assert!(
@@ -2345,7 +2373,7 @@ mod tests {
             }
         }
 
-        let mut settings = Settings::default();
+        let mut settings = animated_settings();
         assert!(!settings.low_motion, "default is animated");
         assert!(settings.fancy_animations, "default shows the water strip");
         assert_eq!(settings.synchronized_output, "auto");
@@ -2451,7 +2479,7 @@ mod tests {
                 }
                 std::env::set_var(var, val);
             }
-            let mut settings = Settings::default();
+            let mut settings = animated_settings();
             assert!(!settings.low_motion, "default is animated");
             assert!(settings.fancy_animations, "default shows the water strip");
             settings.apply_env_overrides();

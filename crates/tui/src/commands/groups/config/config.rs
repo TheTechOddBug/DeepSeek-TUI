@@ -2425,7 +2425,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         );
         assert_eq!(
             app.transcript_spacing,
-            crate::tui::app::TranscriptSpacing::Comfortable
+            crate::tui::app::TranscriptSpacing::Compact
         );
         // Evidence preserved: thinking is not hidden by the preset.
         assert!(app.show_thinking, "calm preset must not hide thinking");
