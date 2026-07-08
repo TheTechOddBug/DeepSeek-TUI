@@ -433,10 +433,53 @@ fn effective_fleet_model_with_source(
 /// provider authority and resolution falls back to the existing default
 /// scope, unchanged from prior behavior.
 fn effective_fleet_provider(agent_profile: Option<&AgentProfile>) -> ApiProvider {
+    explicit_fleet_provider(agent_profile).unwrap_or(ApiProvider::Deepseek)
+}
+
+/// The provider a resolved agent profile EXPLICITLY pins, if any (#4093).
+///
+/// Unlike [`effective_fleet_provider`], this returns `None` (never the DeepSeek
+/// default) when no profile names a provider, so the launch path can leave
+/// `--provider` off the worker argv and preserve today's behavior for
+/// profile-less / provider-less workers (they resolve their provider from
+/// their own session default). EPIC #2608: never inferred from `model`.
+fn explicit_fleet_provider(agent_profile: Option<&AgentProfile>) -> Option<ApiProvider> {
     agent_profile
         .and_then(|profile| profile.profile.provider.as_deref())
         .and_then(ApiProvider::parse)
-        .unwrap_or(ApiProvider::Deepseek)
+}
+
+/// The route (model selector + optional explicit provider id) that a fleet
+/// worker's actual `codewhale exec` subprocess should launch on (#4093 AC #4).
+///
+/// This is the launch-side twin of [`resolve_fleet_route`] (the receipt): both
+/// read the worker's model from the same task/profile/run precedence
+/// ([`effective_fleet_model`]) and the provider from the same explicit-only
+/// source ([`explicit_fleet_provider`]), so a worker whose profile is pinned to
+/// provider B launches on provider B even when the parent session is on
+/// provider A.
+///
+/// - `model`: never empty in practice — falls back to `run_model` when neither
+///   the task nor the profile pins a model, matching pre-#4093 dispatch.
+/// - `provider`: `Some(canonical_id)` ONLY when the resolved agent profile
+///   explicitly pins a provider. `None` means "no provider authority" — the
+///   caller omits `--provider` and the worker keeps its own session default,
+///   preserving today's behavior for profile-less workers. The id is
+///   [`ApiProvider::as_str`], which round-trips through `ApiProvider::parse` on
+///   the worker's `--provider` flag.
+pub(crate) fn fleet_worker_launch_route(
+    task_spec: &FleetTaskSpec,
+    agent_profiles: &[AgentProfile],
+    run_model: &str,
+) -> (String, Option<String>) {
+    let agent_profile = resolve_task_agent_profile(task_spec, agent_profiles)
+        .ok()
+        .flatten();
+    let worker_profile = task_spec.worker.as_ref();
+    let model = effective_fleet_model(run_model, worker_profile, agent_profile);
+    let provider =
+        explicit_fleet_provider(agent_profile).map(|provider| provider.as_str().to_string());
+    (model, provider)
 }
 
 fn task_model_class_with_source(
@@ -1339,6 +1382,71 @@ mod tests {
         );
         assert_eq!(route.provider_id, openrouter_candidate.provider_id.as_str());
         assert_ne!(route.provider_id, "deepseek");
+    }
+
+    #[test]
+    fn fleet_worker_launch_route_is_explicit_provider_only() {
+        // The LAUNCH resolver (twin of the receipt) must emit a provider ONLY
+        // when the profile explicitly pins one, and NEVER infer it from a
+        // provider-shaped model id (EPIC #2608).
+
+        // 1) Explicit cross-provider pin: model + provider both come from the
+        //    profile, not the parent/session model.
+        let mut pinned = agent_profile(
+            "cross",
+            "scout",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        pinned.profile.model = Some("glm-5.2".to_string());
+        pinned.profile.provider = Some("openrouter".to_string());
+        let pinned_task = fleet_task(
+            "launch-pinned",
+            Some(worker_profile(
+                Some("cross"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+        let (model, provider) =
+            fleet_worker_launch_route(&pinned_task, &[pinned], "deepseek-v4-pro");
+        assert_eq!(model, "glm-5.2");
+        assert_eq!(provider.as_deref(), Some("openrouter"));
+
+        // 2) A DeepSeek-shaped model with NO explicit provider must NOT infer a
+        //    provider — provider stays None so the worker keeps its own session
+        //    default, and no `--provider` is emitted.
+        let mut model_only = agent_profile(
+            "modelonly",
+            "scout",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        model_only.profile.model = Some("deepseek-v4-flash".to_string());
+        let model_only_task = fleet_task(
+            "launch-model-only",
+            Some(worker_profile(
+                Some("modelonly"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+        let (model, provider) =
+            fleet_worker_launch_route(&model_only_task, &[model_only], "deepseek-v4-pro");
+        assert_eq!(model, "deepseek-v4-flash");
+        assert_eq!(provider, None);
+
+        // 3) No profile at all: run-level model, no provider (unchanged).
+        let bare = fleet_task("launch-bare", None);
+        let (model, provider) = fleet_worker_launch_route(&bare, &[], "deepseek-v4-pro");
+        assert_eq!(model, "deepseek-v4-pro");
+        assert_eq!(provider, None);
     }
 
     #[test]

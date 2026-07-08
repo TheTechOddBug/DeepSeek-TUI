@@ -318,9 +318,24 @@ impl FleetSetupView {
     /// ratify hints stay true the instant the draft lands (#4093).
     pub fn install_model_draft(
         &mut self,
-        draft: Box<crate::fleet::profile::FleetProfileDraft>,
+        mut draft: Box<crate::fleet::profile::FleetProfileDraft>,
         model_label: String,
+        picked_route: Option<(String, String)>,
     ) -> (String, String) {
+        // Re-inject the route the operator picked at `m`-press time (#4093). A
+        // model draft comes from `from_untrusted_json`, which hard-sets
+        // `provider: None` and echoes whatever `model` the model happened to
+        // emit — so ratifying it verbatim would drop a concrete cross-provider
+        // pick and persist the ambiguous, provider-scoped profile #4093 exists
+        // to prevent. Pinning BOTH fields from the CARRIED route keeps the route
+        // the user actually chose (the model only authored the prose), and is
+        // immune to the selection changing while the async draft is in flight.
+        // `inherit` (a `None` route) leaves `model`/`provider` untouched,
+        // matching the deterministic Enter path.
+        if let Some((provider, model)) = picked_route {
+            draft.model = Some(model);
+            draft.provider = Some(provider);
+        }
         let (title, header) = match self.snapshot.locale {
             crate::localization::Locale::ZhHans => (
                 format!("Fleet 配置 — 由 {model_label} 起草（按 g 批准）"),
@@ -561,11 +576,18 @@ impl ModalView for FleetSetupView {
                 ViewAction::None
             }
             KeyCode::Char('m') if self.step == Step::Review && self.snapshot.provider_ready => {
+                let route = self.selected_route();
                 ViewAction::Emit(ViewEvent::FleetProfileModelDraftRequested {
                     role: self.selected_role(),
-                    model: self
-                        .selected_model()
+                    model: route
+                        .as_ref()
+                        .map(|(_, model)| model.clone())
                         .unwrap_or_else(|| "inherit".to_string()),
+                    // Carry the picked provider so the redrafted profile keeps
+                    // the cross-provider route (#4093). `install_model_draft`
+                    // re-injects it authoritatively from the wizard's current
+                    // selection, but the event stays self-describing.
+                    provider: route.map(|(provider, _)| provider),
                     locale: self.snapshot.locale,
                 })
             }
@@ -1048,6 +1070,7 @@ mod tests {
         let ViewAction::Emit(ViewEvent::FleetProfileModelDraftRequested {
             role,
             model,
+            provider,
             locale,
         }) = action
         else {
@@ -1055,7 +1078,82 @@ mod tests {
         };
         assert!(!role.is_empty());
         assert!(!model.is_empty());
+        // Default selection is `inherit` (model_idx 0), which carries no
+        // concrete provider route.
+        assert_eq!(provider, None);
         assert_eq!(locale, crate::localization::Locale::En);
+    }
+
+    #[test]
+    fn m_redraft_preserves_a_cross_provider_pick_regression_4093() {
+        // #4093 BLOCKER 2 regression: a cross-provider route pick followed by an
+        // `m` model-assisted redraft must STILL persist the picked provider. A
+        // model draft comes from `from_untrusted_json`, which hard-sets
+        // `provider: None` (and can echo any model). Without re-injection the
+        // ratified profile would carry `model` with no `provider` — the exact
+        // ambiguous, provider-scoped profile #4093 removes.
+        //
+        // The active/session provider is DeepSeek; the picked route is a
+        // GLM model on Zai — a genuinely different provider than the parent.
+        let mut snap = snapshot();
+        snap.provider = "DeepSeek".to_string();
+        snap.model = "deepseek-v4-pro".to_string();
+        snap.available_models = vec![("zai".to_string(), "glm-5.2".to_string())];
+        let mut view = FleetSetupView::from_snapshot(snap);
+
+        // Role step: keep the first role. Model step: inherit(0), then the one
+        // cross-provider row (1) -> pick it. Then advance to Review.
+        view.handle_key(key(KeyCode::Enter)); // Role -> Model
+        view.handle_key(key(KeyCode::Down)); // -> the zai/glm-5.2 row
+        assert_eq!(
+            view.selected_route(),
+            Some(("zai".to_string(), "glm-5.2".to_string()))
+        );
+        view.handle_key(key(KeyCode::Enter)); // Model -> Review
+
+        // `m` requests a draft and carries the picked cross-provider route.
+        let action = view.handle_key(key(KeyCode::Char('m')));
+        let ViewAction::Emit(ViewEvent::FleetProfileModelDraftRequested {
+            model, provider, ..
+        }) = action
+        else {
+            panic!("expected model draft request");
+        };
+        assert_eq!(model, "glm-5.2");
+        assert_eq!(provider.as_deref(), Some("zai"));
+
+        // The host reconstructs the picked route from the event exactly as
+        // `handle_fleet_profile_model_draft` does, and carries it to
+        // `install_model_draft` (immune to the selection changing mid-draft).
+        let picked_route = provider.map(|provider| (provider, model.clone()));
+
+        // The model returns a draft that (as always) has provider: None — the
+        // untrusted gate strips any provider a model tries to smuggle.
+        let drafted = sample_draft();
+        assert_eq!(drafted.provider, None);
+
+        // Installing it re-injects the picked route, so the ratified draft keeps
+        // BOTH the provider and the model the user actually chose.
+        let (_title, content) =
+            view.install_model_draft(drafted, "GLM-5.2".to_string(), picked_route);
+        let ratified = view.model_draft.as_deref().expect("draft installed");
+        assert_eq!(ratified.provider.as_deref(), Some("zai"));
+        assert_eq!(ratified.model.as_deref(), Some("glm-5.2"));
+
+        // The rendered TOML the ratify keypress would persist names the provider
+        // explicitly — never a provider-scoped ambiguity.
+        assert!(content.contains("provider = \"zai\""), "{content}");
+        assert!(content.contains("model = \"glm-5.2\""), "{content}");
+
+        // And ratifying commits exactly that route.
+        let action = view.handle_key(key(KeyCode::Char('g')));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+            action
+        else {
+            panic!("expected ratify commit event");
+        };
+        assert_eq!(draft.provider.as_deref(), Some("zai"));
+        assert_eq!(draft.model.as_deref(), Some("glm-5.2"));
     }
 
     #[test]
@@ -1069,7 +1167,8 @@ mod tests {
             ViewAction::None
         ));
 
-        let (title, content) = view.install_model_draft(sample_draft(), "GLM-5.2".to_string());
+        let (title, content) =
+            view.install_model_draft(sample_draft(), "GLM-5.2".to_string(), None);
         assert!(title.contains("GLM-5.2"));
         assert!(content.contains("id = \"reviewer\""), "{content}");
         assert!(content.contains("Nothing is saved until"), "{content}");
@@ -1087,7 +1186,7 @@ mod tests {
     fn changing_answers_discards_a_stale_draft() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         to_review(&mut view);
-        let _ = view.install_model_draft(sample_draft(), "GLM-5.2".to_string());
+        let _ = view.install_model_draft(sample_draft(), "GLM-5.2".to_string(), None);
         assert!(view.model_draft.is_some());
 
         // Back to the role step and change the selection: the draft no
