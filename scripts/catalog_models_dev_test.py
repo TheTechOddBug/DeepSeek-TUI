@@ -55,16 +55,18 @@ class CatalogModelsDevScriptTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             mod.ensure_models_dev_shape({}, "test")
 
-    def test_write_json_roundtrip(self) -> None:
+    def test_public_document_drops_api_key(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         import catalog_models_dev as mod  # type: ignore
 
-        payload = {"models": {}, "providers": {"x": {"models": {}}}}
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "cache.json"
-            mod.write_json(path, payload)
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(loaded["providers"]["x"], {"models": {}})
+        dirty = {
+            "models": {},
+            "providers": {"deepseek": {"api_key": "sk-x", "models": {}}},
+            "token": "nope",
+        }
+        clean = mod.public_models_dev_document(dirty)
+        self.assertNotIn("token", clean)
+        self.assertNotIn("api_key", clean["providers"]["deepseek"])
 
 
 if __name__ == "__main__":

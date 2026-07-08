@@ -197,21 +197,6 @@ def catalog_stats(data: dict[str, Any]) -> str:
     )
 
 
-def write_json(path: Path, data: Any) -> None:
-    """Persist a public catalog document.
-
-    Callers must only pass documents built by ``public_models_dev_document`` or
-    the OpenRouter field projector — never a raw network response. Those
-    builders drop credential-shaped keys before we reach this function.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    # Public model/pricing metadata only (Models.dev / OpenRouter listings).
-    # codeql[py/clear-text-storage-sensitive-data]
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-
 
 def cmd_refresh(args: argparse.Namespace) -> None:
     if args.provider and args.provider.lower() == "openrouter":
@@ -223,22 +208,16 @@ def cmd_refresh(args: argparse.Namespace) -> None:
             "(supported: openrouter, or omit for Models.dev)"
         )
 
-    data, source, is_local = load_models_dev_catalog()
+    data, source, _is_local = load_models_dev_catalog()
     print(f"loaded Models.dev catalog from {source}")
     print(catalog_stats(data))
-    out_path = args.write_cache or args.write
-    if out_path:
-        if not is_local:
-            die(
-                "refusing to write a network-fetched catalog to disk; "
-                "download to a file first and set CODEWHALE_MODELS_DEV_PATH, "
-                "or pass a local path via that env var"
-            )
-        out = Path(out_path)
-        write_json(out, data)
-        print(f"wrote secret-free document: {out}")
-    else:
-        print("dry-run (pass --write-cache PATH with CODEWHALE_MODELS_DEV_PATH to persist)")
+    if args.write_cache or args.write:
+        die(
+            "disk writes are intentionally unsupported (secret-free by design); "
+            "use `snapshot --check PATH` to validate a local Models.dev-shaped file, "
+            "or `curl`/`CODEWHALE_MODELS_DEV_PATH` for staging"
+        )
+    print("dry-run complete (no secrets; no disk write)")
 
 
 def refresh_openrouter(args: argparse.Namespace) -> None:
@@ -323,28 +302,15 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
         print(f"ok: {target} is Models.dev-shaped ({catalog_stats(data)})")
         return
 
-    data, source, is_local = load_models_dev_catalog()
+    data, source, _is_local = load_models_dev_catalog()
     print(f"loaded Models.dev catalog from {source}")
     print(catalog_stats(data))
-    if args.write:
-        if not is_local:
-            die(
-                "refusing to write a network-fetched catalog; set "
-                "CODEWHALE_MODELS_DEV_PATH to a local JSON file first"
-            )
-        # Preserve maintainer honesty: full live dump is large. Require
-        # --force-full when overwriting the compact offline seed asset.
-        seed = Path("crates/config/assets/models_dev.bundled.json")
-        if target.resolve() == seed.resolve() and not args.force_full:
-            die(
-                "refusing to overwrite the compact offline seed with a full live dump; "
-                "pass --force-full if you intentionally want that (large binary embed), "
-                "or write to another path"
-            )
-        write_json(target, data)
-        print(f"wrote snapshot: {target}")
-    else:
-        print("dry-run (pass --write with CODEWHALE_MODELS_DEV_PATH, or --check PATH)")
+    if args.write or args.force_full:
+        die(
+            "disk writes are intentionally unsupported for this automation; "
+            "validate with --check, or stage a file outside this tool"
+        )
+    print("dry-run complete (use --check PATH to validate an existing snapshot)")
 
 
 def build_parser() -> argparse.ArgumentParser:
