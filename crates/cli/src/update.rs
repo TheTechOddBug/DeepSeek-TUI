@@ -869,6 +869,9 @@ fn glibc_check_disabled() -> bool {
 }
 
 fn preflight_downloaded_binary(asset_name: &str, bytes: &[u8]) -> Result<()> {
+    // GNU libc preflight is Linux-only (#4241). Rust treats `target_os = "android"`
+    // as distinct from `"linux"`, so Termux/Android builds skip this check entirely
+    // — Android uses Bionic libc, not glibc.
     if !cfg!(target_os = "linux") || glibc_check_disabled() {
         return Ok(());
     }
@@ -1519,6 +1522,42 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
         );
         let asset = select_platform_asset(&release, &stem).expect("TUI platform asset");
         assert_eq!(asset.name, "codewhale-tui-macos-arm64");
+    }
+
+    #[test]
+    fn android_arm64_maps_to_android_release_assets() {
+        // The generic format!("{prefix}-{os}-{arch}") path naturally produces
+        // Android asset stems. Verify the full stem for both dispatcher and TUI
+        // binaries so `codewhale update` on Termux requests Android assets, not
+        // linux-arm64 (#4241).
+        assert_eq!(
+            release_asset_stem_for_prefix("codewhale", "android", "aarch64"),
+            "codewhale-android-arm64"
+        );
+        assert_eq!(
+            release_asset_stem_for_prefix("codewhale-tui", "android", "aarch64"),
+            "codewhale-tui-android-arm64"
+        );
+        assert_eq!(
+            release_asset_stem_for_prefix("codew", "android", "aarch64"),
+            "codew-android-arm64"
+        );
+    }
+
+    #[test]
+    fn ensure_supported_release_target_accepts_android() {
+        // Android/Termux is a supported release target (#4241).
+        assert!(ensure_supported_release_target("android", "aarch64").is_ok());
+    }
+
+    #[test]
+    fn android_release_assets_never_select_linux_arm64() {
+        // Sanity: the stem formatter must never produce a linux-* stem for android.
+        let stem = release_asset_stem_for_prefix("codewhale", "android", "aarch64");
+        assert!(
+            !stem.contains("linux"),
+            "android stem must not contain linux: {stem}"
+        );
     }
 
     #[test]
