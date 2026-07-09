@@ -32,7 +32,8 @@ The canonical provider IDs are:
 `wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`,
 `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`,
 `ollama`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`,
-`openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, and `longcat`.
+`openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, and
+`xai`.
 
 Use any of these surfaces to select a provider:
 
@@ -107,6 +108,7 @@ the listed provider env vars.
 | `deepinfra` | `[providers.deepinfra]` | OpenAI Chat Completions | `DEEPINFRA_API_KEY`, `DEEPINFRA_TOKEN` |
 | `sakana` | `[providers.sakana]` | OpenAI Chat Completions | `FUGU_API_KEY`, `SAKANA_API_KEY` |
 | `longcat` | `[providers.longcat]` | OpenAI Chat Completions | `LONGCAT_API_KEY` |
+| `xai` | `[providers.xai]` | OpenAI Chat Completions | `XAI_API_KEY` |
 
 Default base URLs and models for each route are listed in the shipped provider
 table below. The wire protocol values above are derived from
@@ -241,6 +243,7 @@ the same links where possible.
 | `sglang`, `vllm`, `ollama` | Local OpenAI-compatible endpoints can run without an API key on localhost. |
 | `sakana` | [Sakana AI API](https://api.sakana.ai/) |
 | `longcat` | [Meituan LongCat platform](https://longcat.chat/platform) |
+| `xai` | [xAI Console](https://console.x.ai/) |
 
 ## Shipped Providers
 
@@ -276,6 +279,7 @@ the same links where possible.
 | `openmodel` | `[providers.openmodel]` | `OPENMODEL_API_KEY` | `OPENMODEL_BASE_URL`; default `https://api.openmodel.ai` | `deepseek-v4-flash`; provider-scoped custom model IDs pass through | OpenModel Anthropic-compatible Messages route. Uses `/v1/messages`, Bearer auth, and `anthropic-version: 2023-06-01`; OpenModel selects DeepSeek, DashScope, Xiaomi, Claude, and other routes by model id. `OPENMODEL_MODEL` is accepted. |
 | `sakana` | `[providers.sakana]` | `FUGU_API_KEY`, `SAKANA_API_KEY` | `SAKANA_BASE_URL`; default `https://api.sakana.ai/v1` | `fugu` (default), `fugu-ultra-20260615` | Sakana AI Fugu OpenAI-compatible route. Standard Chat Completions wire protocol; streaming supported. `fugu-ultra-20260615` is the heavy/reasoning variant. Env var aliases: `FUGU_API_KEY` (primary), `SAKANA_API_KEY`; provider aliases: `sakana-ai`, `sakana_ai`, `fugu`. |
 | `longcat` | `[providers.longcat]` | `LONGCAT_API_KEY` | `LONGCAT_BASE_URL`; default `https://api.longcat.chat/openai/v1` | `LongCat-2.0` (default) | Meituan LongCat curated model gateway. OpenAI-compatible Chat Completions wire protocol. Sign up at https://longcat.chat/platform for an API key. Provider aliases: `long-cat`, `meituan-longcat`, `meituan`. |
+| `xai` | `[providers.xai]` | `XAI_API_KEY` | `XAI_BASE_URL`; default `https://api.x.ai/v1` | `grok-4.5` (default), `grok-4.3`, `grok-build`, `grok-composer-2.5-fast`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning` | xAI/Grok OpenAI-compatible Chat Completions route. API-key auth uses Bearer tokens from console.x.ai; OAuth/device-code support remains follow-up work. `XAI_MODEL` is accepted. Provider aliases: `x-ai`, `x_ai`, `grok`. |
 
 ### Hugging Face Provider vs MCP vs Hub
 
@@ -407,6 +411,7 @@ endpoint when the endpoint supports model listing.
 | `openmodel` | `deepseek-v4-flash`; provider-scoped custom model IDs pass through | yes | model-dependent |
 | `sakana` | `fugu`, `fugu-ultra-20260615` | yes | yes for `fugu-ultra-20260615` |
 | `longcat` | `LongCat-2.0` | yes | yes |
+| `xai` | `grok-4.5`, `grok-4.3`, `grok-build`, `grok-composer-2.5-fast`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning` | yes | yes for `grok-4.5`, `grok-4.3`, `grok-build`, and `grok-4.20-0309-reasoning` |
 
 AtlasCloud keeps the same default model as the config layer and adds
 provider-scoped aliases for the Pro and Flash rows. Other AtlasCloud model IDs

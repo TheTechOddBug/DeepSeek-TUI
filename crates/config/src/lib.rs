@@ -176,6 +176,8 @@ pub struct ProvidersToml {
         alias = "meituan"
     )]
     pub longcat: ProviderConfigToml,
+    #[serde(default, alias = "x-ai", alias = "x_ai", alias = "grok")]
+    pub xai: ProviderConfigToml,
     /// Catch-all table for the dynamic OpenAI-compatible custom provider
     /// identity (#1519). Arbitrary `[providers.<name>]` tables are handled by
     /// the tui-side flatten map; this named slot keeps the canonical
@@ -275,6 +277,7 @@ impl ProvidersToml {
             ProviderKind::Deepinfra => &self.deepinfra,
             ProviderKind::Sakana => &self.sakana,
             ProviderKind::LongCat => &self.longcat,
+            ProviderKind::Xai => &self.xai,
             ProviderKind::Custom => &self.custom,
         }
     }
@@ -311,6 +314,7 @@ impl ProvidersToml {
             ProviderKind::Deepinfra => &mut self.deepinfra,
             ProviderKind::Sakana => &mut self.sakana,
             ProviderKind::LongCat => &mut self.longcat,
+            ProviderKind::Xai => &mut self.xai,
             ProviderKind::Custom => &mut self.custom,
         }
     }
@@ -2042,6 +2046,7 @@ impl ConfigToml {
                 ProviderKind::Deepinfra => DEFAULT_DEEPINFRA_BASE_URL.to_string(),
                 ProviderKind::Sakana => DEFAULT_SAKANA_BASE_URL.to_string(),
                 ProviderKind::LongCat => DEFAULT_LONGCAT_BASE_URL.to_string(),
+                ProviderKind::Xai => DEFAULT_XAI_BASE_URL.to_string(),
                 // The custom provider has no built-in endpoint; fall back to its
                 // descriptor placeholder so the lookup is total. Real custom
                 // routes always supply a configured base_url before this point.
@@ -2294,6 +2299,7 @@ fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
             | ProviderKind::Minimax
             | ProviderKind::Qianfan
             | ProviderKind::Ollama
+            | ProviderKind::Xai
     ) {
         return model.to_string();
     }
@@ -2619,6 +2625,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Deepinfra => DEFAULT_DEEPINFRA_MODEL,
         ProviderKind::Sakana => DEFAULT_SAKANA_MODEL,
         ProviderKind::LongCat => DEFAULT_LONGCAT_MODEL,
+        ProviderKind::Xai => DEFAULT_XAI_MODEL,
         // No built-in default model; the registry placeholder keeps this total.
         ProviderKind::Custom => provider.provider().default_model(),
     }
@@ -2656,6 +2663,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Deepinfra => DEFAULT_DEEPINFRA_BASE_URL,
         ProviderKind::Sakana => DEFAULT_SAKANA_BASE_URL,
         ProviderKind::LongCat => DEFAULT_LONGCAT_BASE_URL,
+        ProviderKind::Xai => DEFAULT_XAI_BASE_URL,
         // No built-in default base URL; the registry placeholder keeps this total.
         ProviderKind::Custom => provider.provider().default_base_url(),
     }
@@ -4201,6 +4209,8 @@ struct EnvRuntimeOverrides {
     sakana_model: Option<String>,
     longcat_base_url: Option<String>,
     longcat_model: Option<String>,
+    xai_base_url: Option<String>,
+    xai_model: Option<String>,
 }
 
 impl EnvRuntimeOverrides {
@@ -4445,6 +4455,12 @@ impl EnvRuntimeOverrides {
             longcat_model: std::env::var("LONGCAT_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            xai_base_url: std::env::var("XAI_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            xai_model: std::env::var("XAI_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         }
     }
 
@@ -4497,6 +4513,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Deepinfra => self.deepinfra_base_url.clone(),
             ProviderKind::Sakana => self.sakana_base_url.clone(),
             ProviderKind::LongCat => self.longcat_base_url.clone(),
+            ProviderKind::Xai => self.xai_base_url.clone(),
             // No dedicated CODEWHALE_CUSTOM_BASE_URL env override: a custom
             // provider's base URL comes from its `[providers.<name>]` table.
             ProviderKind::Custom => None,
@@ -4528,6 +4545,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Deepinfra => self.deepinfra_model.clone(),
             ProviderKind::Sakana => self.sakana_model.clone(),
             ProviderKind::LongCat => self.longcat_model.clone(),
+            ProviderKind::Xai => self.xai_model.clone(),
             _ => None,
         }?;
 

@@ -904,6 +904,7 @@ fn default_reasoning_stream_visibility(provider: ApiProvider) -> ProviderReasoni
         | ApiProvider::Sglang
         | ApiProvider::Vllm
         | ApiProvider::Zai
+        | ApiProvider::Xai
         | ApiProvider::Moonshot => ProviderReasoningStreamVisibility::StructuredThinking,
         _ => ProviderReasoningStreamVisibility::Unknown,
     }

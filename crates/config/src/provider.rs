@@ -22,8 +22,9 @@ use super::{
     DEFAULT_SILICONFLOW_MODEL, DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL,
     DEFAULT_TOGETHER_BASE_URL, DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL,
     DEFAULT_VOLCENGINE_BASE_URL, DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL,
-    DEFAULT_WANJIE_ARK_MODEL, DEFAULT_XIAOMI_MIMO_BASE_URL, DEFAULT_XIAOMI_MIMO_MODEL,
-    DEFAULT_ZAI_BASE_URL, DEFAULT_ZAI_MODEL, ProviderKind,
+    DEFAULT_WANJIE_ARK_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL,
+    DEFAULT_XIAOMI_MIMO_BASE_URL, DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL,
+    DEFAULT_ZAI_MODEL, ProviderKind,
 };
 
 /// Wire protocol spoken by a provider.
@@ -616,6 +617,18 @@ provider!(
     aliases: ["long-cat", "meituan-longcat", "meituan"]
 );
 
+provider!(
+    Xai,
+    Xai,
+    "xai",
+    "xAI",
+    DEFAULT_XAI_BASE_URL,
+    DEFAULT_XAI_MODEL,
+    ["XAI_API_KEY"],
+    "xai",
+    aliases: ["x-ai", "x_ai", "grok"]
+);
+
 /// User-defined OpenAI-compatible endpoint (#1519).
 ///
 /// A single dynamic provider identity for arbitrary `[providers.<name>]
@@ -699,9 +712,10 @@ static MINIMAX: Minimax = Minimax;
 static DEEPINFRA: Deepinfra = Deepinfra;
 static SAKANA: Sakana = Sakana;
 static LONGCAT: LongCat = LongCat;
+static XAI: Xai = Xai;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 31] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 32] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -732,6 +746,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 31] = [
     &DEEPINFRA,
     &SAKANA,
     &LONGCAT,
+    &XAI,
     &CUSTOM,
 ];
 

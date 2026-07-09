@@ -865,6 +865,9 @@ struct EnvGuard {
     codewhale_provider: Option<OsString>,
     codewhale_model: Option<OsString>,
     codewhale_base_url: Option<OsString>,
+    xai_api_key: Option<OsString>,
+    xai_base_url: Option<OsString>,
+    xai_model: Option<OsString>,
 }
 
 impl EnvGuard {
@@ -882,6 +885,9 @@ impl EnvGuard {
             codewhale_provider: env::var_os("CODEWHALE_PROVIDER"),
             codewhale_model: env::var_os("CODEWHALE_MODEL"),
             codewhale_base_url: env::var_os("CODEWHALE_BASE_URL"),
+            xai_api_key: env::var_os("XAI_API_KEY"),
+            xai_base_url: env::var_os("XAI_BASE_URL"),
+            xai_model: env::var_os("XAI_MODEL"),
             nvidia_api_key: env::var_os("NVIDIA_API_KEY"),
             nvidia_nim_api_key: env::var_os("NVIDIA_NIM_API_KEY"),
             nim_base_url: env::var_os("NIM_BASE_URL"),
@@ -991,6 +997,9 @@ impl EnvGuard {
             env::remove_var("CODEWHALE_PROVIDER");
             env::remove_var("CODEWHALE_MODEL");
             env::remove_var("CODEWHALE_BASE_URL");
+            env::remove_var("XAI_API_KEY");
+            env::remove_var("XAI_BASE_URL");
+            env::remove_var("XAI_MODEL");
             env::remove_var("NVIDIA_API_KEY");
             env::remove_var("NVIDIA_NIM_API_KEY");
             env::remove_var("NIM_BASE_URL");
@@ -1123,6 +1132,9 @@ impl Drop for EnvGuard {
             Self::restore_var("CODEWHALE_PROVIDER", self.codewhale_provider.take());
             Self::restore_var("CODEWHALE_MODEL", self.codewhale_model.take());
             Self::restore_var("CODEWHALE_BASE_URL", self.codewhale_base_url.take());
+            Self::restore_var("XAI_API_KEY", self.xai_api_key.take());
+            Self::restore_var("XAI_BASE_URL", self.xai_base_url.take());
+            Self::restore_var("XAI_MODEL", self.xai_model.take());
             Self::restore_var("NVIDIA_API_KEY", self.nvidia_api_key.take());
             Self::restore_var("NVIDIA_NIM_API_KEY", self.nvidia_nim_api_key.take());
             Self::restore_var("NIM_BASE_URL", self.nim_base_url.take());
@@ -3396,6 +3408,10 @@ fn provider_kind_normalizes_models_dev_provider_ids() {
         ("siliconflow-cn", ProviderKind::SiliconflowCN),
         ("openrouter", ProviderKind::Openrouter),
         ("longcat", ProviderKind::LongCat),
+        ("xai", ProviderKind::Xai),
+        ("x-ai", ProviderKind::Xai),
+        ("x_ai", ProviderKind::Xai),
+        ("grok", ProviderKind::Xai),
     ];
     for (models_dev_id, expected) in cases {
         assert_eq!(
@@ -3413,6 +3429,7 @@ fn provider_kind_normalizes_models_dev_provider_ids() {
         ("novita-ai", ProviderKind::Novita),
         ("fireworks-ai", ProviderKind::Fireworks),
         ("moonshotai", ProviderKind::Moonshot),
+        ("grok", ProviderKind::Xai),
     ] {
         let parsed: ConfigToml =
             toml::from_str(&format!("provider = \"{alias}\"")).expect("models.dev id alias");
@@ -3602,6 +3619,34 @@ fn openmodel_route_defaults_to_messages_endpoint() {
 }
 
 #[test]
+fn xai_api_key_provider_resolves_defaults_and_env_overrides() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    let config = ConfigToml {
+        provider: ProviderKind::Xai,
+        ..ConfigToml::default()
+    };
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+
+    assert_eq!(resolved.provider, ProviderKind::Xai);
+    assert_eq!(resolved.base_url, DEFAULT_XAI_BASE_URL);
+    assert_eq!(resolved.model, DEFAULT_XAI_MODEL);
+    assert_eq!(resolved.api_key, None);
+
+    unsafe {
+        std::env::set_var("XAI_API_KEY", "xai-env-key");
+        std::env::set_var("XAI_BASE_URL", "https://xai-gateway.example/v1");
+        std::env::set_var("XAI_MODEL", "grok-4.3");
+    }
+
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.api_key.as_deref(), Some("xai-env-key"));
+    assert_eq!(resolved.base_url, "https://xai-gateway.example/v1");
+    assert_eq!(resolved.model, "grok-4.3");
+}
+
+#[test]
 fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
     assert_eq!(providers.len(), ProviderKind::ALL.len());
@@ -3656,6 +3701,12 @@ fn provider_metadata_preserves_alias_and_config_key_semantics() {
             .expect("huggingface alias")
             .kind(),
         ProviderKind::Huggingface
+    );
+    assert_eq!(
+        provider::resolve_provider("grok")
+            .expect("xAI grok alias")
+            .kind(),
+        ProviderKind::Xai
     );
 
     let siliconflow_cn =

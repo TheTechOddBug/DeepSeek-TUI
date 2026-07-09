@@ -832,6 +832,7 @@ impl Secrets {
 /// | `atlascloud` / `atlas` | `ATLASCLOUD_API_KEY` |
 /// | `volcengine` / `ark` | `VOLCENGINE_API_KEY`, `VOLCENGINE_ARK_API_KEY`, `ARK_API_KEY` |
 /// | `wanjie` / `wanjie-ark` | `WANJIE_ARK_API_KEY`, `WANJIE_API_KEY`, `WANJIE_MAAS_API_KEY` |
+/// | `xai` / `grok` | `XAI_API_KEY` |
 ///
 /// Returns `None` if the provider is not recognised or none of its
 /// candidate environment variables are set to a non-empty value.
@@ -877,6 +878,7 @@ pub fn env_for(name: &str) -> Option<String> {
         ],
         "sakana" | "sakana-ai" | "sakana_ai" | "fugu" => &["FUGU_API_KEY", "SAKANA_API_KEY"],
         "longcat" | "long-cat" | "meituan-longcat" | "meituan" => &["LONGCAT_API_KEY"],
+        "xai" | "x-ai" | "x_ai" | "grok" => &["XAI_API_KEY"],
         _ => return None,
     };
     for var in candidates {
@@ -931,6 +933,7 @@ mod tests {
             "FUGU_API_KEY",
             "SAKANA_API_KEY",
             "LONGCAT_API_KEY",
+            "XAI_API_KEY",
             SECRET_BACKEND_ENV,
             LEGACY_SECRET_BACKEND_ENV,
         ] {
@@ -1270,6 +1273,20 @@ mod tests {
         assert_eq!(env_for("wanjie-ark").as_deref(), Some("wanjie-key"));
         assert_eq!(env_for("ark_wanjie").as_deref(), Some("wanjie-key"));
         assert_eq!(env_for("wanjie-maas").as_deref(), Some("wanjie-key"));
+
+        clear_known_envs();
+    }
+
+    #[test]
+    fn xai_env_aliases_resolve() {
+        let _guard = env_lock();
+        clear_known_envs();
+        unsafe { std::env::set_var("XAI_API_KEY", "xai-key") };
+
+        assert_eq!(env_for("xai").as_deref(), Some("xai-key"));
+        assert_eq!(env_for("x-ai").as_deref(), Some("xai-key"));
+        assert_eq!(env_for("x_ai").as_deref(), Some("xai-key"));
+        assert_eq!(env_for("grok").as_deref(), Some("xai-key"));
 
         clear_known_envs();
     }

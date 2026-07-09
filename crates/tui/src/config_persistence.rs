@@ -380,6 +380,7 @@ fn provider_base_url_table_key(provider: ApiProvider) -> anyhow::Result<&'static
         ApiProvider::Minimax => Ok("minimax"),
         ApiProvider::Sakana => Ok("sakana"),
         ApiProvider::LongCat => Ok("longcat"),
+        ApiProvider::Xai => Ok("xai"),
         // Custom providers live under a user-chosen `[providers.<name>]` table,
         // not a fixed key. Persisting base_url through this static-key path is
         // out of scope for the #1519 constrained slice; users edit the named

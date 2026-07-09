@@ -68,6 +68,8 @@ pub enum ModelProvider {
     Arcee,
     /// Xiaomi MiMo models.
     XiaomiMimo,
+    /// xAI / Grok models.
+    Xai,
     /// Anything not otherwise classified (still gets real metadata via the
     /// `models.rs` heuristics where possible).
     Other,
@@ -169,6 +171,13 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("mimo-v2.5-pro", ModelProvider::XiaomiMimo),
     ("mimo-v2.5-pro-ultraspeed", ModelProvider::XiaomiMimo),
     ("mimo-v2.5", ModelProvider::XiaomiMimo),
+    // --- xAI / Grok (config DEFAULT_XAI_MODEL) ---
+    ("grok-4.5", ModelProvider::Xai),
+    ("grok-4.3", ModelProvider::Xai),
+    ("grok-build", ModelProvider::Xai),
+    ("grok-composer-2.5-fast", ModelProvider::Xai),
+    ("grok-4.20-0309-reasoning", ModelProvider::Xai),
+    ("grok-4.20-0309-non-reasoning", ModelProvider::Xai),
 ];
 
 fn registry() -> &'static BTreeMap<&'static str, ModelMetadata> {
@@ -263,6 +272,9 @@ mod tests {
             ("mimo-v2.5-pro", Some(1_000_000)),
             ("mimo-v2.5-pro-ultraspeed", Some(1_000_000)),
             ("mimo-v2.5", Some(1_000_000)),
+            ("grok-4.5", Some(500_000)),
+            ("grok-4.3", Some(1_000_000)),
+            ("grok-4.20-0309-reasoning", Some(2_000_000)),
         ];
         for (model, expected) in sample {
             let meta = lookup(model)
@@ -312,6 +324,19 @@ mod tests {
             assert_eq!(meta.provider, ModelProvider::DeepSeek);
             assert_eq!(meta.context_window, Some(1_000_000));
         }
+    }
+
+    #[test]
+    fn xai_models_are_classified_as_xai() {
+        let meta = lookup("grok-4.5").expect("xAI default should be seeded");
+        assert_eq!(meta.provider, ModelProvider::Xai);
+        assert_eq!(meta.context_window, Some(500_000));
+        assert!(meta.supports_reasoning);
+
+        let fast = lookup("grok-4.20-0309-non-reasoning").expect("xAI fast model should be seeded");
+        assert_eq!(fast.provider, ModelProvider::Xai);
+        assert_eq!(fast.context_window, Some(2_000_000));
+        assert!(!fast.supports_reasoning);
     }
 
     #[test]

@@ -105,6 +105,8 @@ pub enum ProviderKind {
     Sakana,
     #[serde(alias = "long-cat", alias = "meituan-longcat", alias = "meituan")]
     LongCat,
+    #[serde(alias = "x-ai", alias = "x_ai", alias = "grok")]
+    Xai,
     /// User-defined OpenAI-compatible endpoint (#1519).
     ///
     /// A single dynamic identity for arbitrary `[providers.<name>]
@@ -116,7 +118,7 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
@@ -147,6 +149,7 @@ impl ProviderKind {
         Self::Deepinfra,
         Self::Sakana,
         Self::LongCat,
+        Self::Xai,
         Self::Custom,
     ];
 
