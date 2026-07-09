@@ -5,6 +5,7 @@
 //! top only after their cancellation and evidence semantics are proven.
 
 mod elevation;
+mod gates;
 mod js_authoring;
 mod model_policy;
 mod named_fleet;
@@ -19,6 +20,10 @@ use thiserror::Error;
 pub use elevation::{
     DEFAULT_HIGH_BUDGET_THRESHOLD, ElevationOptions, PlanRiskHint, WorkflowPlanElevation,
     assess_plan_risk_string, assess_workflow_elevation,
+};
+pub use gates::{
+    GateError, GateKind, GateOn, GateOnFail, GateOutcome, GateSpec, GateState, GateStatusLine,
+    HandoffArtifact, LaneGateBoard, stopship_gate_pipeline,
 };
 pub use js_authoring::{
     JavascriptWorkflowError, JavascriptWorkflowResult, compile_javascript_workflow,
