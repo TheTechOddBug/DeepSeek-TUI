@@ -1577,6 +1577,7 @@ mod tests {
         assert!(worktree.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn tmux_reconcile_marks_vanished_session_failed_without_receipt() {
         let _env_guard = tmux_env_lock();
