@@ -203,6 +203,9 @@ jobs:
       - name: Check provider registry drift
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-provider-registry.py
+      - name: Check README translations stay in sync
+        if: github.event_name != 'schedule'
+        run: python3 scripts/check-readme-translations.py
       - name: Check harvested contributor credit
         if: github.event_name != 'schedule'
         shell: bash

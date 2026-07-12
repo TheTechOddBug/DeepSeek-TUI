@@ -7,47 +7,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.68] - 2026-07-10
+## [0.8.68] - 2026-07-12
 
-### Changed
+The underwater release: the TUI's default shell is replaced end to end, the
+runtime keeps its guarantees, and the whole new layer ships localized. The
+entries below cover the full candidate; the pre-candidate section that
+follows records what had already landed on main for 0.8.68 by 2026-07-10.
 
-- Replace the default TUI shell with the underwater interaction system: a
-  pre-session launch menu, a top-anchored transcript ledger with settled tool
-  receipts and one live row, phase-truthful header/footer fact ownership,
-  responsive compact/normal/wide tiers, rebuilt config/setup/sessions/help/
-  context/theme/model/Fleet rooms on one hairline grammar, distinct
-  ordinary vs repository-law approvals, and provider-unit streaming without
-  typewriter pacing or completion-time full clears.
-- Give every underwater treatment ambient life: flat and Terminal-owned keep
-  the idle fish and bubble (with a typed treatment setting replacing string
-  comparisons), reduced motion freezes them legibly, and typing scatters them
-  immediately.
-- Keep compact terminals operable: `/config` and `/resume` now collapse
-  secondary chrome before sacrificing their selectable rows at 40x12/60x16,
-  and footers budget for their real wrapped height.
+### Changed — the underwater shell
+
+- Replace the default TUI shell with the underwater interaction system: one
+  renderer owns the header, top work strip, transcript ledger, composer, and
+  footer, with explicit compact/normal/wide tiers and no legacy sidebar or
+  dashboard in the default path. The legacy composition survives only behind
+  the internal `classic` treatment.
+- Add a distinct pre-session launch screen — new session, new worktree (with
+  inline naming and real lane provisioning), scoped resume count, changelog,
+  quit — with reliable non-colliding keys and row/keyboard parity.
+- Render turns as a ledger: user message, short narration, settled tool
+  receipts, and exactly one live row. Fast tool bursts land directly as
+  batch receipts (no spinner churn), completed receipts stay inspectable,
+  failures hold a coral receipt with stderr one `v` away, and one shared
+  tool rail replaces nested card borders.
+- Make completion a one-shot exhale: `working -> finishing -> done` in the
+  footer only, with no transcript repaint, no lingering loop, and no stale
+  cancel action in the completed state.
+- Rebuild the secondary rooms on one hairline grammar — config, setup,
+  sessions, help, context, theme, model/route, Fleet, file attach — each
+  with a title hairline, row objects with focus/selection/mouse parity,
+  one panel-owned scroll rail, and wrapped action footers.
+- Make `/model` a model-first atomic route picker across configured
+  providers: provider and model switch together on apply, and every row
+  prints the resolved model. `/theme` gains a live preview with truthful
+  Esc revert across all 12 shipped themes.
+- Add a live context inspector (Alt+C) backed by the current route: exact
+  system/messages/free token buckets, a proportional map, drill-down into
+  the detail pager, and no frozen session while it is open.
+- Project Workflow runs as an in-stream run map: a collapsed one-line card
+  that unfolds into per-lane rows with role, resolved model, worktree,
+  elapsed track, and per-member running/waiting/failed/cancelled/done
+  states, plus gates and a debrief built only from real run data. Child
+  transcripts never flood the parent shell.
+- Unify Fleet into roster/setup/workers rooms: the operator is pinned first
+  with the live session route, members show resolved route truth (inherit /
+  fast lane / pinned), and the workers tab is a control surface with
+  row-local open/stop and real lifecycle counts.
+- Distinguish repository-law approvals from ordinary approvals: the
+  constitution prompt names its authority, source, matched rule, and target,
+  and Full Access never bypasses it. Ordinary approvals render as a still
+  coral band above the visible transcript.
+- Keep streaming honest and cheap: provider-unit deltas replace per-grapheme
+  queueing, the transcript is top-anchored so appended lines stop shifting
+  settled rows, ambient animation stops during real work, and ordinary
+  completion no longer triggers full-screen clears (verified by render-diff
+  logs: suffix updates of tens of cells while streaming, zero periodic
+  full repaints).
+- Give every underwater treatment ambient life: ombre breathes its water
+  column while flat and Terminal-owned keep the idle fish and bubble
+  (foreground-only for Terminal), a typed treatment setting replaces string
+  comparisons, reduced motion freezes life legibly, `fancy_animations =
+  false` stills the chrome, and typing scatters the fish immediately. Fish
+  keep a one-cell gap from occupied text; the whale stays the single still
+  brand mark.
+- Keep compact terminals operable: `/config` and `/resume` collapse
+  secondary chrome before sacrificing their selectable rows at 40x12 and
+  60x16, bodies budget for the footer's real wrapped height, and the
+  selection stays visible through resizes.
 - Route footer notices through the classified toast system so informational
   acknowledgements (for example "Auto-compaction enabled") expire instead of
-  becoming permanent idle chrome, while errors hold as sticky notices.
+  becoming permanent idle chrome, while warnings and errors hold as sticky
+  notices until their window passes.
 - Complete the `CODEWHALE_ASCII_SAFE=1` decorative tier: the whale mark,
-  context meter, braille state markers, bubbles, rails, and role/lane glyphs
-  all narrow to semantic ASCII while language text passes through untouched.
-- Localization: raw key-parity gates now fail when a "complete" pack misses a
-  key the English fallback would hide; the two missing keybinding rows were
-  translated into ja, zh-Hans, es-419, pt-BR, and vi; the drifted Operate-mode
-  copy was retranslated everywhere; and the `/config` theme/locale hints and
-  invalid-locale error derive from the shipped registries.
+  context meter, braille state markers (mapped by dot density so the working
+  bubble still reads as a rising fill), bubbles, rails, and role/lane glyphs
+  all narrow to semantic ASCII while user, model, and CJK text passes
+  through untouched. Verified by whole-surface rendered-buffer sweeps.
+- Repair the Help catalog to match handler truth (`Alt+G`, `Alt+Shift+G`,
+  `Alt+[`, `Alt+]`, `Alt+L`, `Alt+?`), and give theme, Help, model, and
+  config rows direct mouse paths with the same activation as Enter.
 
 ### Added
 
-- Korean (ko) UI locale with full 752-key parity and onboarding/setup wiring
+- Korean (ko) UI locale with full key parity and onboarding/setup wiring
   (PR #4347 by @moduvoice).
-- Anthropic adapter: sanitize top-level `oneOf`/`anyOf`/`allOf` in tool input
-  schemas so affected tools no longer fail the whole request with HTTP 400
-  (PR #4346 by @qinlinwang).
+- Localize the entire underwater layer: 104 new UI strings — launch menu,
+  phase words, mode/permission chips, footer hints, session picker, context
+  inspector, route and theme pickers, Fleet roster, workflow status, sidebar
+  work strip, repository-law approval copy, and file-attach titles — wired
+  through MessageIds and translated into ja, zh-Hans, es-419, pt-BR, vi,
+  and ko. Every complete pack now holds exact raw key parity with English
+  (856 keys), enforced by new tests that the old English-fallback gate could
+  not perform. The permission chip maps from typed state, so localization
+  can never silently collapse it. Machine-authored translations follow each
+  pack's existing terminology and are flagged for native review.
+- Anthropic adapter: sanitize top-level `oneOf`/`anyOf`/`allOf` in tool
+  input schemas so affected tools no longer fail the whole request with
+  HTTP 400 (PR #4346 by @qinlinwang).
 - Anthropic pricing: bill cache-write tokens at published rates
   (PR #4348 by @knqiufan, #4318).
 - NetBSD: generate QuickJS bindings at build time so `codewhale-workflow-js`
   compiles (PR #4349 by @ci4ic4).
+- Real-PTY release gates for six-worker fan-out liveness with Esc cancel,
+  multi-terminal route isolation, queued steering via Ctrl+S, the one-shot
+  completion footer, and per-theme ANSI output for every shipped palette.
+
+### Fixed
+
+- Keep headless structured output terminal-clean: `codewhale exec` engines
+  no longer emit interactive terminal-title/taskbar OSC sequences, so
+  `--output-format stream-json` stdout stays parseable, escape-free JSONL.
+  Interactive TUI sessions keep their terminal chrome.
+- Localization honesty: the parity gate was blinded by its own English
+  fallback — two keybinding rows (`KbCyclePermissions`, `KbCycleThinking`)
+  were missing from all five "complete" packs and now ship translated; the
+  Operate-mode copy that drifted in English was retranslated in every pack
+  (including zh-Hant's slice); three MessageIds absent from
+  ALL_MESSAGE_IDS are visible to tests again; and the `/config`
+  theme/locale hints and the invalid-locale error derive from the shipped
+  registries instead of stale hand lists that advertised 4 of 12 themes
+  and 4 of 8 locales.
+- The setup wizard's constitution step no longer claims a "55-line core"
+  in any language (the bundled core is larger today); the guided draft says
+  "the bundled core stays active" instead.
+- In-app selection copy is rail-clean and now regression-tested: copied
+  transcript text excludes the `▎ ╎ │ ●` decorations via cache metadata
+  (#4208 — thanks @eugenicum for the report and code-aware fix direction;
+  terminal-native selection with mouse capture off remains a product
+  decision on the proposed `rail_style` option).
+
+### Docs
+
+- Stamp every 0.9-era roadmap document with an explicit status (current,
+  historical, superseded, principle-only, or future RFC), correct trackers
+  that recorded unshipped work as done, and describe what a next-major
+  release would actually mean today in `docs/AGENT_RUNTIME.md`.
+- Add `docs/rfcs/UNIFIED_PROVIDER_LOGIN.md`: one `codewhale auth login`
+  surface for Anthropic, OpenAI Codex, and xAI, with the Anthropic adapter
+  gated on verifying flow permissions before any constants are adopted.
+- Refresh `docs/ACCESSIBILITY.md` for treatment-independent ambient life
+  and the completed ASCII tier.
 
 ### Changed (pre-candidate 2026-07-10)
 
