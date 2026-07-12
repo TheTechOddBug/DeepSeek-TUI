@@ -5368,6 +5368,60 @@ mod tests {
         );
     }
 
+    /// #4208: `CODEWHALE_ASCII_SAFE=1` must narrow every CodeWhale-authored
+    /// decorative glyph — whale mark, fish, bubble, context meter, borders,
+    /// braille state markers — across real rendered surfaces, not a
+    /// hand-picked symbol list.
+    #[test]
+    fn ascii_safe_tier_covers_whole_rendered_surfaces() {
+        let mut app = create_test_app();
+        app.low_motion = false;
+        app.fancy_animations = true;
+
+        // Idle empty water at a size that earns the whale, fish, and bubble.
+        let transcript_area = Rect::new(0, 0, 100, 32);
+        let mut transcript = Buffer::empty(transcript_area);
+        ChatWidget::new(&mut app, transcript_area).render(transcript_area, &mut transcript);
+
+        // Pre-session launch menu.
+        app.launch.visible = true;
+        let launch_area = Rect::new(0, 0, 100, 32);
+        let mut launch = Buffer::empty(launch_area);
+        crate::tui::underwater::render_launch_screen(launch_area, &mut launch, &app);
+        app.launch.visible = false;
+
+        // Header owns the route facts and the block context meter.
+        let header_area = Rect::new(0, 0, 100, 2);
+        let mut header = Buffer::empty(header_area);
+        crate::tui::underwater::render_header(header_area, &mut header, &app);
+
+        // Footer while working carries the braille state marker.
+        app.is_loading = true;
+        let footer_area = Rect::new(0, 0, 100, 1);
+        let mut footer = Buffer::empty(footer_area);
+        crate::tui::underwater::render_footer(footer_area, &mut footer, &mut app);
+        app.is_loading = false;
+
+        for (surface, buf, rect) in [
+            ("idle transcript", &transcript, transcript_area),
+            ("launch", &launch, launch_area),
+            ("header", &header, header_area),
+            ("footer", &footer, footer_area),
+        ] {
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    let mut cell = buf[(x, y)].clone();
+                    crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
+                    assert!(
+                        cell.symbol().is_ascii(),
+                        "{surface} cell ({x},{y}) {:?} lacks an ASCII-safe alternative",
+                        buf[(x, y)].symbol()
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn reduced_motion_freezes_the_ocean_without_removing_depth() {
         let mut app = create_test_app();

@@ -563,6 +563,24 @@ mod tests {
             .collect()
     }
 
+    /// #4208: every role mark and control glyph on the roster — operator,
+    /// role shapes, selection arrows, scroll rails — must narrow to an
+    /// ASCII-safe alternative.
+    #[test]
+    fn fleet_roster_glyphs_all_have_ascii_alternatives() {
+        let rows = render_through_stack(view_with_overrides, 100, 30);
+        for ch in rows.join("\n").chars().filter(|ch| !ch.is_ascii()) {
+            let mut cell = ratatui::buffer::Cell::default();
+            cell.set_symbol(&ch.to_string());
+            crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
+            assert!(
+                cell.symbol().is_ascii(),
+                "fleet glyph {ch:?} (U+{:04X}) lacks an ASCII-safe alternative",
+                ch as u32
+            );
+        }
+    }
+
     #[test]
     fn operator_row_is_pinned_first_with_the_session_model() {
         let rows = render_through_stack(built_in_view, 100, 30);

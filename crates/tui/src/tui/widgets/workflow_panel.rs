@@ -1720,6 +1720,66 @@ mod tests {
         panel
     }
 
+    /// #4208: every decorative glyph the run map emits — expand marks, role
+    /// marks, lane glyphs, gates, status marks across running, waiting,
+    /// failed, cancelled, and completed members — must narrow to an
+    /// ASCII-safe alternative.
+    #[test]
+    fn workflow_panel_glyphs_all_have_ascii_alternatives() {
+        let mut panel = started_panel();
+        for (task_id, status) in [
+            ("t1", WorkflowRowStatus::Succeeded),
+            ("t2", WorkflowRowStatus::Failed),
+            ("t3", WorkflowRowStatus::Cancelled),
+            ("t4", WorkflowRowStatus::Waiting),
+        ] {
+            if task_id != "t1" {
+                panel.apply_event(WorkflowPanelEvent::TaskStarted {
+                    task_id: task_id.to_string(),
+                    label: Some(format!("lane {task_id}")),
+                    profile: Some("implementer".to_string()),
+                    model: None,
+                    strength: None,
+                    resolved_model: None,
+                    worktree: false,
+                    workspace: None,
+                    at_ms: 1_400,
+                });
+            }
+            panel.apply_event(WorkflowPanelEvent::TaskCompleted {
+                task_id: task_id.to_string(),
+                status,
+                at_ms: 2_500,
+            });
+        }
+        panel.apply_event(WorkflowPanelEvent::GateUpdated {
+            gate_id: "gate-1".to_string(),
+            role: Some("verifier".to_string()),
+            gate: Some("tests-green".to_string()),
+            state: "blocked".to_string(),
+            blocked_role: Some("implementer".to_string()),
+            blocked_reason: Some("waiting on tests".to_string()),
+            at_ms: 2_600,
+        });
+
+        let mut glyphs: Vec<char> = panel.header_text(120).chars().collect();
+        for line in panel.render_lines(100) {
+            for span in &line.spans {
+                glyphs.extend(span.content.chars());
+            }
+        }
+        for ch in glyphs.into_iter().filter(|ch| !ch.is_ascii()) {
+            let mut cell = ratatui::buffer::Cell::default();
+            cell.set_symbol(&ch.to_string());
+            crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
+            assert!(
+                cell.symbol().is_ascii(),
+                "workflow glyph {ch:?} (U+{:04X}) lacks an ASCII-safe alternative",
+                ch as u32
+            );
+        }
+    }
+
     #[test]
     fn header_shows_lifecycle_counts_budget_and_expand_glyph() {
         let mut panel = started_panel();
