@@ -368,12 +368,19 @@ async fn release_six_worker_fanout_keeps_typing_render_and_esc_cancel_live() -> 
         "launch six QA workers and keep the parent turn open",
     )?;
     wait_for_counter(&mut tui, &child_requests, 6, INTERACTION_TIMEOUT)?;
-    tui.wait_for_text("6 running / 6", Duration::from_secs(5))?;
+    tui.wait_for(
+        |frame| {
+            let text = frame.text();
+            text.contains("agents 6") && text.matches("delegate scout [running]").count() >= 6
+        },
+        Duration::from_secs(5),
+    )?;
 
     let fanout_frame = tui.debug_dump();
     assert!(
-        fanout_frame.contains("6 running / 6"),
-        "all six workers were not visible in the sidebar:\n{fanout_frame}"
+        fanout_frame.contains("agents 6")
+            && fanout_frame.matches("delegate scout [running]").count() >= 6,
+        "all six workers were not visible in the underwater ledger:\n{fanout_frame}"
     );
 
     // The provider is deliberately holding every child open. Prove keyboard
