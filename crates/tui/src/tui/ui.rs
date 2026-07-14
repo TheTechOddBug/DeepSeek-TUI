@@ -10806,6 +10806,61 @@ fn refresh_config_view_if_open(app: &mut App, focus_key: &str) {
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn handle_config_updated(
+    terminal: &mut AppTerminal,
+    app: &mut App,
+    config: &mut Config,
+    task_manager: &SharedTaskManager,
+    engine_handle: &mut EngineHandle,
+    web_config_session: &mut Option<WebConfigSession>,
+    key: String,
+    value: String,
+    persist: bool,
+) -> Result<bool> {
+    let result = prepare_config_update_result(
+        commands::set_config_value(app, &key, &value, persist),
+        persist,
+    );
+    let normalized_value = value.trim().to_ascii_lowercase().replace([' ', '_'], "-");
+    let cleared_root_approval = !result.is_error
+        && persist
+        && key == "approval_policy"
+        && matches!(
+            normalized_value.as_str(),
+            "default" | "tui-default" | "use-tui-default"
+        );
+    // Theme / background changes require a full terminal repaint because
+    // ratatui's incremental diff cannot see colors remapped by the backend.
+    if matches!(
+        key.as_str(),
+        "theme" | "ui_theme" | "background_color" | "background" | "bg"
+    ) {
+        app.force_next_full_repaint = true;
+    }
+    if apply_command_result(
+        terminal,
+        app,
+        engine_handle,
+        task_manager,
+        config,
+        web_config_session,
+        result,
+    )
+    .await?
+    {
+        return Ok(true);
+    }
+
+    let focus_key = if cleared_root_approval {
+        "permission_posture"
+    } else {
+        &key
+    };
+    refresh_config_view_if_open(app, focus_key);
+    Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_view_events(
     terminal: &mut AppTerminal,
     app: &mut App,
@@ -11075,51 +11130,21 @@ async fn handle_view_events(
                 value,
                 persist,
             } => {
-                let result = prepare_config_update_result(
-                    commands::set_config_value(app, &key, &value, persist),
-                    persist,
-                );
-                let normalized_value = value.trim().to_ascii_lowercase().replace([' ', '_'], "-");
-                let cleared_root_approval = !result.is_error
-                    && persist
-                    && key == "approval_policy"
-                    && matches!(
-                        normalized_value.as_str(),
-                        "default" | "tui-default" | "use-tui-default"
-                    );
-                // Theme / background changes require a full terminal repaint
-                // because ratatui's incremental diff may miss color-only
-                // changes in cells that were rendered with theme-resolved
-                // colors (sidebar panels) rather than palette constants that
-                // go through the backend remap layer.  A full repaint
-                // (terminal clear + all cells redrawn) guarantees every cell
-                // picks up the new theme immediately.
-                if matches!(
-                    key.as_str(),
-                    "theme" | "ui_theme" | "background_color" | "background" | "bg"
-                ) {
-                    app.force_next_full_repaint = true;
-                }
-                if apply_command_result(
+                if handle_config_updated(
                     terminal,
                     app,
-                    engine_handle,
-                    task_manager,
                     config,
+                    task_manager,
+                    engine_handle,
                     web_config_session,
-                    result,
+                    key,
+                    value,
+                    persist,
                 )
                 .await?
                 {
                     return Ok(true);
                 }
-
-                let focus_key = if cleared_root_approval {
-                    "permission_posture"
-                } else {
-                    &key
-                };
-                refresh_config_view_if_open(app, focus_key);
             }
             ViewEvent::StatusItemsUpdated { items, final_save } => {
                 // Apply to the live App immediately so the footer reflects
@@ -11597,8 +11622,9 @@ async fn handle_view_events(
 }
 
 /// Keep the very large modal-event dispatcher out of the already-large TUI
-/// loop future. Without this heap boundary, opening a modal can inflate the
-/// main-thread future enough to overflow its stack before the next frame.
+/// loop future. Config previews take a dedicated small path: polling the full
+/// dispatcher on top of the event loop exceeds the macOS main-thread stack in
+/// debug builds before a theme preview can reach its next frame.
 #[allow(clippy::too_many_arguments)]
 fn handle_view_events_boxed<'a>(
     terminal: &'a mut AppTerminal,
@@ -11609,15 +11635,49 @@ fn handle_view_events_boxed<'a>(
     web_config_session: &'a mut Option<WebConfigSession>,
     events: Vec<ViewEvent>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + 'a>> {
-    Box::pin(handle_view_events(
-        terminal,
-        app,
-        config,
-        task_manager,
-        engine_handle,
-        web_config_session,
-        events,
-    ))
+    Box::pin(async move {
+        for event in events {
+            match event {
+                ViewEvent::ConfigUpdated {
+                    key,
+                    value,
+                    persist,
+                } => {
+                    if handle_config_updated(
+                        terminal,
+                        app,
+                        config,
+                        task_manager,
+                        engine_handle,
+                        web_config_session,
+                        key,
+                        value,
+                        persist,
+                    )
+                    .await?
+                    {
+                        return Ok(true);
+                    }
+                }
+                other => {
+                    if Box::pin(handle_view_events(
+                        terminal,
+                        app,
+                        config,
+                        task_manager,
+                        engine_handle,
+                        web_config_session,
+                        vec![other],
+                    ))
+                    .await?
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    })
 }
 
 fn push_approval_request_view(

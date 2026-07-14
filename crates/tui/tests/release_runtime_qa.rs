@@ -23,6 +23,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const INTERACTION_TIMEOUT: Duration = Duration::from_secs(15);
+const PASTE_GUARD_SETTLE: Duration = Duration::from_millis(180);
 const COMPOSER_READY_TEXT: &str = "Write a task";
 const MUSE_MODEL: &str = "muse-spark-1.1";
 const GPT_MODEL: &str = "gpt-5.6-terra";
@@ -208,7 +209,11 @@ fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
     harness.send(keys::key::text(text))?;
     // Rapid PTY writes intentionally exercise paste-burst detection. Wait
     // beyond its 120 ms trailing-Enter suppression window before submitting.
-    harness.wait_for_idle(Duration::from_millis(250), Duration::from_secs(2))?;
+    // Ambient ocean life keeps repainting even when the runtime is idle, so
+    // visual frame stability is not a valid readiness signal.
+    harness.wait_for_text(text, Duration::from_secs(3))?;
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    harness.pump();
     harness.send(keys::key::enter())?;
     Ok(())
 }
@@ -276,7 +281,8 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
     // invocation, outside both autocomplete and unbracketed burst handling.
     tui.paste("/theme ")?;
     tui.wait_for_text("/theme", Duration::from_secs(3))?;
-    tui.wait_for_idle(Duration::from_millis(200), Duration::from_secs(2))?;
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
     tui.send(keys::key::enter())?;
     std::thread::sleep(Duration::from_millis(300));
     tui.pump();
@@ -301,7 +307,8 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         // A PTY can deliver the first Enter inside the paste guard's trailing
         // suppression window. Once that window expires, the next deliberate
         // Enter must execute the retained draft.
-        tui.wait_for_idle(Duration::from_millis(250), Duration::from_secs(2))?;
+        std::thread::sleep(PASTE_GUARD_SETTLE);
+        tui.pump();
         tui.send(keys::key::enter())?;
         tui.wait_for_text("Pick a theme", INTERACTION_TIMEOUT)?;
     }
@@ -350,6 +357,22 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         previous_signature = Some(signature);
         if index + 1 < labels.len() {
             tui.send(b"\x1b[B")?;
+            std::thread::sleep(Duration::from_millis(250));
+            tui.pump();
+            if let Some(status) = tui.wait_for_exit(Duration::from_millis(1)) {
+                let logs = std::fs::read_dir(ws.home().join(".codewhale/logs"))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(anyhow!(
+                    "theme preview exited with {status}:\n{}\nlogs:\n{logs}",
+                    tui.debug_dump()
+                ));
+            }
         }
     }
 
