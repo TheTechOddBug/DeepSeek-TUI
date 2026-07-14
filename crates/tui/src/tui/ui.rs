@@ -11345,14 +11345,25 @@ async fn handle_view_events(
                     Some(tr(app.ui_locale, MessageId::SubagentsFetching).to_string());
                 let _ = engine_handle.try_send(Op::ListSubAgents);
             }
-            ViewEvent::FleetProfileDraftCommitRequested { draft } => {
+            ViewEvent::FleetProfileDraftCommitRequested { draft, scope } => {
                 // The TOML is rendered deterministically from the validated
                 // draft and written atomically; the target path is derived
                 // from the sanitized id, never model-chosen.
-                let target = app
-                    .workspace
-                    .join(crate::fleet::profile::WORKSPACE_AGENT_PROFILE_DIR)
-                    .join(draft.file_name());
+                let profile_dir =
+                    match crate::fleet::profile::agent_profile_dir_for_scope(scope, &app.workspace)
+                    {
+                        Ok(dir) => dir,
+                        Err(err) => {
+                            app.set_sticky_status(
+                                format!("Fleet {} scope is unavailable: {err:#}", scope.label()),
+                                StatusToastLevel::Error,
+                                None,
+                            );
+                            app.needs_redraw = true;
+                            continue;
+                        }
+                    };
+                let target = profile_dir.join(draft.file_name());
                 // A ratified profile must not silently clobber a differently
                 // named existing profile that shares this id (which would also
                 // make the whole agents dir fail to load on the duplicate).
@@ -11364,7 +11375,7 @@ async fn handle_view_events(
                 // unreadable files, and invalid ids still fail closed because
                 // then we cannot prove there is no collision.
                 let existing_profiles =
-                    crate::fleet::profile::load_workspace_agent_profile_identities(&app.workspace);
+                    crate::fleet::profile::load_agent_profile_identities_from_dir(&profile_dir);
                 if let Err(err) = &existing_profiles {
                     let message = tr(app.ui_locale, MessageId::FleetProfileIdentityVerifyFailed)
                         .replace("{error}", &format!("{err:#}"));
@@ -11410,18 +11421,39 @@ async fn handle_view_events(
                 txn.stage(target.clone(), draft.render_toml().into_bytes());
                 match txn.commit() {
                     Ok(()) => {
+                        let roster = std::sync::Arc::new(crate::fleet::roster::FleetRoster::load(
+                            &config.fleet_config(),
+                            &app.workspace,
+                        ));
+                        let roster_refresh_failed = engine_handle
+                            .try_send(Op::SetFleetRoster { roster })
+                            .is_err();
                         let zh = app.ui_locale == crate::localization::Locale::ZhHans;
                         app.add_message(HistoryCell::System {
                             content: if zh {
                                 format!("已批准并保存 Fleet 配置：{}", target.display())
                             } else {
-                                format!("Fleet profile ratified and saved: {}", target.display())
+                                format!(
+                                    "Fleet {} profile ratified and saved: {}",
+                                    scope.label(),
+                                    target.display()
+                                )
                             },
                         });
                         app.status_message = Some(if zh {
                             format!("已保存 Fleet 配置：{}", draft.file_name())
+                        } else if roster_refresh_failed {
+                            format!(
+                                "Fleet {} profile saved, but the live roster could not refresh; restart before dispatching {}",
+                                scope.label(),
+                                draft.id
+                            )
                         } else {
-                            format!("Fleet profile saved: {}", draft.file_name())
+                            format!(
+                                "Fleet {} profile saved: {}",
+                                scope.label(),
+                                draft.file_name()
+                            )
                         });
                     }
                     Err(err) => {

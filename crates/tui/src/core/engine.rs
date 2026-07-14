@@ -56,7 +56,9 @@ use crate::tools::subagent::{
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
-use crate::tools::workflow_trigger::{WorkflowTriggerSignals, evaluate_operate_admission};
+use crate::tools::workflow_trigger::{
+    OperateAdmissionDecision, WorkflowTriggerSignals, evaluate_operate_admission,
+};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
@@ -357,10 +359,11 @@ pub struct EngineConfig {
     pub runtime_services: RuntimeToolServices,
     /// Per-role/type sub-agent model overrides already resolved from config.
     pub subagent_model_overrides: HashMap<String, String>,
-    /// Merged fleet roster (built-ins + `[fleet.profiles]` + workspace agent
+    /// Merged fleet roster (built-ins + config + personal/workspace agent
     /// files) shared by model-spawned sub-agents and fleet dispatch
     /// (#fleet-roster cutover (v0.8.67)). Defaults to built-ins only; the
-    /// engine-config construction sites load the full roster once per session.
+    /// engine-config construction sites load it at session start and the setup
+    /// wizard refreshes it after each successful profile save.
     pub fleet_roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
     /// Whether the user-memory feature is enabled (#489). When `true` the
     /// engine reads `memory_path` on each prompt assembly and prepends a
@@ -713,11 +716,11 @@ impl Engine {
         .trim()
     }
 
-    /// Fail closed before a provider request when Operate cannot prove it will
-    /// leave the ordinary local Act loop and produce orchestration receipts.
-    fn operate_readiness_blocker(&self, mode: AppMode, content: &str) -> Option<String> {
+    fn operate_admission(&self, mode: AppMode, content: &str) -> OperateAdmissionDecision {
         if mode != AppMode::Operate {
-            return None;
+            return OperateAdmissionDecision::LocalOneStep {
+                reason: "mode does not require Operate orchestration",
+            };
         }
 
         let mut signals = WorkflowTriggerSignals::product_defaults();
@@ -727,7 +730,21 @@ impl Engine {
             .auto_start_child_limit
             .try_into()
             .unwrap_or(usize::MAX);
-        let admission = evaluate_operate_admission(content, &signals);
+        evaluate_operate_admission(content, &signals)
+    }
+
+    /// Fail closed before a provider request when the worker runtime itself is
+    /// unavailable. The turn loop separately enforces Workflow dispatch and a
+    /// terminal run receipt for every non-local Operate request.
+    fn operate_readiness_blocker(
+        &self,
+        mode: AppMode,
+        admission: &OperateAdmissionDecision,
+    ) -> Option<String> {
+        if mode != AppMode::Operate {
+            return None;
+        }
+
         if admission.allows_local_execution() {
             return None;
         }
@@ -740,14 +757,12 @@ impl Engine {
             "the worker runtime has no launch capacity"
         } else if self.config.max_spawn_depth == 0 {
             "worker delegation depth is zero"
-        } else if self.deepseek_client.is_none() {
-            "no active provider route is loaded for workers"
         } else {
-            "this build does not yet host-enforce Workflow dispatch and terminal receipt verification"
+            return None;
         };
 
         Some(format!(
-            "Operate readiness blocked: {} requires Fleet/Workflow orchestration, but {readiness_gap}. No provider request or solo tool chain was started. Run `/setup report` and `/setup fleet` to inspect and record the readiness gap. This release cannot start a verified Operate workflow until host-enforced dispatch and terminal receipts are available; switch to Act only for intentionally local execution.",
+            "Operate readiness blocked: {} requires Fleet/Workflow orchestration, but {readiness_gap}. No provider request or solo tool chain was started. Run `/setup report` and `/setup fleet` to inspect the readiness gap, or switch to Act only for intentionally local execution.",
             admission.reason()
         ))
     }
@@ -1826,6 +1841,15 @@ impl Engine {
                             )))
                             .await;
                     }
+                    Op::SetFleetRoster { roster } => {
+                        self.config.fleet_roster = roster;
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(
+                                "Fleet roster refreshed for subsequent turns".to_string(),
+                            ))
+                            .await;
+                    }
                     Op::SyncSession {
                         session_id,
                         messages,
@@ -2487,10 +2511,14 @@ impl Engine {
             .await;
 
         // Operate is not allowed to silently fall through to Act for work that
-        // is not provably one-step. Until the host can prove a Workflow/Fleet
-        // dispatch plus terminal receipt, return an actionable blocker before
-        // route activation, snapshots, or any provider request.
-        if let Some(message) = self.operate_readiness_blocker(input_policy.mode, &content) {
+        // is not provably one-step. Reject missing worker infrastructure here;
+        // the turn loop then admits only a host-enforced Workflow path and
+        // requires its terminal receipt before the turn can complete.
+        let operate_admission = self.operate_admission(input_policy.mode, &content);
+        let operate_requires_workflow = !operate_admission.allows_local_execution();
+        turn.operate_requires_workflow = operate_requires_workflow;
+        if let Some(message) = self.operate_readiness_blocker(input_policy.mode, &operate_admission)
+        {
             let _ = self
                 .tx_event
                 .send(Event::error(ErrorEnvelope::transient(message.clone())))

@@ -4525,7 +4525,7 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Optional Fleet roster member to run this child as (e.g. reviewer, scout, builder, verifier, synthesizer, manager, or a custom member from .codewhale/agents/ or [fleet.profiles] config). The member supplies role posture, model routing, instruction overlay, and delegation bounds; explicit type/model/model_strength/max_depth here override the member's defaults. See /fleet."
+                    "description": "Optional Fleet roster member to run this child as (e.g. reviewer, scout, builder, verifier, synthesizer, manager, or a custom member from project .codewhale/agents/, personal $CODEWHALE_HOME/agents/, or [fleet.profiles] config). The member supplies role posture, model routing, instruction overlay, and delegation bounds; explicit type/model/model_strength/max_depth here override the member's defaults. See /fleet."
                 },
                 "model_strength": {
                     "type": "string",
@@ -5595,9 +5595,31 @@ async fn run_subagent_task(task: SubAgentTask) {
         manager.claim_terminal_delivery(&agent_id)
     };
     if !completion_claimed {
+        // A retryable provider interruption is committed inside
+        // `run_subagent` so its checkpoint is durable before this epilogue.
+        // That makes the ordinary Running -> claimed transition unavailable,
+        // but a Workflow/nested parent still needs a terminal completion or
+        // its `task()` waiter will hang forever. Wake only when the manager
+        // still owns the same precommitted Interrupted state. If cancellation
+        // won after the interruption, the public state is Cancelled and the
+        // late completion remains suppressed.
+        let precommitted_interruption_delivered = match &result {
+            Ok(res) => {
+                emit_precommitted_interruption_completion(
+                    &task.runtime,
+                    &task.manager_handle,
+                    &agent_id,
+                    &res.status,
+                    &payload,
+                )
+                .await
+            }
+            Err(_) => false,
+        };
         tracing::debug!(
             target: "subagent",
             agent_id = %agent_id,
+            precommitted_interruption_delivered,
             "suppressing late task completion after another terminal outcome won"
         );
         return;
@@ -5662,6 +5684,25 @@ async fn run_subagent_task(task: SubAgentTask) {
             "claimed task completion could not commit terminal state"
         );
     }
+}
+
+async fn emit_precommitted_interruption_completion(
+    runtime: &SubAgentRuntime,
+    manager: &SharedSubAgentManager,
+    agent_id: &str,
+    result_status: &SubAgentStatus,
+    payload: &str,
+) -> bool {
+    if !matches!(result_status, SubAgentStatus::Interrupted(_)) {
+        return false;
+    }
+    let manager_still_interrupted = manager
+        .read()
+        .await
+        .get_result(agent_id)
+        .ok()
+        .is_some_and(|snapshot| matches!(snapshot.status, SubAgentStatus::Interrupted(_)));
+    manager_still_interrupted && emit_parent_completion(runtime, agent_id, payload)
 }
 
 async fn acquire_queued_launch_permit(

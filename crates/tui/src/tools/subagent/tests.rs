@@ -5919,6 +5919,69 @@ async fn run_subagent_task_suppresses_external_completion_when_cancellation_wins
     }
 }
 
+#[tokio::test]
+async fn precommitted_provider_interruption_wakes_parent_without_overriding_cancellation() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let (task_input_tx, _task_input_rx) = mpsc::unbounded_channel();
+    let agent_id = "agent_precommitted_interruption".to_string();
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "noop".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        task_input_tx,
+        tmp.path().to_path_buf(),
+        "boot_test".to_string(),
+    );
+    agent.status = SubAgentStatus::Interrupted("provider stream ended".to_string());
+    manager.write().await.agents.insert(agent_id.clone(), agent);
+
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let runtime = runtime_with_depth(1, Some(completion_tx));
+    let result_status = SubAgentStatus::Interrupted("provider stream ended".to_string());
+    assert!(
+        emit_precommitted_interruption_completion(
+            &runtime,
+            &manager,
+            &agent_id,
+            &result_status,
+            "interrupted payload",
+        )
+        .await
+    );
+    let completion = completion_rx
+        .recv()
+        .await
+        .expect("workflow parent should receive the interruption");
+    assert_eq!(completion.agent_id, agent_id);
+
+    manager
+        .write()
+        .await
+        .agents
+        .get_mut(&agent_id)
+        .expect("agent")
+        .status = SubAgentStatus::Cancelled;
+    assert!(
+        !emit_precommitted_interruption_completion(
+            &runtime,
+            &manager,
+            &agent_id,
+            &result_status,
+            "late interruption",
+        )
+        .await
+    );
+    assert!(completion_rx.try_recv().is_err());
+}
+
 #[test]
 fn summarize_subagent_result_diagnoses_missing_completed_payload() {
     let snap = make_snapshot(SubAgentStatus::Completed);

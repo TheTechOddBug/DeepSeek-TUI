@@ -799,7 +799,7 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
                 assert!(
                     envelope
                         .message
-                        .contains("cannot start a verified Operate workflow")
+                        .contains("sub-agent/Workflow runtime is disabled")
                 );
                 assert!(!envelope.message.contains("start an explicit `/workflow`"));
             }

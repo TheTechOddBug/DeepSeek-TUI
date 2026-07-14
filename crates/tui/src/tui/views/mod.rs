@@ -806,10 +806,11 @@ pub enum ViewEvent {
     FleetRosterOpenWorkersRequested,
     /// Emitted by the fleet setup Review step after the user previewed a
     /// model-drafted profile and pressed the explicit ratify key. The host
-    /// renders TOML deterministically from the validated draft and persists
-    /// it atomically under `.codewhale/agents/`.
+    /// renders TOML deterministically from the validated draft and persists it
+    /// atomically in the explicitly selected project or personal scope.
     FleetProfileDraftCommitRequested {
         draft: Box<crate::fleet::profile::FleetProfileDraft>,
+        scope: crate::fleet::profile::FleetProfileScope,
     },
     /// Emitted by the setup Runtime Posture card after the user has previewed
     /// and confirmed an explicit preset/config diff.

@@ -417,6 +417,7 @@ impl ToolSpec for WorkflowTool {
     fn description(&self) -> &'static str {
         concat!(
             "Start, run, inspect, or cancel a Workflow. Workflows execute deterministic JS with args, phase/log progress, and task(...) calls that dispatch real sub-agents through Fleet/sub-agent scheduling. ",
+            "For parallel fan-out, pass an array of zero-argument thunks exactly like `await parallel([() => task({...}), () => task({...})])`; do not pass task promises as variadic arguments. ",
             "Provide exactly one of script, source_path, or plan (structured planner JSON). ",
             "Use action=start for detached orchestration and action=status with run_id to inspect progress. Use action=run when the model needs the final result before continuing."
         )
@@ -437,7 +438,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "script": {
                     "type": "string",
-                    "description": "Workflow JS source. The runtime provides args, task(...), parallel(...), pipeline(...), log(...), phase(...), and budget."
+                    "description": "Workflow JS source. The runtime provides args, task(...), parallel(thunks), pipeline(thunks), log(...), phase(...), and budget. Fan-out syntax: await parallel([() => task({...}), () => task({...})]). parallel() requires one array of zero-argument thunks, not variadic task promises."
                 },
                 "source_path": {
                     "type": "string",
@@ -449,7 +450,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "plan": {
                     "type": "object",
-                    "description": "Structured planner plan JSON (#4124). Alternative to script/source_path. Accepts goal, risk, max_children, token_budget, phases[], and/or children[] (or IR nodes). Lowered to Workflow JS with parallel() partial-success semantics."
+                    "description": "Structured planner plan JSON (#4124). Alternative to script/source_path. Accepts goal, risk, max_children, token_budget, phases[], and/or children[] (or IR nodes). risk must be exactly read_only, writes, or elevated. For a child, prefer role/profile without an explicit type; do not combine a role/profile with a conflicting type. Lowered to Workflow JS with parallel() partial-success semantics."
                 },
                 "args": {
                     "description": "JSON value exposed to the script as args. Defaults to null."

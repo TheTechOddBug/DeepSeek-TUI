@@ -201,6 +201,13 @@ pub enum Op {
         heartbeat_timeout_secs: u64,
     },
 
+    /// Replace the engine's merged Fleet roster after the setup wizard saves a
+    /// project or personal profile. Subsequent turns can use the new role
+    /// immediately instead of requiring an application restart.
+    SetFleetRoster {
+        roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
+    },
+
     /// Sync engine session state (used for resume/load)
     SyncSession {
         session_id: Option<String>,

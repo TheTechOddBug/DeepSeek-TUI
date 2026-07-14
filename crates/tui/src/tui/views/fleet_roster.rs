@@ -497,6 +497,9 @@ fn member_detail_lines(member: &AgentProfile) -> Vec<Line<'static>> {
                 ProfileOrigin::Workspace => {
                     format!("custom overlay ({})", member.source.display())
                 }
+                ProfileOrigin::Personal => {
+                    format!("personal overlay ({})", member.source.display())
+                }
                 _ => "custom overlay".to_string(),
             }
         } else {

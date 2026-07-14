@@ -763,6 +763,7 @@ fn profile_origin_label(origin: crate::fleet::roster::ProfileOrigin) -> &'static
     match origin {
         crate::fleet::roster::ProfileOrigin::BuiltIn => "built_in",
         crate::fleet::roster::ProfileOrigin::Config => "config",
+        crate::fleet::roster::ProfileOrigin::Personal => "personal",
         crate::fleet::roster::ProfileOrigin::Workspace => "workspace",
     }
 }

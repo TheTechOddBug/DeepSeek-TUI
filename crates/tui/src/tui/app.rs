@@ -983,15 +983,14 @@ const MAX_COMPOSER_DISPLAY_CHARS: usize = 4_000;
 const MAX_DRAFT_HISTORY: usize = 50;
 
 impl AppMode {
-    /// Productive keyboard cycle: Plan -> Act -> Plan.
+    /// Productive keyboard cycle: Plan -> Act -> Operate -> Plan.
     ///
     /// `Auto` remains an internal variant while the real implementation is
     /// redesigned; do not expose it through user-facing mode selection (#3733).
     /// `Yolo` is kept for parse/back-compat only and is not in the Tab cycle.
-    /// Operate remains parseable for restored sessions and compatibility, but
-    /// user-facing selection must not offer a fail-closed mode whose control
-    /// board and host-enforced workflow receipts are not shipped yet.
-    pub const CYCLE: [Self; 2] = [Self::Plan, Self::Agent];
+    /// Operate joins the visible cycle because non-local turns are now gated to
+    /// Workflow execution with terminal receipts at the host boundary.
+    pub const CYCLE: [Self; 3] = [Self::Plan, Self::Agent, Self::Operate];
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
@@ -3466,7 +3465,7 @@ impl App {
         }
     }
 
-    /// Cycle through productive modes: Plan → Act → Plan.
+    /// Cycle through productive modes: Plan → Act → Operate → Plan.
     pub fn cycle_mode(&mut self) {
         if self.reject_setting_change_while_busy("Mode") {
             return;

@@ -39,28 +39,40 @@ impl SetupOperateFacts {
                     .unwrap_or("disabled for active provider"),
             )
         };
-        let runtime_configured = subagents_enabled && max_subagents > 0 && launch_concurrency > 0;
-        // Configuration and roster presence are useful facts, but this release
-        // cannot yet prove host-enforced Workflow dispatch plus terminal
-        // receipts. Keep Operate readiness blocked until that capability exists.
-        let runtime_ready = false;
+        let max_spawn_depth = config.subagent_max_spawn_depth_for_provider(app.api_provider);
+        let runtime_configured =
+            subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
+        // Non-local Operate turns are host-gated to Workflow run/wait and can
+        // complete only after a terminal run receipt is observed.
+        let runtime_ready = runtime_configured && provider_ready;
         let runtime_result = if let Some(reason) = runtime_disabled_reason {
             format!("worker runtime disabled ({reason})")
-        } else if runtime_configured {
+        } else if runtime_ready {
             format!(
-                "worker runtime configuration present for {}; max_subagents={}, launch_concurrency={}, admission={}; verified Operate dispatch and terminal receipts unavailable in this release",
+                "worker runtime ready for {}; max_subagents={}, launch_concurrency={}, admission={}, max_spawn_depth={}; Workflow dispatch and terminal receipts are host-enforced",
                 app.api_provider.as_str(),
                 max_subagents,
                 launch_concurrency,
-                max_admitted
+                max_admitted,
+                max_spawn_depth
+            )
+        } else if runtime_configured {
+            format!(
+                "worker runtime configured for {}, but the active provider route is not ready; max_subagents={}, launch_concurrency={}, admission={}, max_spawn_depth={}",
+                app.api_provider.as_str(),
+                max_subagents,
+                launch_concurrency,
+                max_admitted,
+                max_spawn_depth
             )
         } else {
             format!(
-                "worker runtime has no launch capacity for {}; max_subagents={}, launch_concurrency={}, admission={}",
+                "worker runtime has no launch capacity for {}; max_subagents={}, launch_concurrency={}, admission={}, max_spawn_depth={}",
                 app.api_provider.as_str(),
                 max_subagents,
                 launch_concurrency,
-                max_admitted
+                max_admitted,
+                max_spawn_depth
             )
         };
 

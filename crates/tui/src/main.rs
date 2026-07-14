@@ -4224,21 +4224,25 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let max_subagents = config.max_subagents_for_provider(provider);
     let launch_concurrency = config.launch_concurrency_for_provider(provider);
     let max_admitted = config.max_admitted_subagents_for_provider(provider);
+    let max_spawn_depth = config.subagent_max_spawn_depth_for_provider(provider);
     let roster = crate::fleet::roster::FleetRoster::load(&config.fleet_config(), workspace);
     let mut built_in_members = 0usize;
     let mut config_members = 0usize;
+    let mut personal_members = 0usize;
     let mut workspace_members = 0usize;
     for member in roster.members() {
         match member.origin {
             crate::fleet::roster::ProfileOrigin::BuiltIn => built_in_members += 1,
             crate::fleet::roster::ProfileOrigin::Config => config_members += 1,
+            crate::fleet::roster::ProfileOrigin::Personal => personal_members += 1,
             crate::fleet::roster::ProfileOrigin::Workspace => workspace_members += 1,
         }
     }
     let roster_members = roster.members().len();
-    let custom_members = config_members + workspace_members;
+    let custom_members = config_members + personal_members + workspace_members;
     let roster_ready = roster_members > 0;
-    let runtime_ready = subagents_enabled && max_subagents > 0 && launch_concurrency > 0;
+    let runtime_ready =
+        subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
 
     json!({
         "ready": has_credentials_or_local && runtime_ready && roster_ready,
@@ -4256,12 +4260,15 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             "max_subagents": max_subagents,
             "launch_concurrency": launch_concurrency,
             "max_admitted": max_admitted,
+            "max_spawn_depth": max_spawn_depth,
+            "host_enforced_workflow_receipts": true,
         },
         "roster": {
             "ready": roster_ready,
             "total": roster_members,
             "built_in": built_in_members,
             "config": config_members,
+            "personal": personal_members,
             "workspace": workspace_members,
             "custom": custom_members,
             "starter_roster_available": built_in_members > 0,

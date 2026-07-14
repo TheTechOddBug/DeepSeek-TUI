@@ -26,6 +26,7 @@ use ratatui::{
 };
 
 use crate::config::Config;
+use crate::fleet::profile::FleetProfileScope;
 use crate::localization::{MessageId, tr};
 use crate::palette;
 use crate::tui::app::App;
@@ -345,6 +346,7 @@ pub struct FleetSetupView {
     role_idx: usize,
     model_idx: usize,
     thinking_idx: usize,
+    profile_scope: FleetProfileScope,
     review_scroll: usize,
     /// A model-drafted profile awaiting save (already sanitized and
     /// bounded by the untrusted gate). Cleared when the selection changes so
@@ -410,6 +412,7 @@ impl FleetSetupView {
             role_idx: 0,
             model_idx: 0,
             thinking_idx: 0,
+            profile_scope: FleetProfileScope::Project,
             review_scroll: 0,
             model_draft: None,
             model_draft_label: None,
@@ -454,7 +457,11 @@ impl FleetSetupView {
                 .replace("{name}", &draft.file_name())
                 .replace("{model_label}", &model_label),
         );
-        let content = format!("{header}{}", draft.render_toml());
+        let content = format!(
+            "{}{}",
+            self.scope_preview_header(header),
+            draft.render_toml()
+        );
         self.model_draft = Some(draft);
         self.model_draft_label = Some(model_label);
         self.model_draft_preview = Some(content.clone());
@@ -476,7 +483,17 @@ impl FleetSetupView {
             .roster_members
             .iter()
             .find(|(id, _)| *id == role)
-            .map(|(id, origin)| format!("Overrides the {origin} '{id}' roster member."))
+            .map(|(id, origin)| {
+                if self.profile_scope == FleetProfileScope::Personal && origin == "project" {
+                    format!(
+                        "The project '{id}' profile remains higher precedence; this personal profile applies elsewhere."
+                    )
+                } else if self.profile_scope == FleetProfileScope::Personal {
+                    format!("Overrides the {origin} '{id}' roster member outside projects with a project-specific override.")
+                } else {
+                    format!("Overrides the {origin} '{id}' roster member.")
+                }
+            })
     }
 
     /// The concrete model chosen for this worker, written to the profile
@@ -507,6 +524,10 @@ impl FleetSetupView {
     fn selected_thinking_label(&self) -> String {
         self.selected_reasoning_effort()
             .unwrap_or_else(|| format!("inherit ({})", self.snapshot.reasoning))
+    }
+
+    fn scope_preview_header(&self, header: String) -> String {
+        header.replacen(PROFILE_DIR, self.profile_scope.display_dir(), 1)
     }
 
     /// Number of selectable rows on the current step (0 on the review step).
@@ -604,7 +625,11 @@ impl FleetSetupView {
         let draft = self.starter_profile_draft();
         let header = tr(self.snapshot.locale, MessageId::FleetPreviewHeader)
             .replace("{name}", &draft.file_name());
-        self.model_draft_preview = Some(format!("{header}{}", draft.render_toml()));
+        self.model_draft_preview = Some(format!(
+            "{}{}",
+            self.scope_preview_header(header),
+            draft.render_toml()
+        ));
         self.model_draft = Some(draft);
         self.model_draft_label = Some("CodeWhale starter".to_string());
         self.review_scroll = 0;
@@ -655,6 +680,7 @@ impl FleetSetupView {
             }
             Step::Review => {
                 hints.push(ActionHint::new("↑/↓", "scroll"));
+                hints.push(ActionHint::new("s", "scope"));
                 hints.push(ActionHint::new("t", "thinking"));
                 if self.model_draft.is_some() {
                     hints.push(ActionHint::new("Enter", "Save profile"));
@@ -719,6 +745,12 @@ impl ModalView for FleetSetupView {
                 self.move_down();
                 ViewAction::None
             }
+            KeyCode::Char('s') if self.step == Step::Review => {
+                self.profile_scope = self.profile_scope.toggled();
+                self.discard_model_draft();
+                self.review_scroll = 0;
+                ViewAction::None
+            }
             KeyCode::Char('t') if self.step == Step::Review => {
                 self.thinking_idx = (self.thinking_idx + 1) % THINKING_CHOICES.len();
                 self.discard_model_draft();
@@ -743,7 +775,10 @@ impl ModalView for FleetSetupView {
             }
             KeyCode::Char('g') if self.step == Step::Review => match self.model_draft.clone() {
                 Some(draft) => {
-                    ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft })
+                    ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested {
+                        draft,
+                        scope: self.profile_scope,
+                    })
                 }
                 None => ViewAction::None,
             },
@@ -757,6 +792,7 @@ impl ModalView for FleetSetupView {
                     Some(draft) => {
                         ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested {
                             draft,
+                            scope: self.profile_scope,
                         })
                     }
                     None => ViewAction::None,
@@ -909,7 +945,7 @@ impl FleetSetupView {
         }
 
         let role = &ROLES[self.role_idx.min(ROLES.len() - 1)];
-        let (profile_value, _) = profile_file_status(&self.snapshot.workspace);
+        let (profile_value, _) = profile_file_status(self.profile_scope, &self.snapshot.workspace);
         let file_stem = profile_file_stem(&role.label);
         let mut lines: Vec<Line> = Vec::new();
         let section = |lines: &mut Vec<Line>, label: &str, body: String| {
@@ -973,6 +1009,19 @@ impl FleetSetupView {
         section(&mut lines, "Thinking", self.selected_thinking_label());
         section(
             &mut lines,
+            "Scope",
+            match self.profile_scope {
+                FleetProfileScope::Project => format!(
+                    "Project — shared with this repository at {PROFILE_DIR}. Press s for a personal profile available across repositories."
+                ),
+                FleetProfileScope::Personal => format!(
+                    "Personal — available across repositories at {}. Project profiles still override it by id. Press s for project scope.",
+                    self.profile_scope.display_dir()
+                ),
+            },
+        );
+        section(
+            &mut lines,
             "Auth & readiness",
             if self.snapshot.provider_ready {
                 "Active route can be attempted with the current credentials.".to_string()
@@ -1021,7 +1070,8 @@ impl FleetSetupView {
             &mut lines,
             "Profile",
             format!(
-                "{PROFILE_DIR}/{file_stem}.toml  ·  {profile_value} present. Preview shows the exact starter profile; nothing is written until you save.",
+                "{}/{file_stem}.toml  ·  {profile_value} present. Preview shows the exact starter profile; nothing is written until you save.",
+                self.profile_scope.display_dir(),
             ),
         );
 
@@ -1200,12 +1250,16 @@ fn choice_window_start(total: usize, selected: usize, visible: usize) -> usize {
         .min(total.saturating_sub(visible))
 }
 
-fn profile_file_status(workspace: &Path) -> (String, String) {
-    let dir = workspace.join(PROFILE_DIR);
+fn profile_file_status(scope: FleetProfileScope, workspace: &Path) -> (String, String) {
+    let dir = match crate::fleet::profile::agent_profile_dir_for_scope(scope, workspace) {
+        Ok(dir) => dir,
+        Err(err) => return ("blocked".to_string(), format!("scope unavailable: {err:#}")),
+    };
+    let display_dir = scope.display_dir();
     if !dir.exists() {
         return (
             "0 files".to_string(),
-            format!("create {PROFILE_DIR}/*.toml"),
+            format!("create {display_dir}/*.toml"),
         );
     }
     if !dir.is_dir() {
@@ -1223,9 +1277,9 @@ fn profile_file_status(workspace: &Path) -> (String, String) {
         .count();
 
     if count == 1 {
-        ("1 file".to_string(), PROFILE_DIR.to_string())
+        ("1 file".to_string(), display_dir.to_string())
     } else {
-        (format!("{count} files"), PROFILE_DIR.to_string())
+        (format!("{count} files"), display_dir.to_string())
     }
 }
 
@@ -1418,11 +1472,12 @@ mod tests {
 
         // And ratifying commits exactly that route.
         let action = view.handle_key(key(KeyCode::Char('g')));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
             panic!("expected ratify commit event");
         };
+        assert_eq!(scope, FleetProfileScope::Project);
         assert_eq!(draft.provider.as_deref(), Some("zai"));
         assert_eq!(draft.model.as_deref(), Some("glm-5.2"));
         assert_eq!(draft.reasoning_effort.as_deref(), Some("max"));
@@ -1446,11 +1501,12 @@ mod tests {
         assert!(content.contains("Nothing is saved until"), "{content}");
 
         let action = view.handle_key(key(KeyCode::Char('g')));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
             panic!("expected ratify commit event");
         };
+        assert_eq!(scope, FleetProfileScope::Project);
         assert_eq!(draft.id, "reviewer");
     }
 
@@ -1576,7 +1632,7 @@ mod tests {
     fn profile_status_distinguishes_fresh_and_existing_workspaces() {
         let temp = tempfile::tempdir().expect("temp workspace");
         assert_eq!(
-            profile_file_status(temp.path()),
+            profile_file_status(FleetProfileScope::Project, temp.path()),
             (
                 "0 files".to_string(),
                 "create .codewhale/agents/*.toml".to_string()
@@ -1588,7 +1644,7 @@ mod tests {
         std::fs::write(profile_dir.join("reviewer.toml"), "id = \"reviewer\"\n")
             .expect("existing profile");
         assert_eq!(
-            profile_file_status(temp.path()),
+            profile_file_status(FleetProfileScope::Project, temp.path()),
             ("1 file".to_string(), PROFILE_DIR.to_string())
         );
     }
@@ -1637,16 +1693,45 @@ mod tests {
         // `g` ratifies directly from this same view — no Esc-then-g round
         // trip through a separate pager required.
         let action = view.handle_key(key(KeyCode::Char('g')));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
             panic!("expected ratified starter draft");
         };
+        assert_eq!(scope, FleetProfileScope::Project);
         assert_eq!(draft.id, "builder");
         assert_eq!(draft.role_hint, "builder");
         assert_eq!(draft.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(draft.provider.as_deref(), Some("deepseek"));
         assert_eq!(draft.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn review_can_target_a_personal_cross_repository_profile() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        to_review(&mut view);
+
+        assert_eq!(view.profile_scope, FleetProfileScope::Project);
+        view.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(view.profile_scope, FleetProfileScope::Personal);
+
+        view.handle_key(key(KeyCode::Enter));
+        let preview = view
+            .model_draft_preview
+            .as_deref()
+            .expect("personal preview");
+        assert!(
+            preview.contains("# $CODEWHALE_HOME/agents/manager.toml"),
+            "{preview}"
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { scope, .. }) =
+            action
+        else {
+            panic!("expected personal profile save event");
+        };
+        assert_eq!(scope, FleetProfileScope::Personal);
     }
 
     #[test]

@@ -1619,14 +1619,17 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::Auto.number(), '1');
     assert_eq!(AppMode::Yolo.number(), '1');
     assert_eq!(AppMode::Operate.number(), '3');
-    assert_eq!(AppMode::CYCLE, [AppMode::Plan, AppMode::Agent]);
+    assert_eq!(
+        AppMode::CYCLE,
+        [AppMode::Plan, AppMode::Agent, AppMode::Operate]
+    );
 
     assert_eq!(AppMode::Plan.next(), AppMode::Agent);
-    assert_eq!(AppMode::Agent.next(), AppMode::Plan);
-    assert_eq!(AppMode::Operate.next(), AppMode::Agent);
+    assert_eq!(AppMode::Agent.next(), AppMode::Operate);
+    assert_eq!(AppMode::Operate.next(), AppMode::Plan);
     assert_eq!(AppMode::Auto.next(), AppMode::Agent);
     assert_eq!(AppMode::Yolo.next(), AppMode::Agent);
-    assert_eq!(AppMode::Plan.previous(), AppMode::Agent);
+    assert_eq!(AppMode::Plan.previous(), AppMode::Operate);
     assert_eq!(AppMode::Agent.previous(), AppMode::Plan);
     assert_eq!(AppMode::Operate.previous(), AppMode::Agent);
     assert_eq!(AppMode::Auto.previous(), AppMode::Agent);
@@ -1667,7 +1670,7 @@ fn test_cycle_mode_reverse_transitions() {
 
     app.mode = AppMode::Plan;
     app.cycle_mode_reverse();
-    assert_eq!(app.mode, AppMode::Agent);
+    assert_eq!(app.mode, AppMode::Operate);
 
     app.mode = AppMode::Operate;
     app.cycle_mode_reverse();
