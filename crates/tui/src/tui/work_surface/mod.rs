@@ -92,6 +92,22 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_workflow_panel_is_not_duplicated_into_work() {
+        let mut app = app();
+        app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
+            "workflow_owner",
+            "single workflow owner",
+            0,
+        ));
+
+        let projection = super::live_projection::LiveWorkProjection::from_app(&app);
+
+        assert!(projection.rows.is_empty());
+        assert_eq!(projection.counts.active, 0);
+        assert!(super::model::project(&mut app).is_empty());
+    }
+
+    #[test]
     fn overflow_has_panel_owned_scroll_and_stable_selection() {
         let mut app = app();
         for id in ["one", "two", "three", "four"] {
