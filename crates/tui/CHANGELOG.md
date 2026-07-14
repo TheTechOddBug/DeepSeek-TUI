@@ -9,11 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Anchor automatic compaction thresholds to the route's spendable input
+  budget after output reservation and safety headroom, so large-output and
+  tight self-hosted routes compact before provider context rejection. The TUI
+  pre-send gate and warning copy now use the same token threshold as the
+  engine. Preserve the 262K Kimi route's usable input budget when catalog
+  metadata also advertises a 262K output ceiling (#4293 by @SamhandsomeLee,
+  #4368).
+- Fail closed instead of reporting base-rate dollar estimates for direct OpenAI
+  GPT-5.4/5.4 Pro, GPT-5.5 (including dated snapshots), and GPT-5.6
+  Sol/Terra/Luna requests above 272K input tokens. Exact tiered accounting
+  remains deferred to the generalized pricing schema; smaller 5.4 variants,
+  GPT-5.5 Pro, Codex subscription, and foreign-provider routes are unchanged
+  (#4317).
 - Retire `deepseek-chat` and `deepseek-reasoner` before they reach DeepSeek's
   first-party OpenAI or Anthropic wire APIs, migrating both to the documented
   `deepseek-v4-flash` replacement while preserving legacy non-thinking /
   thinking intent when no explicit reasoning tier is set. Aggregator, Wanjie
   Ark, self-hosted, and custom endpoint model ids remain provider-owned (#4320).
+- Make Operate a message-first multitask surface: ordinary prompts work without
+  a Workflow, executable prompts dispatch bounded background workers, and
+  follow-ups can queue while work is active. The parent remains a read-only
+  coordinator, worker edits and built-in verification still cross the normal
+  approval boundary, child handoffs cannot inherit standing Full Access, and
+  each dispatch produces one durable completion receipt.
+- Let personal Fleet profiles in `CODEWHALE_HOME/agents` travel across
+  repositories while project profiles in `.codewhale/agents` override them.
+  Saving refreshes the live roster, and the UI now says explicitly that profile
+  availability does not expand workspace, trust, or filesystem authority.
+- Move file-mention discovery onto one bounded, generation-safe background
+  worker so a slow filesystem read cannot freeze composer input. Exact paths
+  resolve on send; fuzzy matches stay in the completion popup instead of
+  silently attaching an arbitrary same-name file (#4365 by @WavesMan, with the
+  initial bounded-walk approach from #4367 by @LeoLin990405).
+- Honor each MCP server's advertised discovery capabilities before calling
+  optional tools, resources, templates, or prompts; keep optional probes
+  independently bounded and fail-soft (#4308 by @nsfoxer).
 - Make offline `scorecard` pricing provider-aware: `turn_end` records carry the
   effective route and a non-secret billing surface, runtime exports and
   supported aliases ingest cleanly, legacy/unknown routes remain explicitly

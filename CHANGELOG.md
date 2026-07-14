@@ -27,6 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deepseek-v4-flash` replacement while preserving legacy non-thinking /
   thinking intent when no explicit reasoning tier is set. Aggregator, Wanjie
   Ark, self-hosted, and custom endpoint model ids remain provider-owned (#4320).
+- Make Operate a message-first multitask surface: ordinary prompts work without
+  a Workflow, executable prompts dispatch bounded background workers, and
+  follow-ups can queue while work is active. The parent remains a read-only
+  coordinator, worker edits and built-in verification still cross the normal
+  approval boundary, child handoffs cannot inherit standing Full Access, and
+  each dispatch produces one durable completion receipt.
+- Let personal Fleet profiles in `CODEWHALE_HOME/agents` travel across
+  repositories while project profiles in `.codewhale/agents` override them.
+  Saving refreshes the live roster, and the UI now says explicitly that profile
+  availability does not expand workspace, trust, or filesystem authority.
+- Move file-mention discovery onto one bounded, generation-safe background
+  worker so a slow filesystem read cannot freeze composer input. Exact paths
+  resolve on send; fuzzy matches stay in the completion popup instead of
+  silently attaching an arbitrary same-name file (#4365 by @WavesMan, with the
+  initial bounded-walk approach from #4367 by @LeoLin990405).
+- Honor each MCP server's advertised discovery capabilities before calling
+  optional tools, resources, templates, or prompts; keep optional probes
+  independently bounded and fail-soft (#4308 by @nsfoxer).
 - Make offline `scorecard` pricing provider-aware: `turn_end` records carry the
   effective route and a non-secret billing surface, runtime exports and
   supported aliases ingest cleanly, legacy/unknown routes remain explicitly
