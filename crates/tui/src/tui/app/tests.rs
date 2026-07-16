@@ -220,7 +220,13 @@ fn move_cursor_line_start_already_at_start() {
 
 #[test]
 fn test_trust_mode_follows_yolo_on_startup() {
-    let app = App::new(test_options(true), &Config::default());
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let _config_env = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let mut options = test_options(true);
+    options.config_path = Some(config_path);
+    let app = App::new(options, &Config::default());
     assert!(app.trust_mode);
 }
 
@@ -1768,6 +1774,7 @@ fn test_remove_queued_message_invalid_index() {
 #[test]
 fn test_set_mode_updates_state() {
     let mut app = App::new(test_options(false), &Config::default());
+    app.yolo_compat_notified = true;
     app.set_mode(AppMode::Plan);
     assert_eq!(app.mode, AppMode::Plan);
     // The deprecated YOLO alias remaps to Agent (M6 back-compat shim).
@@ -1798,6 +1805,7 @@ fn set_mode_yolo_restores_previous_policies_on_exit() {
     app.allow_shell = false;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Never;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Yolo);
     assert!(app.allow_shell);
@@ -1839,6 +1847,7 @@ fn set_mode_plan_to_yolo_keeps_yolo_permissions_and_restores_agent_baseline() {
     app.allow_shell = false;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Never;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Plan);
     app.approval_mode = ApprovalMode::Suggest;
@@ -2185,6 +2194,7 @@ fn set_mode_agent_to_yolo_to_agent_restores_baseline_without_yolo_leak() {
     app.allow_shell = true;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Suggest;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Yolo);
     assert!(app.allow_shell);
@@ -2218,6 +2228,7 @@ fn set_mode_plan_to_yolo_to_agent_does_not_bleed_yolo_into_agent() {
     app.allow_shell = false;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Never;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Plan);
     // Plan is read-only regardless of the baseline.

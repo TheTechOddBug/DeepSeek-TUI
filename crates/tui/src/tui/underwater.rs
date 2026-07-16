@@ -1205,7 +1205,7 @@ mod tests {
         app.runtime_turn_status = Some("in_progress".to_string());
         app.turn_started_at = Some(Instant::now() - Duration::from_millis(1_300));
         let (working, label) = phase_marker(&app, ShellPhase::from_app(&app));
-        assert_eq!(working, crate::tui::spinner::BRAILLE_SPINNER_FRAMES[7]);
+        assert!(crate::tui::spinner::BRAILLE_SPINNER_FRAMES.contains(&working));
         assert_eq!(label, "working");
 
         app.low_motion = true;

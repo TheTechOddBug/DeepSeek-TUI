@@ -4288,7 +4288,20 @@ fn create_isolated_worktree_discovers_nested_repo_from_harness_parent() {
 #[test]
 fn create_isolated_worktree_reports_friendly_error_when_no_repo_found() {
     let harness = tempdir().expect("harness");
-    std::fs::create_dir_all(harness.path().join("not-a-repo")).expect("mkdir");
+    // Keep the probe more than `git_repo_root`'s parent-search limit below
+    // the temporary root. Containerized CI commonly checks the repository out
+    // at `/workspace`; a shallow `/tmp` fixture can otherwise reach `/` and
+    // correctly discover that sibling checkout instead of exercising the
+    // no-repository path.
+    let no_repo = harness
+        .path()
+        .join("not-a-repo")
+        .join("a")
+        .join("b")
+        .join("c")
+        .join("d")
+        .join("empty");
+    std::fs::create_dir_all(&no_repo).expect("mkdir");
     let worktree_home = tempdir().expect("worktree home");
     let request = SubAgentWorktreeRequest {
         branch: Some("codex/agent-missing".to_string()),
@@ -4296,7 +4309,7 @@ fn create_isolated_worktree_reports_friendly_error_when_no_repo_found() {
         base_ref: None,
     };
 
-    let err = create_isolated_worktree(harness.path(), &request, None, &SubAgentType::General)
+    let err = create_isolated_worktree(&no_repo, &request, None, &SubAgentType::General)
         .expect_err("missing repo should fail with friendly error");
 
     let message = err.to_string();

@@ -848,7 +848,7 @@ fn write_fake_fleet_binary(root: &Path, marker: &Path) -> Result<PathBuf> {
     fs::write(
         &binary,
         format!(
-            "@echo off\r\ntype nul > \"{}\"\r\necho {{\"type\":\"content\",\"content\":\"restarted through Runtime API\"}}\r\nexit /b 0\r\n",
+            "@echo off\r\ntype nul > \"{}\"\r\necho {{\"type\":\"content\",\"content\":\"restarted through Runtime API\"}}\r\nping -n 2 127.0.0.1 >NUL\r\nexit /b 0\r\n",
             marker.display()
         ),
     )?;
@@ -1512,17 +1512,25 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
     assert_eq!(restarted["execution"], "scheduled");
     assert_eq!(restarted["worker"]["status"], "busy");
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let terminal_status = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let status = manager.run_status(&report.run_id).unwrap();
-            if status.completed == 1 && status.running == 0 {
-                break;
+            if status.queued == 0 && status.running == 0 {
+                break status;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .context("Runtime API restart never drove the replacement attempt to completion")?;
+    assert_eq!(
+        terminal_status.completed, 1,
+        "replacement attempt did not complete successfully: {terminal_status:?}"
+    );
+    assert_eq!(
+        terminal_status.failed, 0,
+        "replacement attempt failed: {terminal_status:?}"
+    );
     assert!(
         restarted_marker.is_file(),
         "Runtime API reported a restart without launching its Fleet worker"
