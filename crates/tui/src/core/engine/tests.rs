@@ -415,8 +415,10 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
         }),
         ..Config::default()
     };
-    let mut runtime_services = crate::tools::spec::RuntimeToolServices::default();
-    runtime_services.active_thread_id = Some("thr_host_managed".to_string());
+    let runtime_services = crate::tools::spec::RuntimeToolServices {
+        active_thread_id: Some("thr_host_managed".to_string()),
+        ..crate::tools::spec::RuntimeToolServices::default()
+    };
     let engine_config = EngineConfig {
         max_steps: 0,
         snapshots_enabled: false,
@@ -506,8 +508,10 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
         }),
         ..Config::default()
     };
-    let mut runtime_services = crate::tools::spec::RuntimeToolServices::default();
-    runtime_services.active_thread_id = Some("thr_host_managed".to_string());
+    let runtime_services = crate::tools::spec::RuntimeToolServices {
+        active_thread_id: Some("thr_host_managed".to_string()),
+        ..crate::tools::spec::RuntimeToolServices::default()
+    };
     let engine_config = EngineConfig {
         max_steps: 0,
         snapshots_enabled: false,
