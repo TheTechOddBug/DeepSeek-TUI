@@ -98,9 +98,11 @@ largest curated model-and-pricing expansion in the project so far.
   dispatching unclaimed goal continuations or child turns.
 - Treat required user confirmation as a real goal blocker instead of a failed
   goal, and explain how to recover when a previously cached approval is denied.
-  Both states now remain visible and actionable across all shipped locales
-  instead of looking like unexplained model or tool failure (#4374 and #4375
-  by @Angel-Hair).
+  Cached-denial recovery is also committed as a settled transcript receipt, so
+  tool completion or a later status update cannot erase it from scrollback or
+  accessibility output. Both states remain visible and actionable across all
+  shipped locales instead of looking like unexplained model or tool failure
+  (#4374 and #4375 by @Angel-Hair).
 - Make Fleet launch and teardown deterministic: route flags are placed before
   `exec`, workers are contained in owned Unix sessions or Windows Job Objects,
   and cancellation reaps surviving descendants with bounded escalation before
@@ -109,7 +111,10 @@ largest curated model-and-pricing expansion in the project so far.
   never complete or overwrite a restarted attempt; terminal state and receipt
   now commit atomically, stale-heartbeat decisions use a full lease CAS,
   exhausted-retry alerts are exactly once, and crash-truncated ledger tails are
-  quarantined before the next append.
+  quarantined before the next append. Standalone CLI and Runtime API restart
+  controls now drive the replacement attempt through a real executor to its
+  terminal receipt, while per-run manager ownership prevents concurrent
+  controllers from launching the same attempt twice.
 - Keep the stopship Workflow fixture bounded to measured 24k-per-turn role
   budgets and a 360k aggregate. Free-form descriptions no longer fabricate
   write, shell, or network risk; unknown structured risk remains fail-closed.
