@@ -991,6 +991,14 @@ impl DeepSeekClient {
         request
     }
 
+    /// Redact configured credentials from text that has been flattened into a
+    /// normal model-bound text block. Most requests preserve tool results as
+    /// structured blocks and are sanitized by `prepare_model_bound_request`,
+    /// but routing/classification prompts intentionally summarize them first.
+    pub(crate) fn redact_model_bound_text(&self, text: &str) -> String {
+        redact_model_bound_text(text, &self.model_bound_secret_values)
+    }
+
     #[cfg(test)]
     fn build_http_client(
         api_key: &str,

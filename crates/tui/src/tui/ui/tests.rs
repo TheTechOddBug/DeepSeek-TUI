@@ -3482,6 +3482,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         context_references: Vec::new(),
         artifacts: Vec::new(),
         work_state: None,
+        last_auto_route: None,
     }
 }
 
@@ -12164,9 +12165,67 @@ fn apply_loaded_session_restores_auto_model_mode() {
     assert_eq!(app.model, "auto");
     assert_eq!(app.model_selection_for_persistence(), "auto");
     assert_eq!(app.last_effective_model, None);
+    assert_eq!(app.last_effective_provider, None);
+    assert_eq!(app.last_effective_provider_identity, None);
+    assert_eq!(app.last_auto_route_receipt, None);
     assert_eq!(app.last_effective_reasoning_effort, None);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
     assert_eq!(app.effective_model_for_budget(), DEFAULT_TEXT_MODEL);
+}
+
+#[test]
+fn auto_route_receipt_survives_session_snapshot_and_restore() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let receipt = crate::model_routing::AutoRouteReceipt {
+        tier: crate::model_routing::AutoRouteTier::Strong,
+        pair: crate::model_routing::AutoRoutePair {
+            strong: crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+            fast: Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string()),
+        },
+        scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
+        data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
+        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+            crate::model_routing::AutoRouteHeuristicReason::ComplexRequest,
+        ),
+    };
+    let mut app = create_test_app();
+    app.set_model_selection("auto".to_string());
+    app.last_effective_provider = Some(ApiProvider::Zai);
+    app.last_effective_provider_identity = Some("zai".to_string());
+    app.last_effective_model = Some(crate::config::ZAI_GLM_5_2_MODEL.to_string());
+    app.last_auto_route_receipt = Some(receipt.clone());
+    app.api_messages
+        .push(text_message("user", "inspect this route"));
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    let serialized = serde_json::to_string(&snapshot).expect("serialize session");
+    let persisted: SavedSession = serde_json::from_str(&serialized).expect("deserialize session");
+    let saved = persisted
+        .last_auto_route
+        .as_ref()
+        .expect("persisted Auto route");
+    assert_eq!(saved.provider, ApiProvider::Zai);
+    assert_eq!(saved.provider_identity, "zai");
+    assert_eq!(saved.model, crate::config::ZAI_GLM_5_2_MODEL);
+    assert_eq!(saved.receipt, receipt);
+
+    let mut restored_app = create_test_app();
+    apply_loaded_session(&mut restored_app, &mut Config::default(), &persisted)
+        .expect("restore session");
+
+    assert!(restored_app.auto_model);
+    assert_eq!(restored_app.last_effective_provider, Some(ApiProvider::Zai));
+    assert_eq!(
+        restored_app.last_effective_provider_identity.as_deref(),
+        Some("zai")
+    );
+    assert_eq!(
+        restored_app.last_effective_model.as_deref(),
+        Some(crate::config::ZAI_GLM_5_2_MODEL)
+    );
+    assert_eq!(restored_app.last_auto_route_receipt, Some(receipt));
 }
 
 #[test]

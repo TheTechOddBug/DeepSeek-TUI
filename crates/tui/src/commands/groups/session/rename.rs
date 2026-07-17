@@ -89,6 +89,7 @@ pub(crate) fn rename_with_manager(
     };
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
+    session.last_auto_route = app.auto_route_for_persistence();
     session.metadata.model = app.model_selection_for_persistence();
     session
         .metadata

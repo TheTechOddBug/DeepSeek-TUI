@@ -7,6 +7,8 @@
 //! - Managing session lifecycle
 
 use crate::artifacts::ArtifactRecord;
+use crate::config::ApiProvider;
+use crate::model_routing::AutoRouteReceipt;
 use crate::models::{ContentBlock, Message, SystemPrompt};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::todo::TodoListSnapshot;
@@ -223,6 +225,18 @@ impl SessionWorkState {
     }
 }
 
+/// Latest concrete Auto route and the decision receipt that produced it.
+///
+/// This is additive, optional session metadata: sessions written before
+/// v0.9.1 deserialize with no receipt and keep their legacy restore behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SavedAutoRouteReceipt {
+    pub(crate) provider: ApiProvider,
+    pub(crate) provider_identity: String,
+    pub(crate) model: String,
+    pub(crate) receipt: AutoRouteReceipt,
+}
+
 /// A saved session containing full conversation history
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSession {
@@ -246,6 +260,10 @@ pub struct SavedSession {
     /// To-do and plan state shown in the Work sidebar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_state: Option<SessionWorkState>,
+    /// Most recent accepted/completed Auto decision, when the saved model mode
+    /// is `auto`. Optional for backward-compatible session loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_auto_route: Option<SavedAutoRouteReceipt>,
 }
 
 /// Manager for session persistence operations
@@ -883,6 +901,7 @@ pub fn create_saved_session_with_id_and_mode(
         context_references: Vec::new(),
         artifacts: Vec::new(),
         work_state: None,
+        last_auto_route: None,
     }
 }
 
@@ -1199,6 +1218,7 @@ mod tests {
             context_references: Vec::new(),
             artifacts: Vec::new(),
             work_state: None,
+            last_auto_route: None,
         };
         manager.save_session(&session).expect("save");
     }
@@ -1233,6 +1253,7 @@ mod tests {
             context_references: Vec::new(),
             artifacts: Vec::new(),
             work_state: None,
+            last_auto_route: None,
         };
         manager.save_session(&session).expect("save empty");
     }
@@ -2186,6 +2207,7 @@ mod tests {
 
         let session: SavedSession = serde_json::from_str(json).expect("legacy session loads");
         assert!(session.artifacts.is_empty());
+        assert!(session.last_auto_route.is_none());
         assert!(session.metadata.parent_session_id.is_none());
         assert!(session.metadata.forked_from_message_count.is_none());
     }

@@ -915,9 +915,16 @@ fn auto_picker_hint(app: &App, config: &Config) -> String {
         app.last_effective_provider,
         app.last_effective_model.as_deref(),
     ) {
+        let provider_label = if provider == ApiProvider::Custom {
+            app.last_effective_provider_identity
+                .as_deref()
+                .unwrap_or_else(|| app.provider_identity_for_persistence())
+        } else {
+            provider.display_name()
+        };
         let last = app
             .tr(MessageId::ModelPickerAutoLastRoute)
-            .replace("{provider}", provider.display_name())
+            .replace("{provider}", provider_label)
             .replace("{model}", model);
         hint.push_str(" · ");
         hint.push_str(&last);

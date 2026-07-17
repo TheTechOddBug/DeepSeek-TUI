@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::client::DeepSeekClient;
 use crate::config::{ApiProvider, Config, normalize_model_name_for_provider};
@@ -266,7 +267,8 @@ impl AutoRouteSource {
 /// `Selected` is deliberately neutral: a classifier may choose a runnable
 /// inventory model that is not part of a known strong/fast pair, and the UI
 /// must not invent a tier from the model id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum AutoRouteTier {
     Strong,
     Fast,
@@ -287,7 +289,8 @@ impl AutoRouteTier {
 }
 
 /// Scope from which the concrete Auto route was selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum AutoRouteScope {
     /// The network classifier could choose any runnable provider/model pair in
     /// the redacted inventory.
@@ -307,7 +310,8 @@ impl AutoRouteScope {
 }
 
 /// Non-secret data path used to make an Auto decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum AutoRouteDataPath {
     LocalHeuristic,
     Classifier {
@@ -330,7 +334,8 @@ impl AutoRouteDataPath {
 }
 
 /// Local signal that selected the provider-safe strong/fast candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum AutoRouteHeuristicReason {
     ComplexRequest,
     ShortRequest,
@@ -359,7 +364,8 @@ impl AutoRouteHeuristicReason {
 /// Why the route was selected. Classifier failures are intentionally
 /// collapsed to a non-secret reason; provider errors and response bodies must
 /// never enter diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum AutoRouteReason {
     ClassifierRecommendation,
     LocalHeuristic(AutoRouteHeuristicReason),
@@ -380,7 +386,7 @@ impl AutoRouteReason {
 }
 
 /// Effective provider-scoped model pair used to classify the selected tier.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AutoRoutePair {
     pub(crate) strong: String,
     pub(crate) fast: Option<String>,
@@ -389,7 +395,7 @@ pub(crate) struct AutoRoutePair {
 /// Per-turn Auto routing diagnostics. Provider/model identity remains owned by
 /// the authoritative runtime `TurnRoute`; this receipt only records how the
 /// concrete route was chosen.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AutoRouteReceipt {
     pub(crate) tier: AutoRouteTier,
     pub(crate) pair: AutoRoutePair,
@@ -733,18 +739,37 @@ fn auto_route_pair(
     provider: ApiProvider,
     selected_model: &str,
 ) -> AutoRoutePair {
-    let basis = inventory
+    // A provider can expose several unrelated model families. Derive the pair
+    // from a runnable candidate that actually contains the selected model,
+    // preferring a cheap-tier match before a strong-tier match. Falling back
+    // to the provider default would report a truthful provider with a false
+    // model family (for example OpenRouter GLM reported as DeepSeek).
+    let matching_pair = inventory
         .candidates
         .iter()
-        .find(|candidate| candidate.provider == provider && candidate.default_for_provider)
-        .or_else(|| inventory.candidate(provider, selected_model));
-    let Some(basis) = basis else {
+        .filter(|candidate| candidate.provider == provider && candidate.readiness.can_attempt())
+        .map(|candidate| provider_router_candidates(provider, &candidate.model))
+        .find(|pair| {
+            pair.cheap
+                .as_deref()
+                .is_some_and(|fast| fast.eq_ignore_ascii_case(selected_model))
+        })
+        .or_else(|| {
+            inventory
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.provider == provider && candidate.readiness.can_attempt()
+                })
+                .map(|candidate| provider_router_candidates(provider, &candidate.model))
+                .find(|pair| pair.big.eq_ignore_ascii_case(selected_model))
+        });
+    let Some(candidates) = matching_pair else {
         return AutoRoutePair {
             strong: selected_model.to_string(),
             fast: None,
         };
     };
-    let candidates = provider_router_candidates(provider, &basis.model);
     let Some(strong) = inventory
         .candidate(provider, &candidates.big)
         .filter(|candidate| candidate.readiness.can_attempt())
@@ -779,18 +804,20 @@ async fn auto_route_inventory_recommendation(
 
     let client = DeepSeekClient::new(&router_config)?;
     let router_system = inventory_auto_router_system_prompt(inventory, config.auto_cost_saving());
+    let router_prompt = classifier_prompt(
+        &client,
+        latest_request,
+        recent_context,
+        session_mode,
+        selected_model_mode,
+        selected_thinking_mode,
+    );
     let request = MessageRequest {
         model: inventory.router_model.to_string(),
         messages: vec![Message {
             role: "user".to_string(),
             content: vec![ContentBlock::Text {
-                text: auto_route_prompt(
-                    latest_request,
-                    recent_context,
-                    session_mode,
-                    selected_model_mode,
-                    selected_thinking_mode,
-                ),
+                text: router_prompt,
                 cache_control: None,
             }],
         }],
@@ -908,6 +935,23 @@ fn auto_route_prompt(
     )
 }
 
+fn classifier_prompt(
+    client: &DeepSeekClient,
+    latest_request: &str,
+    recent_context: &str,
+    session_mode: &str,
+    selected_model_mode: &str,
+    selected_thinking_mode: &str,
+) -> String {
+    client.redact_model_bound_text(&auto_route_prompt(
+        latest_request,
+        recent_context,
+        session_mode,
+        selected_model_mode,
+        selected_thinking_mode,
+    ))
+}
+
 fn message_response_text(response: &MessageResponse) -> String {
     let mut out = String::new();
     for block in &response.content {
@@ -1009,6 +1053,38 @@ mod tests {
             prompt.starts_with("Session mode: plan\n"),
             "auto-route prompt should reflect the active session mode, got: {prompt}"
         );
+    }
+
+    #[test]
+    fn classifier_prompt_redacts_secret_after_tool_result_flattening() {
+        let secret = "cw-router-secret-should-never-leave-process";
+        let config = Config {
+            api_key: Some(secret.to_string()),
+            ..Default::default()
+        };
+        let client = DeepSeekClient::new(&config).expect("classifier client");
+        // `recent_auto_router_context` converts ToolResult blocks into ordinary
+        // text before this boundary. Exercise that exact flattened shape.
+        let recent_context = format!("assistant: [tool result] token={secret}");
+
+        let prompt = classifier_prompt(
+            &client,
+            "continue the investigation",
+            &recent_context,
+            "agent",
+            "auto",
+            "auto",
+        );
+
+        assert!(
+            !prompt.contains(secret),
+            "flattened tool-result secret leaked"
+        );
+        assert!(
+            prompt.contains(codewhale_config::persistence::REDACTED),
+            "secret should be visibly redacted"
+        );
+        assert!(prompt.contains("continue the investigation"));
     }
 
     #[test]
@@ -1268,6 +1344,38 @@ mod tests {
             }
         );
         assert_eq!(receipt.reason, AutoRouteReason::ClassifierRecommendation);
+    }
+
+    #[test]
+    fn classifier_receipt_never_reports_openrouter_default_for_another_family() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _openrouter =
+            crate::test_support::EnvVarGuard::set("OPENROUTER_API_KEY", "openrouter-key");
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            ..Default::default()
+        };
+        let inventory = ModelInventory::from_config(&config);
+        let recommendation = parse_inventory_auto_route_recommendation(
+            r#"{"provider":"openrouter","model":"z-ai/glm-5.2","thinking":"max"}"#,
+            &inventory,
+        )
+        .expect("runnable non-default OpenRouter family");
+
+        let route = auto_route_from_classifier(&inventory, recommendation);
+        let receipt = route.receipt.expect("classifier receipt");
+
+        assert_eq!(route.model, crate::config::OPENROUTER_GLM_5_2_MODEL);
+        assert_eq!(receipt.pair.strong, crate::config::OPENROUTER_GLM_5_2_MODEL);
+        assert_ne!(
+            receipt.pair.fast.as_deref(),
+            Some(crate::config::DEFAULT_OPENROUTER_FLASH_MODEL),
+            "a GLM selection must not be described as the DeepSeek default pair"
+        );
+        assert!(matches!(
+            receipt.tier,
+            AutoRouteTier::Strong | AutoRouteTier::Only
+        ));
     }
 
     #[test]

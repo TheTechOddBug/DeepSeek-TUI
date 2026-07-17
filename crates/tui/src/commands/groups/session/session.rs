@@ -41,6 +41,7 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
         Ok(state) => state,
         Err(err) => return CommandResult::error(format!("Failed to snapshot Work state: {err}")),
     };
+    session.last_auto_route = app.auto_route_for_persistence();
     let save_path = explicit_save_path.unwrap_or_else(|| {
         let dir = crate::session_manager::default_sessions_dir()
             .unwrap_or_else(|_| app.workspace.clone());
@@ -131,6 +132,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         Err(err) => return CommandResult::error(format!("Failed to snapshot Work state: {err}")),
     };
     parent.work_state = work_state.clone();
+    parent.last_auto_route = app.auto_route_for_persistence();
 
     if let Err(err) = manager.save_session(&parent) {
         return CommandResult::error(format!("Failed to save parent session: {err}"));
@@ -152,6 +154,7 @@ pub fn fork(app: &mut App) -> CommandResult {
     forked.context_references = app.session_context_references.clone();
     forked.artifacts = app.session_artifacts.clone();
     forked.work_state = work_state;
+    forked.last_auto_route = app.auto_route_for_persistence();
 
     if let Err(err) = manager.save_session(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
@@ -580,6 +583,41 @@ mod tests {
         let saved: crate::session_manager::SavedSession =
             serde_json::from_str(&std::fs::read_to_string(save_path).unwrap()).unwrap();
         assert_eq!(saved.artifacts, app.session_artifacts);
+    }
+
+    #[test]
+    fn save_preserves_latest_auto_route_receipt() {
+        let tmpdir = TempDir::new().unwrap();
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let save_path = tmpdir.path().join("auto_route_session.json");
+        let receipt = crate::model_routing::AutoRouteReceipt {
+            tier: crate::model_routing::AutoRouteTier::Fast,
+            pair: crate::model_routing::AutoRoutePair {
+                strong: crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+                fast: Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string()),
+            },
+            scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
+            data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
+            reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+                crate::model_routing::AutoRouteHeuristicReason::ShortRequest,
+            ),
+        };
+        app.set_model_selection("auto".to_string());
+        app.last_effective_provider = Some(crate::config::ApiProvider::Zai);
+        app.last_effective_provider_identity = Some("zai".to_string());
+        app.last_effective_model = Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string());
+        app.last_auto_route_receipt = Some(receipt.clone());
+
+        let result = save(&mut app, Some(save_path.to_str().unwrap()));
+
+        assert!(!result.is_error);
+        let saved: crate::session_manager::SavedSession =
+            serde_json::from_str(&std::fs::read_to_string(save_path).unwrap()).unwrap();
+        let route = saved.last_auto_route.expect("latest Auto route");
+        assert_eq!(route.provider, crate::config::ApiProvider::Zai);
+        assert_eq!(route.provider_identity, "zai");
+        assert_eq!(route.model, crate::config::ZAI_GLM_5_TURBO_MODEL);
+        assert_eq!(route.receipt, receipt);
     }
 
     #[test]
