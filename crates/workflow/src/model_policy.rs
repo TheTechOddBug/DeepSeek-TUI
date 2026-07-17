@@ -293,25 +293,9 @@ pub fn repair_json_text_once(raw: &str) -> String {
         .map(str::trim)
         .unwrap_or(trimmed);
 
-    let obj_candidate = slice_json_payload(without_fence, '{', '}');
-    let arr_candidate = slice_json_payload(without_fence, '[', ']');
-
-    match (obj_candidate, arr_candidate) {
-        (Some(obj), Some(arr)) => {
-            // Find which one starts first in the original string
-            // slice_json_payload already validates they have matching open/close
-            let obj_start = without_fence.find(obj).unwrap_or(usize::MAX);
-            let arr_start = without_fence.find(arr).unwrap_or(usize::MAX);
-            if obj_start < arr_start {
-                obj.to_string()
-            } else {
-                arr.to_string()
-            }
-        }
-        (Some(obj), None) => obj.to_string(),
-        (None, Some(arr)) => arr.to_string(),
-        (None, None) => without_fence.to_string(),
-    }
+    first_valid_json_payload(without_fence)
+        .unwrap_or(without_fence)
+        .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,10 +344,66 @@ fn model_key(provider: &str, model: &str) -> String {
     format!("{provider}/{model}")
 }
 
-fn slice_json_payload(raw: &str, open: char, close: char) -> Option<&str> {
-    let start = raw.find(open)?;
-    let end = raw.rfind(close)?;
-    (end >= start).then_some(&raw[start..=end])
+// Repair scans untrusted model text once per possible container start. Keep the
+// fallback bounded when malformed output contains a long delimiter flood.
+const JSON_REPAIR_CANDIDATE_LIMIT: usize = 64;
+
+fn first_valid_json_payload(raw: &str) -> Option<&str> {
+    let mut attempted = 0;
+    for (start, open) in raw.char_indices() {
+        if !matches!(open, '{' | '[') {
+            continue;
+        }
+        attempted += 1;
+        if attempted > JSON_REPAIR_CANDIDATE_LIMIT {
+            break;
+        }
+
+        let Some(candidate) = balanced_json_payload(&raw[start..]) else {
+            continue;
+        };
+        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn balanced_json_payload(raw: &str) -> Option<&str> {
+    let mut stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, character) in raw.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else {
+                match character {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '{' | '[' => stack.push(character),
+            '}' | ']' => {
+                let expected_open = if character == '}' { '{' } else { '[' };
+                if stack.pop() != Some(expected_open) {
+                    return None;
+                }
+                if stack.is_empty() {
+                    return Some(&raw[..offset + character.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -509,8 +549,9 @@ mod tests {
         assert_eq!(provider.model(), "fast");
         assert_eq!(response.text, "mock response");
     }
+
     #[test]
-    fn test_repair_json_text_once() {
+    fn repair_json_text_once_extracts_supported_payloads() {
         // Plain JSON object
         assert_eq!(
             repair_json_text_once(r#"{"key": "value"}"#),
@@ -580,15 +621,34 @@ mod tests {
             "Just some plain text"
         );
 
-        // REGRESSION FIX: Unmatched opening bracket should not block finding a balanced one
+        // An unmatched opening bracket must not block a later valid object.
         assert_eq!(repair_json_text_once("[note {\"ok\":1}"), r#"{"ok":1}"#);
 
-        // Control: Nested inside string escapes should be preserved correctly if balanced
-        // (This tests we don't just grab the first '{' without considering the full payload,
-        // though `slice_json_payload` is simple rfind/find right now)
+        // Delimiters inside strings must not terminate the outer object.
         assert_eq!(
             repair_json_text_once(r#"Prefix text {"data": "[nested]"} postfix text"#),
             r#"{"data": "[nested]"}"#
+        );
+
+        // The earliest balanced candidate may still be invalid JSON. Keep scanning
+        // until a balanced candidate also parses successfully.
+        assert_eq!(
+            repair_json_text_once(r#"[not-json] then {"ok":true}"#),
+            r#"{"ok":true}"#
+        );
+
+        // Escaped quotes and backslashes stay inside the JSON string.
+        assert_eq!(
+            repair_json_text_once(
+                r#"prefix {"value":"a \"quoted\" [item]","path":"C:\\tmp"} suffix"#
+            ),
+            r#"{"value":"a \"quoted\" [item]","path":"C:\\tmp"}"#
+        );
+
+        // A mismatched outer delimiter must not consume a later valid payload.
+        assert_eq!(
+            repair_json_text_once(r#"[broken} then [1,{"ok":true}]"#),
+            r#"[1,{"ok":true}]"#
         );
     }
 }
