@@ -1287,6 +1287,10 @@ mod tests {
         assert!(msg.contains("Moonshot/Kimi (moonshot)"));
         assert!(msg.contains("https://platform.kimi.ai/console/api-keys"));
         assert!(msg.contains("https://platform.kimi.ai/docs/overview"));
+        assert!(msg.contains("https://console.openmodel.ai/"));
+        assert!(msg.contains("https://docs.openmodel.ai/en/docs/getting-started/authentication"));
+        assert!(msg.contains("https://console.sakana.ai/api-keys"));
+        assert!(msg.contains("https://console.sakana.ai/get-started"));
         assert!(msg.contains("Baidu Qianfan (qianfan)"));
         assert!(msg.contains("https://cloud.baidu.com/doc/qianfan/index.html"));
         assert!(msg.contains("Local Ollama is keyless by default"));

@@ -243,10 +243,10 @@ configuration path instead of guessing a vendor page.
 | `together` | [Together API keys](https://api.together.ai/settings/api-keys) |
 | `qianfan` | [Baidu Cloud access keys](https://console.bce.baidu.com/iam/#/iam/accesslist) |
 | `anthropic` | [Anthropic API keys](https://console.anthropic.com/settings/keys) |
-| `openmodel` | [OpenModel API key guide](https://docs.openmodel.ai/en/docs/guides/api-key) |
+| `openmodel` | [OpenModel console](https://console.openmodel.ai/) ([authentication guide](https://docs.openmodel.ai/en/docs/getting-started/authentication)) |
 | `openai-codex` | Reuses `codex login`; no Codewhale API key is stored. |
 | `sglang`, `vllm`, `ollama` | Local OpenAI-compatible endpoints are keyless by default; configure a key only when the server requires one. |
-| `sakana` | [Sakana AI API](https://api.sakana.ai/) |
+| `sakana` | [Sakana AI API keys](https://console.sakana.ai/api-keys) ([get started](https://console.sakana.ai/get-started)) |
 | `longcat` | [Meituan LongCat platform](https://longcat.chat/platform) |
 | `opencode-go` | [OpenCode Zen](https://opencode.ai/zen/) |
 | `meta` | [Meta Model API](https://developer.meta.com/ai/) |

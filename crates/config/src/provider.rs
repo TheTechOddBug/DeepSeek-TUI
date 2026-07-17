@@ -274,9 +274,9 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
         },
         ProviderKind::Openmodel => CredentialHelp {
             acquisition: ApiKey,
-            credential_url: Some("https://docs.openmodel.ai/en/docs/guides/api-key"),
-            docs_url: Some("https://docs.openmodel.ai/en/docs/guides/api-key"),
-            guidance: "Follow OpenModel's API key guide to create a credential.",
+            credential_url: Some("https://console.openmodel.ai/"),
+            docs_url: Some("https://docs.openmodel.ai/en/docs/getting-started/authentication"),
+            guidance: "Create an API key in the OpenModel console, then follow the authentication guide.",
         },
         ProviderKind::Zai => CredentialHelp {
             acquisition: ApiKey,
@@ -306,9 +306,9 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
         },
         ProviderKind::Sakana => CredentialHelp {
             acquisition: ApiKey,
-            credential_url: Some("https://api.sakana.ai/"),
-            docs_url: Some("https://api.sakana.ai/"),
-            guidance: "Create a Sakana AI API credential from the provider portal.",
+            credential_url: Some("https://console.sakana.ai/api-keys"),
+            docs_url: Some("https://console.sakana.ai/get-started"),
+            guidance: "Create a Sakana AI key in the console and copy it when shown.",
         },
         ProviderKind::LongCat => CredentialHelp {
             acquisition: ApiKey,
@@ -1241,6 +1241,29 @@ mod tests {
                 .credential_help()
                 .acquisition,
             CredentialAcquisition::Configuration
+        );
+    }
+
+    #[test]
+    fn live_verified_console_replacements_do_not_regress_to_404_links() {
+        let openmodel = provider_for_kind(ProviderKind::Openmodel).credential_help();
+        assert_eq!(
+            openmodel.credential_url,
+            Some("https://console.openmodel.ai/")
+        );
+        assert_eq!(
+            openmodel.docs_url,
+            Some("https://docs.openmodel.ai/en/docs/getting-started/authentication")
+        );
+
+        let sakana = provider_for_kind(ProviderKind::Sakana).credential_help();
+        assert_eq!(
+            sakana.credential_url,
+            Some("https://console.sakana.ai/api-keys")
+        );
+        assert_eq!(
+            sakana.docs_url,
+            Some("https://console.sakana.ai/get-started")
         );
     }
 
