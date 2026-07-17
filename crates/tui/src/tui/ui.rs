@@ -8106,6 +8106,7 @@ async fn dispatch_user_message(
         if app.auto_model {
             app.last_effective_model = Some(effective_model.clone());
             app.last_effective_provider = Some(effective_provider);
+            app.last_auto_route_receipt = selection.receipt.clone();
             let status = app
                 .tr(MessageId::AutoRouteSelectedToast)
                 .replace("{provider}", selection.provider.display_name())

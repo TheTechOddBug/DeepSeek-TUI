@@ -1772,7 +1772,7 @@ pub struct App {
     pub last_effective_model: Option<String>,
     /// Provider that actually served the latest auto-routed turn.
     pub last_effective_provider: Option<ApiProvider>,
-    /// Auto decision metadata for the most recently completed Auto turn.
+    /// Auto decision metadata for the most recently resolved Auto turn.
     pub(crate) last_auto_route_receipt: Option<crate::model_routing::AutoRouteReceipt>,
     /// Route selected for the next turn, retained for in-flight UI details
     /// until the engine confirms the authoritative `TurnStarted` route.

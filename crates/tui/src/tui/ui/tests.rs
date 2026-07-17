@@ -4838,6 +4838,49 @@ async fn dispatch_user_message_failed_send_clears_loading_state() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+    let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-test-key");
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Zai, "zai");
+    app.set_model_selection("auto".to_string());
+    let config = Config {
+        provider: Some("zai".to_string()),
+        default_text_model: Some("auto".to_string()),
+        ..Default::default()
+    };
+    let engine = mock_engine_handle();
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("quick status".to_string(), None),
+    )
+    .await
+    .expect("Auto dispatch");
+
+    assert_eq!(
+        app.pending_turn_route
+            .as_ref()
+            .map(|(provider, model, auto)| (*provider, model.as_str(), *auto)),
+        Some((ApiProvider::Zai, crate::config::ZAI_GLM_5_TURBO_MODEL, true))
+    );
+    assert_eq!(
+        app.last_auto_route_receipt, app.pending_auto_route_receipt,
+        "the fallback inspector must never pair a newly resolved route with a stale receipt"
+    );
+    assert_eq!(
+        app.last_auto_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.tier),
+        Some(crate::model_routing::AutoRouteTier::Fast)
+    );
+}
+
+#[tokio::test]
 async fn failed_paused_dispatch_preserves_app_checkpoint_state_and_engine_gate() {
     let mut app = create_test_app();
     app.pausable = true;

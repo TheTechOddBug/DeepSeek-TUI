@@ -772,6 +772,7 @@ pub(crate) fn provider_scoped_model_completion_ids(app: &App) -> Vec<String> {
 fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> {
     let mut rows = Vec::new();
     let auto_hint = auto_picker_hint(app, config);
+    push_auto_model_row(&mut rows, app, config, &auto_hint);
     // One snapshot supplies both IDs, capabilities, and freshness so a cache
     // replacement cannot produce mixed-generation picker rows.
     let codex_roster = codex_model_cache::model_roster();
@@ -804,7 +805,6 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         config,
         &codex_roster,
         &app.provider_health,
-        &auto_hint,
     );
 
     for provider in ApiProvider::sorted_for_display() {
@@ -840,7 +840,6 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
             config,
             &codex_roster,
             &app.provider_health,
-            &auto_hint,
         );
     }
 
@@ -855,40 +854,53 @@ fn push_provider_model_rows(
     config: &Config,
     codex_roster: &CodexModelRoster,
     provider_health: &crate::provider_readiness::ProviderReadinessSnapshot,
-    auto_hint: &str,
 ) {
     for id in model_ids {
+        if id == "auto" {
+            continue;
+        }
         let readiness =
             crate::provider_readiness::resolve_for_model(config, provider, &id, provider_health);
         let selectable = readiness.can_attempt();
         let readiness_label = readiness.label();
-        if id == "auto" {
-            let metadata = effective_picker_metadata(config, None, "auto");
-            let hint = format!("{} · {}", readiness_label, auto_hint);
-            push_model_row(rows, id, None, hint, metadata, selectable);
+        let roster_entry = if provider == ApiProvider::OpenaiCodex {
+            codex_roster.metadata_for(&id)
         } else {
-            let roster_entry = if provider == ApiProvider::OpenaiCodex {
-                codex_roster.metadata_for(&id)
-            } else {
-                None
-            };
-            let codex_metadata = if codex_roster.freshness == CodexModelCacheFreshness::Fresh {
-                roster_entry
-            } else {
-                None
-            };
-            let codex_freshness = roster_entry.map(|_| codex_roster.freshness);
-            let metadata =
-                effective_picker_metadata_with_codex(config, Some(provider), &id, codex_metadata);
-            let mut hint =
-                render_picker_model_hint(&id, Some(provider), &metadata, codex_freshness);
-            hint = format!("{} · {hint}", readiness_label);
-            if provider != active_provider {
-                hint = format!("switch route · {hint}");
-            }
-            push_model_row(rows, id.clone(), Some(provider), hint, metadata, selectable);
+            None
+        };
+        let codex_metadata = if codex_roster.freshness == CodexModelCacheFreshness::Fresh {
+            roster_entry
+        } else {
+            None
+        };
+        let codex_freshness = roster_entry.map(|_| codex_roster.freshness);
+        let metadata =
+            effective_picker_metadata_with_codex(config, Some(provider), &id, codex_metadata);
+        let mut hint = render_picker_model_hint(&id, Some(provider), &metadata, codex_freshness);
+        hint = format!("{} · {hint}", readiness_label);
+        if provider != active_provider {
+            hint = format!("switch route · {hint}");
         }
+        push_model_row(rows, id.clone(), Some(provider), hint, metadata, selectable);
     }
+}
+
+fn push_auto_model_row(rows: &mut Vec<ModelPickerRow>, app: &App, config: &Config, hint: &str) {
+    let readiness = crate::provider_readiness::resolve_for_model(
+        config,
+        app.api_provider,
+        "auto",
+        &app.provider_health,
+    );
+    let metadata = effective_picker_metadata(config, None, "auto");
+    push_model_row(
+        rows,
+        "auto".to_string(),
+        None,
+        format!("{} · {hint}", readiness.label()),
+        metadata,
+        readiness.can_attempt(),
+    );
 }
 
 fn auto_picker_hint(app: &App, config: &Config) -> String {
