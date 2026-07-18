@@ -49,10 +49,10 @@ use crate::mcp::McpPool;
 #[cfg(test)]
 pub(super) use crate::models::{ContentBlock, Message};
 use crate::runtime_threads::{
-    CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision, RuntimeThreadManager,
-    RuntimeThreadManagerConfig, SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest,
-    ThreadDetail, ThreadListFilter, ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest,
-    UsageGroupBy,
+    CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision,
+    MAX_RUNTIME_EVENT_REPLAY_TAIL, RuntimeThreadManager, RuntimeThreadManagerConfig,
+    SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest, ThreadDetail, ThreadListFilter,
+    ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest, UsageGroupBy,
 };
 #[cfg(test)]
 pub(super) use crate::runtime_threads::{RuntimeTurnStatus, TurnItemLifecycleStatus};
@@ -122,6 +122,26 @@ pub struct RuntimeApiState {
     /// lazily-initialized slot; slow per-pool work (connect_all) runs under
     /// the inner handle so it cannot block slot reads.
     mcp_pool: Arc<Mutex<Option<Arc<Mutex<McpPool>>>>>,
+    #[cfg(test)]
+    compat_stream_test_hook: Option<tokio::sync::mpsc::UnboundedSender<CompatStreamTestPoint>>,
+}
+
+#[cfg(test)]
+enum CompatStreamTestPoint {
+    ThreadCreated {
+        thread_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
+    SubscribedBeforeReplay {
+        thread_id: String,
+        turn_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
+    ReplayLoaded {
+        thread_id: String,
+        turn_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -508,6 +528,8 @@ pub async fn run_http_server(
         web,
         fleet_codewhale_binary: configured_codewhale_binary(),
         mcp_pool: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        compat_stream_test_hook: None,
     };
     let app = build_router(state);
 
@@ -1480,6 +1502,11 @@ async fn submit_user_input(
         .submit_user_input(&thread_id, &input_id, response)
         .await
         .map_err(map_thread_err)?;
+    if !delivered {
+        return Err(ApiError::not_found(format!(
+            "no pending user-input request with id '{input_id}'"
+        )));
+    }
     Ok(Json(SubmitUserInputResponse {
         ok: true,
         input_id,
@@ -2012,7 +2039,7 @@ async fn interrupt_thread_turn(
 
 async fn deliver_dynamic_tool_result(
     State(state): State<RuntimeApiState>,
-    Path((id, _turn_id, call_id)): Path<(String, String, String)>,
+    Path((id, turn_id, call_id)): Path<(String, String, String)>,
     Json(result): Json<DynamicToolCallResult>,
 ) -> Result<StatusCode, ApiError> {
     state
@@ -2022,7 +2049,9 @@ async fn deliver_dynamic_tool_result(
         .map_err(map_thread_err)?;
     if state
         .runtime_threads
-        .deliver_dynamic_tool_result(&call_id, result)
+        .deliver_dynamic_tool_result(&id, &turn_id, &call_id, result)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
     {
         Ok(StatusCode::ACCEPTED)
     } else {
@@ -2097,49 +2126,142 @@ async fn stream_thread_events(
         .await
         .map_err(map_thread_err)?;
 
-    let mut backlog = state
-        .runtime_threads
-        .events_since(&id, query.since_seq)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    if let Some(limit) = query.replay_limit
-        && backlog.len() > limit
+    // Subscribe before reading durable history. An event emitted while replay
+    // is loaded is then present in both places (and deduped below) or queued
+    // live, never in an uncovered handoff window.
+    let live = state.runtime_threads.subscribe_events();
+    if query
+        .replay_limit
+        .is_some_and(|limit| limit > MAX_RUNTIME_EVENT_REPLAY_TAIL)
     {
-        backlog = backlog.split_off(backlog.len() - limit);
+        return Err(ApiError::bad_request(format!(
+            "replay_limit cannot exceed {MAX_RUNTIME_EVENT_REPLAY_TAIL}"
+        )));
     }
-    let mut last_seq = query.since_seq.unwrap_or(0);
-    if let Some(last) = backlog.last() {
-        last_seq = last.seq;
-    }
+    let replay = state
+        .runtime_threads
+        .replay_events(&id, query.since_seq, query.replay_limit)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let mut live = state.runtime_threads.subscribe_events();
-    let thread_id = id.clone();
-    let stream = stream! {
-        for event in backlog {
-            let event_name = event.event.clone();
-            yield Ok(sse_json(&event_name, runtime_event_payload(event)));
-        }
-        loop {
-            let incoming = live.recv().await;
-            let Ok(event) = incoming else {
-                break;
-            };
-            if event.thread_id != thread_id {
-                continue;
-            }
-            if event.seq <= last_seq {
-                continue;
-            }
-            last_seq = event.seq;
-            let event_name = event.event.clone();
-            yield Ok(sse_json(&event_name, runtime_event_payload(event)));
-        }
-    };
+    let stream = replay_live_thread_events(
+        state.runtime_threads.clone(),
+        id,
+        replay.base_seq,
+        replay.batches,
+        live,
+    );
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+fn replay_live_thread_events(
+    runtime_threads: SharedRuntimeThreadManager,
+    thread_id: String,
+    mut last_seq: u64,
+    mut backlog: tokio::sync::mpsc::Receiver<
+        std::result::Result<Vec<crate::runtime_threads::RuntimeEventRecord>, String>,
+    >,
+    mut live: tokio::sync::broadcast::Receiver<crate::runtime_threads::RuntimeEventRecord>,
+) -> impl futures_util::Stream<Item = Result<SseEvent, Infallible>> {
+    stream! {
+        while let Some(batch) = backlog.recv().await {
+            let events = match batch {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        last_seq,
+                        %error,
+                        "Failed to replay Runtime web event stream from durable history"
+                    );
+                    return;
+                }
+            };
+            for event in events {
+                if event.thread_id != thread_id || event.seq <= last_seq {
+                    continue;
+                }
+                let previous_seq = last_seq;
+                last_seq = event.seq;
+                let event_name = event.event.clone();
+                yield Ok(sse_json(
+                    &event_name,
+                    runtime_event_payload_with_previous(event, previous_seq),
+                ));
+            }
+        }
+
+        'live: loop {
+            match live.recv().await {
+                Ok(event) => {
+                    if event.thread_id != thread_id || event.seq <= last_seq {
+                        continue;
+                    }
+                    let previous_seq = last_seq;
+                    last_seq = event.seq;
+                    let event_name = event.event.clone();
+                    yield Ok(sse_json(
+                        &event_name,
+                        runtime_event_payload_with_previous(event, previous_seq),
+                    ));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // Broadcast is only a wake-up path; durable history remains
+                    // authoritative. Catch up from the last delivered cursor so
+                    // receiver pressure cannot turn into a silent prompt loss.
+                    let mut recovered = match runtime_threads
+                        .replay_events(&thread_id, Some(last_seq), None)
+                        .await
+                    {
+                        Ok(replay) => replay.batches,
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                last_seq,
+                                skipped,
+                                %error,
+                                "Failed to recover lagged Runtime web event stream from durable history"
+                            );
+                            break 'live;
+                        }
+                    };
+                    while let Some(batch) = recovered.recv().await {
+                        let events = match batch {
+                            Ok(events) => events,
+                            Err(error) => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    last_seq,
+                                    skipped,
+                                    %error,
+                                    "Failed to recover lagged Runtime web event stream from durable history"
+                                );
+                                break 'live;
+                            }
+                        };
+                        for event in events {
+                            if event.thread_id != thread_id || event.seq <= last_seq {
+                                continue;
+                            }
+                            let previous_seq = last_seq;
+                            last_seq = event.seq;
+                            let event_name = event.event.clone();
+                            yield Ok(sse_json(
+                                &event_name,
+                                runtime_event_payload_with_previous(event, previous_seq),
+                            ));
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }
 }
 
 async fn stream_turn(
@@ -2185,6 +2307,19 @@ async fn stream_turn(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to create stream thread: {e}")))?;
 
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::ThreadCreated {
+            thread_id: thread.id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
     let turn = state
         .runtime_threads
         .start_turn(
@@ -2203,15 +2338,49 @@ async fn stream_turn(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to start stream turn: {e}")))?;
 
-    let backlog = state
-        .runtime_threads
-        .events_since(&thread.id, None)
-        .map_err(|e| ApiError::internal(format!("Failed to load stream backlog: {e}")))?;
+    // Subscribe before reading the durable replay. Events produced while the
+    // replay is loaded then exist in at least one source, and the sequence
+    // cursor below removes overlap without dropping the handoff edge.
     let mut live = state.runtime_threads.subscribe_events();
     let thread_id = thread.id.clone();
     let turn_id = turn.id.clone();
 
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::SubscribedBeforeReplay {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
+    let mut backlog = state
+        .runtime_threads
+        .replay_events(&thread.id, None, None)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to load stream backlog: {e}")))?;
+
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::ReplayLoaded {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
     let stream = stream! {
+        let mut last_seq = 0;
         yield Ok(sse_json("turn.started", json!({
             "thread_id": thread.id,
             "turn_id": turn.id,
@@ -2220,43 +2389,149 @@ async fn stream_turn(
             "workspace": workspace,
         })));
 
-        for event in backlog {
-            if event.thread_id != thread_id || event.turn_id.as_deref() != Some(&turn_id) {
-                continue;
-            }
-            if let Some(mapped) = map_compat_stream_event(&event) {
-                yield Ok(mapped);
-            }
-            if event.event == "turn.completed" {
-                yield Ok(sse_json("done", json!({})));
-                return;
+        while let Some(batch) = backlog.batches.recv().await {
+            let events = match batch {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        turn_id = %turn_id,
+                        %error,
+                        "Failed to replay compatibility stream from durable history"
+                    );
+                    yield Ok(sse_json("error", json!({
+                        "message": "failed to replay durable event stream",
+                    })));
+                    return;
+                }
+            };
+            for event in events {
+                let Some((mapped, terminal)) = take_compat_turn_event(
+                    &event,
+                    &thread_id,
+                    &turn_id,
+                    &mut last_seq,
+                ) else {
+                    continue;
+                };
+                if let Some(mapped) = mapped {
+                    yield Ok(mapped);
+                }
+                if terminal {
+                    yield Ok(sse_json("done", json!({})));
+                    return;
+                }
             }
         }
 
         loop {
-            let incoming = live.recv().await;
-            let Ok(event) = incoming else {
-                yield Ok(sse_json("error", json!({ "message": "event channel closed" })));
-                break;
-            };
-            if event.thread_id != thread_id || event.turn_id.as_deref() != Some(&turn_id) {
-                continue;
-            }
-            if let Some(mapped) = map_compat_stream_event(&event) {
-                yield Ok(mapped);
-            }
-            if event.event == "turn.completed" {
-                break;
+            match live.recv().await {
+                Ok(event) => {
+                    let Some((mapped, terminal)) = take_compat_turn_event(
+                        &event,
+                        &thread_id,
+                        &turn_id,
+                        &mut last_seq,
+                    ) else {
+                        continue;
+                    };
+                    if let Some(mapped) = mapped {
+                        yield Ok(mapped);
+                    }
+                    if terminal {
+                        yield Ok(sse_json("done", json!({})));
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let mut recovered = match state.runtime_threads
+                        .replay_events(&thread_id, Some(last_seq), None)
+                        .await
+                    {
+                        Ok(replay) => replay.batches,
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                turn_id = %turn_id,
+                                last_seq,
+                                skipped,
+                                %error,
+                                "Failed to recover lagged compatibility stream from durable history"
+                            );
+                            yield Ok(sse_json("error", json!({
+                                "message": "failed to recover lagged event stream",
+                            })));
+                            return;
+                        }
+                    };
+                    while let Some(batch) = recovered.recv().await {
+                        let events = match batch {
+                            Ok(events) => events,
+                            Err(error) => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    turn_id = %turn_id,
+                                    last_seq,
+                                    skipped,
+                                    %error,
+                                    "Failed to recover lagged compatibility stream from durable history"
+                                );
+                                yield Ok(sse_json("error", json!({
+                                    "message": "failed to recover lagged event stream",
+                                })));
+                                return;
+                            }
+                        };
+                        for event in events {
+                            let Some((mapped, terminal)) = take_compat_turn_event(
+                                &event,
+                                &thread_id,
+                                &turn_id,
+                                &mut last_seq,
+                            ) else {
+                                continue;
+                            };
+                            if let Some(mapped) = mapped {
+                                yield Ok(mapped);
+                            }
+                            if terminal {
+                                yield Ok(sse_json("done", json!({})));
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    yield Ok(sse_json("error", json!({ "message": "event channel closed" })));
+                    return;
+                }
             }
         }
-
-        yield Ok(sse_json("done", json!({})));
     };
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
+    ))
+}
+
+fn take_compat_turn_event(
+    event: &crate::runtime_threads::RuntimeEventRecord,
+    thread_id: &str,
+    turn_id: &str,
+    last_seq: &mut u64,
+) -> Option<(Option<SseEvent>, bool)> {
+    if event.thread_id != thread_id
+        || event.turn_id.as_deref() != Some(turn_id)
+        || event.seq <= *last_seq
+    {
+        return None;
+    }
+    *last_seq = event.seq;
+    Some((
+        map_compat_stream_event(event),
+        event.event == "turn.completed",
     ))
 }
 
@@ -2278,6 +2553,17 @@ fn runtime_event_payload(event: crate::runtime_threads::RuntimeEventRecord) -> s
         extra: Default::default(),
     };
     serde_json::to_value(envelope).expect("serialize runtime event envelope")
+}
+
+fn runtime_event_payload_with_previous(
+    event: crate::runtime_threads::RuntimeEventRecord,
+    previous_seq: u64,
+) -> serde_json::Value {
+    let mut payload = runtime_event_payload(event);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("previous_seq".to_string(), json!(previous_seq));
+    }
+    payload
 }
 
 fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -> Option<SseEvent> {
@@ -2361,9 +2647,99 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 None
             }
         }
-        "approval.required" => Some(sse_json("approval.required", payload.clone())),
-        "approval.decided" => Some(sse_json("approval.decided", payload.clone())),
-        "approval.timeout" => Some(sse_json("approval.timeout", payload.clone())),
+        "approval.required" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.required",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "tool_name": payload.get("tool_name"),
+                    "description": payload.get("description"),
+                    "intent_summary": payload.get("intent_summary"),
+                }),
+            ))
+        }
+        "approval.decided" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.decided",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "decision": payload.get("decision"),
+                    "remember": payload.get("remember"),
+                    "auto": payload.get("auto"),
+                    "timeout": payload.get("timeout"),
+                }),
+            ))
+        }
+        "approval.timeout" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.timeout",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "timeout_secs": payload.get("timeout_secs"),
+                }),
+            ))
+        }
+        "user_input.required" => {
+            let input_id = payload
+                .get("input_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            let request = payload.get("request")?.clone();
+            Some(sse_json(
+                "user_input.required",
+                json!({
+                    "id": input_id,
+                    "input_id": input_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "status": "required",
+                    "request": request,
+                }),
+            ))
+        }
+        "user_input.answered" | "user_input.canceled" => {
+            let input_id = payload
+                .get("input_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            let status = if event.event == "user_input.answered" {
+                "submitted"
+            } else {
+                "canceled"
+            };
+            Some(sse_json(
+                &event.event,
+                json!({
+                    "id": input_id,
+                    "input_id": input_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "status": status,
+                    "terminal": payload.get("terminal").and_then(Value::as_bool).unwrap_or(false),
+                }),
+            ))
+        }
         "sandbox.denied" => Some(sse_json("sandbox.denied", payload.clone())),
         "turn.completed" => {
             let usage = payload

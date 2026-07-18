@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 import {
+  STREAM_EVENT_NAMES,
   applyRuntimeEvent,
   applySnapshot,
   createThreadState,
   eventStreamUrl,
   restoreDraft,
+  runtimeEventContinuity,
   saveDraft,
   setSafeText,
   snapshotThenSubscribe,
@@ -163,6 +165,110 @@ test("reconnect cursor advances monotonically and duplicate or stale-thread even
   assert.equal(eventStreamUrl("thread-a", state.latestSeq), "/v1/threads/thread-a/events?since_seq=8");
 });
 
+test("uses the stream predecessor cursor to detect real gaps without assuming global sequences are contiguous", () => {
+  const state = createThreadState("thread-a");
+  applySnapshot(state, snapshot("thread-a", 7));
+
+  const interleaved = runtimeEvent(
+    12,
+    "item.delta",
+    { delta: " after other threads", kind: "agent_message" },
+    { item_id: "item-1", previous_seq: 7 },
+  );
+  assert.equal(runtimeEventContinuity(state, interleaved), "next");
+  assert.equal(applyRuntimeEvent(state, interleaved), true);
+  assert.equal(state.latestSeq, 12);
+
+  const gap = runtimeEvent(
+    15,
+    "approval.required",
+    { approval_id: "approval-missed", tool_name: "exec_shell" },
+    { previous_seq: 14 },
+  );
+  assert.equal(runtimeEventContinuity(state, gap), "gap");
+  assert.equal(applyRuntimeEvent(state, gap), false);
+  assert.equal(state.latestSeq, 12);
+  assert.equal(state.approvals.has("approval-missed"), false);
+});
+
+test("registers the full emitted Runtime vocabulary and advances continuity for every event", async () => {
+  const runtimeSource = await readFile(
+    new URL("../src/runtime_threads.rs", import.meta.url),
+    "utf8",
+  );
+  const emittedNames = new Set(
+    [...runtimeSource.matchAll(
+      /"((?:thread|turn|item|approval|user_input|sandbox|agent|tool_call)\.[a-z_]+)"/g,
+    )].map((match) => match[1]),
+  );
+  assert.deepEqual(new Set(STREAM_EVENT_NAMES), emittedNames);
+  assert.equal(STREAM_EVENT_NAMES.includes("thread.created"), false);
+
+  const state = createThreadState("thread-a");
+  applySnapshot(state, snapshot("thread-a", 7));
+  let previousSeq = 7;
+  for (const eventName of STREAM_EVENT_NAMES) {
+    const sequence = previousSeq + 2;
+    const envelope = runtimeEvent(sequence, eventName, {}, { previous_seq: previousSeq });
+    assert.equal(runtimeEventContinuity(state, envelope), "next", eventName);
+    assert.equal(applyRuntimeEvent(state, envelope), true, eventName);
+    assert.equal(state.latestSeq, sequence, eventName);
+    previousSeq = sequence;
+  }
+});
+
+test("gap recovery snapshot restores approval and user-input attention before resubscribing", async () => {
+  const state = createThreadState("thread-a");
+  applySnapshot(state, snapshot("thread-a", 7));
+  const subscriptions = [];
+
+  const recovered = await snapshotThenSubscribe({
+    state,
+    threadId: "thread-a",
+    loadSnapshot: async () => ({
+      ...snapshot("thread-a", 15),
+      pending_approvals: [{
+        id: "approval-recovered",
+        turn_id: "turn-1",
+        tool_name: "exec_command",
+        description: "Run a local check",
+      }],
+      pending_user_inputs: [{
+        id: "input-recovered",
+        turn_id: "turn-1",
+        request: { questions: [{ id: "choice", question: "Continue?", options: [] }] },
+      }],
+      pending_dynamic_tool_calls: [{
+        thread_id: "thread-a",
+        turn_id: "turn-1",
+        call_id: "call-recovered",
+        namespace: "bench",
+        tool: "lookup",
+        arguments: { id: "7" },
+      }],
+    }),
+    subscribe: (threadId, sequence) => subscriptions.push([threadId, sequence]),
+  });
+
+  assert.equal(recovered, true);
+  assert.equal(state.approvals.size, 1);
+  assert.equal(state.approvals.has("approval-recovered"), true);
+  assert.equal(state.userInputs.size, 1);
+  assert.equal(state.userInputs.has("input-recovered"), true);
+  assert.equal(state.dynamicToolCalls.size, 1);
+  assert.equal(state.dynamicToolCalls.get("call-recovered").tool, "lookup");
+  assert.deepEqual(subscriptions, [["thread-a", 15]]);
+
+  const duplicate = runtimeEvent(
+    15,
+    "approval.required",
+    { approval_id: "approval-recovered", tool_name: "exec_command" },
+    { previous_seq: 14 },
+  );
+  assert.equal(applyRuntimeEvent(state, duplicate), false);
+  assert.equal(state.approvals.size, 1);
+});
+
 test("assembles deltas and replaces the live item with its settled receipt", () => {
   const state = createThreadState("thread-a");
   applySnapshot(state, { ...snapshot(), items: [], latest_seq: 1 });
@@ -196,6 +302,80 @@ test("assembles deltas and replaces the live item with its settled receipt", () 
   );
   assert.equal(state.items.get("item-new").status, "completed");
   assert.deepEqual(state.itemOrder, ["item-new"]);
+
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(5, "item.delta", { delta: "partial", kind: "tool_call" }, { item_id: "item-stop" }),
+  );
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(
+      6,
+      "item.interrupted",
+      {
+        item: {
+          id: "item-stop",
+          turn_id: "turn-1",
+          kind: "tool_call",
+          status: "interrupted",
+          summary: "Interrupted",
+          detail: "partial",
+        },
+      },
+      { item_id: "item-stop" },
+    ),
+  );
+  assert.equal(state.items.get("item-stop").status, "interrupted");
+  assert.deepEqual(state.itemOrder, ["item-new", "item-stop"]);
+});
+
+test("projects agent lifecycle receipts live and settles them without a snapshot reload", () => {
+  const state = createThreadState("thread-a");
+  applySnapshot(state, { ...snapshot(), items: [], latest_seq: 1 });
+
+  const agentItem = (status, summary) => ({
+    id: "item-agent",
+    turn_id: "turn-1",
+    kind: "status",
+    status,
+    summary,
+    detail: summary,
+  });
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(2, "agent.spawned", { item: agentItem("in_progress", "Agent spawned") }),
+  );
+  assert.equal(state.items.get("item-agent").status, "in_progress");
+  assert.deepEqual(state.itemOrder, ["item-agent"]);
+
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(3, "agent.progress", { item: agentItem("in_progress", "Agent checking") }),
+  );
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(4, "agent.completed", { item: agentItem("completed", "Agent completed") }),
+  );
+  assert.equal(state.items.get("item-agent").status, "completed");
+  assert.equal(state.items.get("item-agent").summary, "Agent completed");
+  assert.deepEqual(state.itemOrder, ["item-agent"]);
+
+  applyRuntimeEvent(
+    state,
+    runtimeEvent(5, "agent.list", {
+      item: {
+        id: "item-agent-list",
+        turn_id: "turn-1",
+        kind: "status",
+        status: "completed",
+        summary: "Agent list refreshed",
+        detail: "Agent list refreshed",
+      },
+    }),
+  );
+  assert.equal(state.items.get("item-agent-list").status, "completed");
+  assert.deepEqual(state.itemOrder, ["item-agent", "item-agent-list"]);
+  assert.equal(state.latestSeq, 5);
 });
 
 test("tracks approval and user-input attention until each is resolved", () => {
@@ -255,6 +435,89 @@ test("hydrates pending attention from a reload snapshot and clears cancellation 
     runtimeEvent(8, "user_input.canceled", { id: "input-reload", terminal: true }),
   );
   assert.equal(state.userInputs.has("input-reload"), false);
+});
+
+test("turn completion defensively clears attention owned by that turn", () => {
+  const state = createThreadState("thread-a");
+  assert.equal(applySnapshot(state, {
+    ...snapshot(),
+    pending_approvals: [{ id: "approval-terminal", turn_id: "turn-1" }],
+    pending_user_inputs: [{ id: "input-terminal", turn_id: "turn-1", request: { questions: [] } }],
+    pending_dynamic_tool_calls: [{ call_id: "call-terminal", turn_id: "turn-1", tool: "lookup" }],
+  }), true);
+  state.approvals.set("approval-other", { id: "approval-other", turn_id: "turn-other" });
+  state.userInputs.set("input-other", { id: "input-other", turn_id: "turn-other" });
+  state.dynamicToolCalls.set("call-other", { call_id: "call-other", turn_id: "turn-other" });
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(8, "turn.completed", { turn: { id: "turn-1", status: "completed" } }),
+  ), true);
+  assert.equal(state.approvals.has("approval-terminal"), false);
+  assert.equal(state.userInputs.has("input-terminal"), false);
+  assert.equal(state.dynamicToolCalls.has("call-terminal"), false);
+  assert.equal(state.approvals.has("approval-other"), true);
+  assert.equal(state.userInputs.has("input-other"), true);
+  assert.equal(state.dynamicToolCalls.has("call-other"), true);
+});
+
+test("dynamic tool calls hydrate and disappear exactly once across terminal variants", () => {
+  const state = createThreadState("thread-a");
+  assert.equal(applySnapshot(state, {
+    ...snapshot(),
+    pending_dynamic_tool_calls: [{
+      thread_id: "thread-a",
+      turn_id: "turn-1",
+      call_id: "call-snapshot",
+      tool: "snapshot_lookup",
+      arguments: { id: "snapshot" },
+    }],
+  }), true);
+  assert.equal(state.dynamicToolCalls.get("call-snapshot").tool, "snapshot_lookup");
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(8, "tool_call.requested", {
+      thread_id: "thread-a",
+      turn_id: "turn-1",
+      call_id: "call-live",
+      tool: "live_lookup",
+      arguments: { id: "live" },
+    }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.size, 2);
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(9, "tool_call.resolved", { call_id: "call-snapshot", status: "resolved" }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.has("call-snapshot"), false);
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(9, "tool_call.resolved", { call_id: "call-snapshot", status: "resolved" }),
+  ), false);
+  assert.equal(state.dynamicToolCalls.size, 1);
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(10, "tool_call.canceled", { call_id: "call-live", status: "canceled" }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.size, 0);
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(11, "tool_call.requested", {
+      call_id: "call-timeout",
+      tool: "slow_lookup",
+      arguments: {},
+    }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.has("call-timeout"), true);
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(12, "tool_call.timeout", { call_id: "call-timeout", status: "timeout" }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.size, 0);
 });
 
 test("preserves drafts per thread without browser storage", () => {

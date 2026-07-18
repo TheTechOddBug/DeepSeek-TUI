@@ -1,6 +1,7 @@
-const STREAM_EVENT_NAMES = [
-  "thread.created",
+export const STREAM_EVENT_NAMES = [
+  "thread.started",
   "thread.updated",
+  "thread.forked",
   "turn.started",
   "turn.lifecycle",
   "turn.steered",
@@ -10,6 +11,7 @@ const STREAM_EVENT_NAMES = [
   "item.delta",
   "item.completed",
   "item.failed",
+  "item.interrupted",
   "approval.required",
   "approval.decided",
   "approval.timeout",
@@ -21,6 +23,10 @@ const STREAM_EVENT_NAMES = [
   "agent.progress",
   "agent.completed",
   "agent.list",
+  "tool_call.requested",
+  "tool_call.resolved",
+  "tool_call.canceled",
+  "tool_call.timeout",
 ];
 
 export function createThreadState(threadId = "") {
@@ -34,6 +40,7 @@ export function createThreadState(threadId = "") {
     latestSeq: 0,
     approvals: new Map(),
     userInputs: new Map(),
+    dynamicToolCalls: new Map(),
   };
 }
 
@@ -68,17 +75,18 @@ export function applySnapshot(state, detail, expectedThreadId = state.threadId) 
     const inputId = input?.input_id || input?.id;
     if (inputId) state.userInputs.set(inputId, input);
   }
+  state.dynamicToolCalls = new Map();
+  for (const call of Array.isArray(detail.pending_dynamic_tool_calls) ? detail.pending_dynamic_tool_calls : []) {
+    if (call?.call_id) state.dynamicToolCalls.set(call.call_id, call);
+  }
   return true;
 }
 
 export function applyRuntimeEvent(state, envelope) {
-  if (!envelope || envelope.thread_id !== state.threadId) {
+  if (runtimeEventContinuity(state, envelope) !== "next") {
     return false;
   }
   const sequence = normalizedSequence(envelope.seq);
-  if (sequence <= state.latestSeq) {
-    return false;
-  }
   state.latestSeq = sequence;
 
   const eventName = envelope.event || envelope.kind || "";
@@ -86,10 +94,16 @@ export function applyRuntimeEvent(state, envelope) {
     ? envelope.payload
     : {};
 
-  if (eventName === "thread.updated" && payload.thread) {
+  if (
+    (eventName === "thread.started" || eventName === "thread.updated" || eventName === "thread.forked")
+    && payload.thread
+  ) {
     state.thread = payload.thread;
   } else if (eventName === "turn.started" || eventName === "turn.completed") {
     if (payload.turn) upsertTurn(state, payload.turn);
+    if (eventName === "turn.completed") {
+      clearTurnAttention(state, envelope.turn_id || payload.turn?.id || "");
+    }
   } else if (eventName === "turn.lifecycle") {
     const turnId = envelope.turn_id;
     const turn = turnId ? state.turns.get(turnId) : null;
@@ -100,24 +114,85 @@ export function applyRuntimeEvent(state, envelope) {
     const turnId = envelope.turn_id;
     const turn = turnId ? state.turns.get(turnId) : null;
     if (turn) state.turns.set(turnId, { ...turn, status: "in_progress" });
-  } else if (eventName === "item.started" || eventName === "item.completed" || eventName === "item.failed") {
+  } else if (
+    eventName === "item.started"
+    || eventName === "item.completed"
+    || eventName === "item.failed"
+    || eventName === "item.interrupted"
+    || eventName === "agent.spawned"
+    || eventName === "agent.progress"
+    || eventName === "agent.completed"
+    || eventName === "agent.list"
+  ) {
     if (payload.item) upsertItem(state, payload.item);
   } else if (eventName === "item.delta") {
     appendItemDelta(state, envelope.item_id, payload);
   } else if (eventName === "approval.required") {
     const approvalId = payload.approval_id || payload.id;
-    if (approvalId) state.approvals.set(approvalId, payload);
+    if (approvalId) {
+      state.approvals.set(approvalId, {
+        ...payload,
+        turn_id: payload.turn_id || envelope.turn_id || "",
+      });
+    }
   } else if (eventName === "approval.decided" || eventName === "approval.timeout") {
     const approvalId = payload.approval_id || payload.id;
     if (approvalId) state.approvals.delete(approvalId);
   } else if (eventName === "user_input.required") {
     const inputId = payload.id;
-    if (inputId) state.userInputs.set(inputId, payload);
+    if (inputId) {
+      state.userInputs.set(inputId, {
+        ...payload,
+        turn_id: payload.turn_id || envelope.turn_id || "",
+      });
+    }
   } else if (eventName === "user_input.answered" || eventName === "user_input.canceled") {
     const inputId = payload.input_id || payload.id;
     if (inputId) state.userInputs.delete(inputId);
+  } else if (eventName === "tool_call.requested") {
+    if (payload.call_id) {
+      state.dynamicToolCalls.set(payload.call_id, {
+        ...payload,
+        turn_id: payload.turn_id || envelope.turn_id || "",
+      });
+    }
+  } else if (
+    eventName === "tool_call.resolved"
+    || eventName === "tool_call.canceled"
+    || eventName === "tool_call.timeout"
+  ) {
+    if (payload.call_id) state.dynamicToolCalls.delete(payload.call_id);
   }
   return true;
+}
+
+function clearTurnAttention(state, turnId) {
+  for (const [id, approval] of state.approvals) {
+    if (!approval?.turn_id || approval.turn_id === turnId) state.approvals.delete(id);
+  }
+  for (const [id, input] of state.userInputs) {
+    if (!input?.turn_id || input.turn_id === turnId) state.userInputs.delete(id);
+  }
+  for (const [id, call] of state.dynamicToolCalls) {
+    if (!call?.turn_id || call.turn_id === turnId) state.dynamicToolCalls.delete(id);
+  }
+}
+
+export function runtimeEventContinuity(state, envelope) {
+  if (!envelope || envelope.thread_id !== state.threadId) {
+    return "ignore";
+  }
+  const sequence = normalizedSequence(envelope.seq);
+  if (sequence <= state.latestSeq) {
+    return "ignore";
+  }
+  if (Object.hasOwn(envelope, "previous_seq")) {
+    const previousSequence = normalizedSequence(envelope.previous_seq);
+    if (previousSequence !== state.latestSeq) {
+      return "gap";
+    }
+  }
+  return "next";
 }
 
 export async function snapshotThenSubscribe({
@@ -366,9 +441,18 @@ function startBrowserClient() {
     app.stream = stream;
     stream.onopen = () => setConnection("ready", "Local runtime connected");
     const receive = (message) => {
-      if (generation !== app.generation || threadId !== app.selectedThreadId) return;
+      if (
+        app.stream !== stream
+        || generation !== app.generation
+        || threadId !== app.selectedThreadId
+      ) return;
       try {
         const envelope = JSON.parse(message.data);
+        if (runtimeEventContinuity(app.threadState, envelope) === "gap") {
+          showStatus("Runtime event continuity changed; refreshing the thread snapshot…");
+          void recoverProjection(threadId, generation, stream);
+          return;
+        }
         if (!applyRuntimeEvent(app.threadState, envelope)) return;
         renderAll(true);
         if (envelope.event === "turn.completed" || envelope.event === "thread.updated") {
@@ -380,8 +464,12 @@ function startBrowserClient() {
     };
     for (const name of STREAM_EVENT_NAMES) stream.addEventListener(name, receive);
     stream.onerror = () => {
+      if (app.stream !== stream) {
+        stream.close();
+        return;
+      }
       stream.close();
-      if (app.stream === stream) app.stream = null;
+      app.stream = null;
       if (generation !== app.generation || threadId !== app.selectedThreadId) return;
       setConnection("", "Reconnecting to local runtime…");
       app.reconnectTimer = setTimeout(
@@ -389,6 +477,42 @@ function startBrowserClient() {
         900,
       );
     };
+  }
+
+  async function recoverProjection(threadId, generation, sourceStream = null) {
+    if (
+      generation !== app.generation
+      || threadId !== app.selectedThreadId
+      || (sourceStream && app.stream !== sourceStream)
+    ) return;
+
+    if (app.stream) app.stream.close();
+    app.stream = null;
+    if (app.reconnectTimer) clearTimeout(app.reconnectTimer);
+    app.reconnectTimer = null;
+    setConnection("", "Refreshing thread snapshot…");
+
+    try {
+      const subscribed = await snapshotThenSubscribe({
+        state: app.threadState,
+        threadId,
+        loadSnapshot: (id) => api(`/v1/threads/${encodeURIComponent(id)}`),
+        subscribe: (id, sequence) => connectStream(id, sequence, generation),
+        isCurrent: () => generation === app.generation && threadId === app.selectedThreadId,
+      });
+      if (!subscribed) return;
+      renderAll();
+      showStatus("");
+      setConnection("ready", "Local runtime connected");
+    } catch (error) {
+      if (generation !== app.generation || threadId !== app.selectedThreadId) return;
+      showStatus(`Could not refresh the thread snapshot: ${error.message}`);
+      setConnection("error", "Runtime recovery failed");
+      app.reconnectTimer = setTimeout(
+        () => recoverProjection(threadId, generation),
+        900,
+      );
+    }
   }
 
   function renderAll(preserveScroll = false) {
