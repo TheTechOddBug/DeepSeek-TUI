@@ -100,6 +100,12 @@ fn whale_roles_are_pinned_and_non_colliding() {
     assert_eq!(palette::WHALE_MODE_YOLO_RGB, (255, 112, 160));
     assert_eq!(palette::WHALE_MODE_PLAN_RGB, (255, 208, 106));
     assert_eq!(palette::WHALE_MODE_OPERATE_RGB, (173, 136, 255));
+    assert_eq!(palette::LIGHT_SUCCESS_FG_RGB, (20, 118, 61));
+    assert_eq!(palette::LIGHT_MODE_AGENT_RGB, (50, 95, 216));
+    assert_eq!(palette::LIGHT_MODE_PLAN_RGB, (123, 85, 0));
+    assert_eq!(palette::LIGHT_OPERATE_RGB, (112, 71, 184));
+    assert_eq!(palette::LIGHT_MODE_YOLO_RGB, (181, 35, 90));
+    assert_eq!(palette::LIGHT_USER_BODY, palette::LIGHT_SUCCESS_FG);
 
     let ui = palette::UI_THEME;
     assert_eq!(ui.accent_primary, palette::WHALE_ACTION);
@@ -235,12 +241,21 @@ fn contrast_guardrails_for_key_ui_pairs() {
         ("human", palette::LIGHT_UI_THEME.accent_action),
         ("warning", palette::LIGHT_UI_THEME.warning),
         ("danger", palette::LIGHT_UI_THEME.error_fg),
+        ("act mode", palette::LIGHT_UI_THEME.mode_agent),
+        ("plan mode", palette::LIGHT_UI_THEME.mode_plan),
         ("operate", palette::LIGHT_UI_THEME.mode_operate),
+        ("full-access mode", palette::LIGHT_UI_THEME.mode_yolo),
         ("success", palette::LIGHT_UI_THEME.success),
+        ("user", palette::LIGHT_USER_BODY),
     ];
     for (background_name, background) in [
         ("surface", palette::LIGHT_SURFACE),
+        ("panel", palette::LIGHT_PANEL),
+        ("raised", palette::LIGHT_ELEVATED),
         ("selection", palette::LIGHT_SELECTION_BG),
+        ("reasoning", palette::LIGHT_REASONING),
+        ("success tint", palette::LIGHT_SUCCESS),
+        ("error tint", palette::LIGHT_ERROR),
     ] {
         for (foreground_name, foreground) in light_foregrounds {
             assert_min_contrast(
@@ -251,4 +266,16 @@ fn contrast_guardrails_for_key_ui_pairs() {
             );
         }
     }
+    assert_min_contrast(
+        "light user row on raised",
+        palette::LIGHT_USER_BODY,
+        palette::LIGHT_ELEVATED,
+        min_readable,
+    );
+    assert_min_contrast(
+        "light work-surface success hover on raised",
+        palette::LIGHT_UI_THEME.success,
+        palette::LIGHT_UI_THEME.elevated_bg,
+        min_readable,
+    );
 }

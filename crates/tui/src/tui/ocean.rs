@@ -404,8 +404,12 @@ mod tests {
             ("human", theme.accent_action),
             ("warning", theme.warning),
             ("danger", theme.error_fg),
+            ("act mode", theme.mode_agent),
+            ("plan mode", theme.mode_plan),
             ("operate", theme.mode_operate),
+            ("full-access mode", theme.mode_yolo),
             ("success", theme.success),
+            ("user", crate::palette::LIGHT_USER_BODY),
         ];
         let backgrounds = [
             ("ocean surface", ramp.surface),

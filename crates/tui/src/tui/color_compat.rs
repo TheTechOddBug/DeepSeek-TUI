@@ -389,6 +389,7 @@ fn adapt_cell_colors(
     theme_id: ThemeId,
     ui_theme: &UiTheme,
 ) {
+    let source_fg = cell.fg;
     // Stage 1: community-theme remap (dark palette → preset slots). No-op
     // for System / Whale / WhaleLight so legacy dark/light flows are
     // untouched. Runs *before* the palette-mode remap so a light terminal
@@ -401,7 +402,7 @@ fn adapt_cell_colors(
     cell.fg = palette::adapt_fg_for_palette_mode(cell.fg, original_bg, palette_mode);
     cell.bg = palette::adapt_bg_for_palette_mode(cell.bg, palette_mode);
     // Stage 3: depth (truecolor / 256 / 16) downsampling.
-    cell.fg = palette::adapt_color(cell.fg, depth);
+    cell.fg = palette::adapt_fg_for_depth(source_fg, cell.fg, depth, ui_theme);
     cell.bg = palette::adapt_bg(cell.bg, depth);
 }
 
@@ -592,6 +593,7 @@ mod tests {
             for (source, expected, role) in [
                 (palette::MODE_AGENT, theme.mode_agent, "agent"),
                 (palette::MODE_PLAN, theme.mode_plan, "plan"),
+                (palette::MODE_OPERATE, theme.mode_operate, "operate"),
                 (palette::MODE_YOLO, theme.mode_yolo, "full access"),
             ] {
                 let mut cell = Cell::default();
@@ -609,6 +611,140 @@ mod tests {
                     "theme '{}' rendered the {role} token through the wrong slot",
                     theme_id.name(),
                 );
+            }
+        }
+    }
+
+    fn rendered_foreground(
+        source: Color,
+        depth: ColorDepth,
+        theme_id: ThemeId,
+        theme: &UiTheme,
+    ) -> Color {
+        let mut cell = Cell::default();
+        cell.set_fg(source);
+        adapt_cell_colors(&mut cell, depth, theme.mode, theme_id, theme);
+        cell.fg
+    }
+
+    #[test]
+    fn grayscale_modes_are_identity_safe_for_raw_and_direct_cells() {
+        let theme = palette::GRAYSCALE_UI_THEME;
+        let roles = [
+            ("act", palette::MODE_AGENT, theme.mode_agent, Color::Blue),
+            ("plan", palette::MODE_PLAN, theme.mode_plan, Color::Magenta),
+            (
+                "operate",
+                palette::MODE_OPERATE,
+                theme.mode_operate,
+                Color::LightMagenta,
+            ),
+            (
+                "full access",
+                palette::MODE_YOLO,
+                theme.mode_yolo,
+                Color::Red,
+            ),
+        ];
+
+        for depth in [
+            ColorDepth::TrueColor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+        ] {
+            let mut outputs = Vec::new();
+            for (name, raw, direct, ansi16) in roles {
+                let expected = if depth == ColorDepth::Ansi16 {
+                    ansi16
+                } else {
+                    palette::adapt_color(direct, depth)
+                };
+                let raw_output = rendered_foreground(raw, depth, ThemeId::Grayscale, &theme);
+                let direct_output = rendered_foreground(direct, depth, ThemeId::Grayscale, &theme);
+                assert_eq!(raw_output, expected, "raw {name} at {depth:?}");
+                assert_eq!(direct_output, expected, "direct {name} at {depth:?}");
+                outputs.push((name, raw_output));
+            }
+            for (index, (left_name, left)) in outputs.iter().enumerate() {
+                for (right_name, right) in outputs.iter().skip(index + 1) {
+                    assert_ne!(
+                        left, right,
+                        "grayscale {depth:?} merged {left_name} and {right_name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ansi16_uses_complete_semantic_role_matrix_for_whale_dark_and_light() {
+        let expected = [
+            ("action", Color::LightBlue),
+            ("live", Color::LightCyan),
+            ("human", Color::LightYellow),
+            ("warning", Color::Yellow),
+            ("danger", Color::LightRed),
+            ("success", Color::LightGreen),
+            ("act mode", Color::Blue),
+            ("plan mode", Color::Magenta),
+            ("operate mode", Color::LightMagenta),
+            ("full-access mode", Color::Red),
+        ];
+        let raw = [
+            palette::WHALE_ACTION,
+            palette::WHALE_LIVE,
+            palette::WHALE_HUMAN,
+            palette::STATUS_WARNING,
+            palette::WHALE_ERROR,
+            palette::STATUS_SUCCESS,
+            palette::MODE_AGENT,
+            palette::MODE_PLAN,
+            palette::MODE_OPERATE,
+            palette::MODE_YOLO,
+        ];
+
+        for (theme_id, theme) in [
+            (ThemeId::Whale, palette::UI_THEME),
+            (ThemeId::WhaleLight, palette::LIGHT_UI_THEME),
+        ] {
+            let direct = [
+                theme.accent_primary,
+                theme.status_working,
+                theme.accent_action,
+                theme.warning,
+                theme.error_fg,
+                theme.success,
+                theme.mode_agent,
+                theme.mode_plan,
+                theme.mode_operate,
+                theme.mode_yolo,
+            ];
+            for (source_kind, sources) in [("raw", raw), ("direct", direct)] {
+                let outputs = sources
+                    .into_iter()
+                    .zip(expected)
+                    .map(|(source, (name, expected_color))| {
+                        let output =
+                            rendered_foreground(source, ColorDepth::Ansi16, theme_id, &theme);
+                        assert_eq!(
+                            output,
+                            expected_color,
+                            "{} {source_kind} {name}",
+                            theme_id.name(),
+                        );
+                        (name, output)
+                    })
+                    .collect::<Vec<_>>();
+                for (index, (left_name, left)) in outputs.iter().enumerate() {
+                    for (right_name, right) in outputs.iter().skip(index + 1) {
+                        assert_ne!(
+                            left,
+                            right,
+                            "{} {source_kind} matrix merged {left_name} and {right_name}",
+                            theme_id.name(),
+                        );
+                    }
+                }
             }
         }
     }

@@ -78,7 +78,7 @@ pub const LIGHT_PANEL_RGB: (u8, u8, u8) = (255, 253, 248); // #FFFDF8
 pub const LIGHT_ELEVATED_RGB: (u8, u8, u8) = (232, 238, 248); // #E8EEF8
 pub const LIGHT_REASONING_RGB: (u8, u8, u8) = (255, 246, 214); // #FFF6D6
 pub const LIGHT_SUCCESS_RGB: (u8, u8, u8) = (223, 247, 231); // #DFF7E7
-pub const LIGHT_SUCCESS_FG_RGB: (u8, u8, u8) = (21, 128, 61); // readable completed / verified foreground
+pub const LIGHT_SUCCESS_FG_RGB: (u8, u8, u8) = (20, 118, 61); // #14763D, readable on every light surface
 pub const LIGHT_ERROR_RGB: (u8, u8, u8) = (252, 235, 242); // #FCEBF2
 pub const LIGHT_TEXT_BODY_RGB: (u8, u8, u8) = (20, 33, 58); // #14213A
 pub const LIGHT_TEXT_MUTED_RGB: (u8, u8, u8) = (91, 103, 128); // #5B6780
@@ -89,6 +89,13 @@ pub const LIGHT_LIVE_RGB: (u8, u8, u8) = (8, 118, 109); // #08766D
 pub const LIGHT_HUMAN_RGB: (u8, u8, u8) = (122, 85, 0); // #7A5500
 pub const LIGHT_WARNING_RGB: (u8, u8, u8) = (169, 71, 36); // #A94724
 pub const LIGHT_DANGER_RGB: (u8, u8, u8) = (180, 35, 90); // #B4235A
+// Mode shades stay in their parent semantic families while remaining distinct
+// inputs to the render backend. A `Cell` carries only a `Color`, so reusing the
+// exact action/human/danger value here would erase the mode role before ANSI
+// adaptation can preserve it.
+pub const LIGHT_MODE_AGENT_RGB: (u8, u8, u8) = (50, 95, 216); // #325FD8
+pub const LIGHT_MODE_YOLO_RGB: (u8, u8, u8) = (181, 35, 90); // #B5235A
+pub const LIGHT_MODE_PLAN_RGB: (u8, u8, u8) = (123, 85, 0); // #7B5500
 pub const LIGHT_OPERATE_RGB: (u8, u8, u8) = (112, 71, 184); // #7047B8
 
 // Solarized Light palette colors
@@ -294,6 +301,21 @@ pub const LIGHT_WARNING: Color = Color::Rgb(
 );
 pub const LIGHT_DANGER: Color =
     Color::Rgb(LIGHT_DANGER_RGB.0, LIGHT_DANGER_RGB.1, LIGHT_DANGER_RGB.2);
+pub const LIGHT_MODE_AGENT: Color = Color::Rgb(
+    LIGHT_MODE_AGENT_RGB.0,
+    LIGHT_MODE_AGENT_RGB.1,
+    LIGHT_MODE_AGENT_RGB.2,
+);
+pub const LIGHT_MODE_YOLO: Color = Color::Rgb(
+    LIGHT_MODE_YOLO_RGB.0,
+    LIGHT_MODE_YOLO_RGB.1,
+    LIGHT_MODE_YOLO_RGB.2,
+);
+pub const LIGHT_MODE_PLAN: Color = Color::Rgb(
+    LIGHT_MODE_PLAN_RGB.0,
+    LIGHT_MODE_PLAN_RGB.1,
+    LIGHT_MODE_PLAN_RGB.2,
+);
 pub const LIGHT_OPERATE: Color = Color::Rgb(
     LIGHT_OPERATE_RGB.0,
     LIGHT_OPERATE_RGB.1,
@@ -408,7 +430,7 @@ pub const TEXT_PRIMARY: Color = TEXT_BODY;
 pub const TEXT_MUTED: Color = TEXT_SECONDARY;
 pub const TEXT_DIM: Color = TEXT_HINT;
 pub const USER_BODY: Color = Color::Rgb(74, 222, 128); // #4ADE80 green
-pub const LIGHT_USER_BODY: Color = Color::Rgb(21, 128, 61); // #15803D green
+pub const LIGHT_USER_BODY: Color = LIGHT_SUCCESS_FG;
 
 // Compatibility semantic colors for UI theming
 pub const BORDER_COLOR: Color =
