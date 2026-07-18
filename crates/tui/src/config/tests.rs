@@ -8013,7 +8013,7 @@ fn xai_oauth_selection_falls_back_to_explicit_api_key_without_external_io() -> R
     let _xai_key = EnvVarGuard::remove("XAI_API_KEY");
 
     let mut providers = ProvidersConfig::default();
-    providers.xai.api_key = Some("xai-api-key".to_string());
+    providers.xai.api_key = Some("fake-xai-cfg-key".to_string());
     providers.xai.auth_mode = Some("oauth".to_string());
     let api_key_config = Config {
         provider: Some("xai".to_string()),
@@ -8022,7 +8022,7 @@ fn xai_oauth_selection_falls_back_to_explicit_api_key_without_external_io() -> R
     };
     crate::external_credentials::reset_side_effect_trap();
     assert!(has_api_key_for(&api_key_config, ApiProvider::Xai));
-    assert_eq!(api_key_config.deepseek_api_key()?, "xai-api-key");
+    assert_eq!(api_key_config.deepseek_api_key()?, "fake-xai-cfg-key");
     assert_eq!(
         crate::external_credentials::side_effect_trap_counts(),
         (0, 0)
@@ -8031,6 +8031,50 @@ fn xai_oauth_selection_falls_back_to_explicit_api_key_without_external_io() -> R
     fs::write(&auth_path, "{}")?;
     assert!(!has_api_key_for(&Config::default(), ApiProvider::Xai));
     fs::remove_dir_all(temp_root)?;
+    Ok(())
+}
+
+#[test]
+fn xai_invalid_owned_generation_blocks_external_and_uses_api_key_fallback() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let root = root.path().canonicalize()?;
+    let external_path = root.join("grok-auth.json");
+    let external_raw = r#"{"token":"external-owner-bytes-must-not-be-read"}"#;
+    fs::write(&external_path, external_raw)?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", &root);
+    let _auth_path = EnvVarGuard::set("GROK_AUTH_PATH", &external_path);
+    let _xai_key = EnvVarGuard::remove("XAI_API_KEY");
+    let _xai_base_url = EnvVarGuard::remove("XAI_BASE_URL");
+
+    let mut providers = ProvidersConfig::default();
+    providers.xai.api_key = Some("fake-xai-cfg-key".to_string());
+    providers.xai.auth_mode = Some("oauth".to_string());
+    providers.xai.oauth_credential_generation = Some("../unsafe.json".to_string());
+    providers.xai.external_credentials =
+        Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+            codewhale_config::ProviderKind::Xai,
+            codewhale_config::ExternalCredentialSource::GrokCli,
+            external_path.clone(),
+        ));
+    let config = Config {
+        provider: Some(ApiProvider::Xai.as_str().to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+
+    crate::external_credentials::reset_side_effect_trap();
+    assert!(
+        !crate::xai_oauth::credentials_present(&config),
+        "an invalid owned generation pointer must not resolve external OAuth"
+    );
+    assert_eq!(config.deepseek_api_key()?, "fake-xai-cfg-key");
+    assert_eq!(
+        crate::external_credentials::side_effect_trap_counts(),
+        (0, 0),
+        "an unusable owned generation must not access the external Grok CLI"
+    );
+    assert_eq!(fs::read_to_string(external_path)?, external_raw);
     Ok(())
 }
 

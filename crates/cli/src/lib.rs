@@ -18,7 +18,7 @@ use codewhale_app_server::{
 };
 use codewhale_config::{
     CliRuntimeOverrides, ConfigStore, ConfigToml, ProviderKind, ProviderSource,
-    ResolvedRuntimeOptions, RuntimeApiKeySource,
+    ResolvedRuntimeOptions, RuntimeApiKeySource, provider_base_url_is_official,
 };
 use codewhale_execpolicy::{AskForApproval, ExecPolicyContext, ExecPolicyEngine};
 use codewhale_mcp::{McpServerDefinition, run_stdio_server};
@@ -1361,7 +1361,7 @@ enum AuthCommand {
         #[arg(long, value_enum)]
         provider: ProviderArg,
     },
-    /// Show current provider and credential source state.
+    /// Show current provider and runtime-effective credential route state.
     /// Without `--provider`, shows all known providers.
     /// With `--provider`, shows detailed status for that provider.
     Status {
@@ -1382,8 +1382,8 @@ enum AuthCommand {
         #[arg(long = "api-key-stdin", default_value_t = false)]
         api_key_stdin: bool,
     },
-    /// Report whether a provider has a key configured. Never prints
-    /// the value; just `set` / `not set` plus the source layer.
+    /// Report the effective credential route for a provider. Never prints a
+    /// credential; reports the source layer or structural OAuth/repair state.
     Get {
         #[arg(long, value_enum)]
         provider: ProviderArg,
@@ -1393,8 +1393,8 @@ enum AuthCommand {
         #[arg(long, value_enum)]
         provider: ProviderArg,
     },
-    /// List all known providers with their auth state, without
-    /// revealing keys.
+    /// List all known providers with their runtime-effective auth state,
+    /// without revealing credentials.
     List,
     /// Advanced: migrate config-file keys into a platform credential store.
     #[command(hide = true)]
@@ -1738,7 +1738,7 @@ fn run() -> Result<()> {
                     vec!["auth".to_string(), "xai-device".to_string()],
                 )
             }
-            command => run_auth_command(&mut store, command),
+            command => run_auth_command_with_runtime(&mut store, command, &runtime_overrides),
         },
         Some(Commands::McpServer) => run_mcp_server_command(&mut store),
         Some(Commands::Config(args)) => run_config_command(&mut store, args.command),
@@ -2221,13 +2221,9 @@ fn external_read_consent(
     store: &ConfigStore,
     provider: ProviderKind,
 ) -> Option<&codewhale_config::ExternalCredentialConsentToml> {
-    let source = match provider {
-        ProviderKind::OpenaiCodex => codewhale_config::ExternalCredentialSource::CodexCli,
-        ProviderKind::Xai => codewhale_config::ExternalCredentialSource::GrokCli,
-        _ => return None,
-    };
+    let (source, expected_path) = external_credential_target(provider, None).ok()?;
     external_consent(store, provider)
-        .filter(|consent| consent.read_grant(provider, source, &consent.path).is_ok())
+        .filter(|consent| consent.read_grant(provider, source, &expected_path).is_ok())
 }
 
 fn external_oauth_selected(store: &ConfigStore, provider: ProviderKind) -> bool {
@@ -2238,32 +2234,430 @@ fn external_oauth_selected(store: &ConfigStore, provider: ProviderKind) -> bool 
         return true;
     }
     provider == ProviderKind::Xai
-        && store
-            .config
-            .providers
-            .xai
-            .auth_mode
-            .as_deref()
-            .is_some_and(|mode| {
-                matches!(
-                    mode.trim()
-                        .to_ascii_lowercase()
-                        .replace(['-', ' '], "_")
-                        .as_str(),
-                    "oauth"
-                        | "xai_oauth"
-                        | "xai"
-                        | "grok"
-                        | "grok_oauth"
-                        | "grok_cli"
-                        | "device"
-                        | "device_code"
-                        | "device_auth"
-                )
-            })
+        && xai_oauth_mode_selected(store.config.providers.xai.auth_mode.as_deref())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XaiOAuthGenerationPointer {
+    Absent,
+    Valid,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XaiAuthDiagnosticRoute {
+    /// Normal API-key diagnostics apply. This includes custom endpoints, where
+    /// xAI OAuth is intentionally inactive.
+    ApiKey,
+    /// A syntactically valid Codewhale-owned generation pointer selects the
+    /// owned OAuth route. Diagnostics deliberately do not inspect the file.
+    OwnedOAuth,
+    /// A configured but unsafe/malformed generation pointer blocks external
+    /// Grok CLI access. The runtime can still fall back to API-key sources.
+    NeedsRepair,
+    /// With no configured generation, an exact read-only Grok CLI consent can
+    /// be selected structurally. The external file is never probed here.
+    ExternalConsent,
+}
+
+#[derive(Debug, Clone)]
+struct XaiAuthDiagnostics {
+    base_url: String,
+    official_endpoint: bool,
+    auth_mode: Option<String>,
+    oauth_selected: bool,
+    generation: XaiOAuthGenerationPointer,
+    route: XaiAuthDiagnosticRoute,
+}
+
+impl XaiAuthDiagnostics {
+    /// API-key routes are reported from the same endpoint-bound resolver that
+    /// dispatch uses. Owned OAuth and consent-only routes remain structural so
+    /// diagnostics cannot turn into a credential-store probe.
+    fn evaluates_runtime_api_key(&self) -> bool {
+        matches!(
+            self.route,
+            XaiAuthDiagnosticRoute::ApiKey | XaiAuthDiagnosticRoute::NeedsRepair
+        )
+    }
+
+    fn is_custom_endpoint(&self) -> bool {
+        !self.official_endpoint
+    }
+}
+
+/// Source and redacted tail from the shared runtime resolver. Keeping only a
+/// redacted tail prevents the presentation layer from accidentally retaining a
+/// plaintext credential after it has derived the effective route.
+#[derive(Debug, Clone, Default)]
+struct XaiRuntimeApiKey {
+    source: Option<RuntimeApiKeySource>,
+    last4: Option<String>,
+}
+
+impl XaiRuntimeApiKey {
+    fn source_name(&self) -> Option<&'static str> {
+        match self.source {
+            Some(RuntimeApiKeySource::Cli) => Some("cli"),
+            Some(RuntimeApiKeySource::ConfigFile) => Some("config"),
+            Some(RuntimeApiKeySource::Keyring) => Some("secret store"),
+            Some(RuntimeApiKeySource::Env) => Some("env"),
+            None => None,
+        }
+    }
+
+    fn source_with_last4(&self) -> Option<String> {
+        self.source_name()
+            .map(|source| match self.last4.as_deref() {
+                Some(last4) => format!("{source} (last4: {last4})"),
+                None => source.to_string(),
+            })
+    }
+
+    fn uses(&self, source: RuntimeApiKeySource) -> bool {
+        self.source == Some(source)
+    }
+}
+
+fn runtime_overrides_for_provider(
+    runtime_overrides: &CliRuntimeOverrides,
+    provider: ProviderKind,
+) -> CliRuntimeOverrides {
+    let mut overrides = runtime_overrides.clone();
+    overrides.provider = Some(provider);
+    overrides
+}
+
+fn xai_oauth_mode_selected(auth_mode: Option<&str>) -> bool {
+    auth_mode.is_some_and(|mode| {
+        matches!(
+            mode.trim()
+                .to_ascii_lowercase()
+                .replace(['-', ' '], "_")
+                .as_str(),
+            "oauth"
+                | "xai_oauth"
+                | "xai"
+                | "grok"
+                | "grok_oauth"
+                | "grok_cli"
+                | "device"
+                | "device_code"
+                | "device_auth"
+        )
+    })
+}
+
+fn xai_oauth_generation_pointer(store: &ConfigStore) -> XaiOAuthGenerationPointer {
+    match store
+        .config
+        .providers
+        .xai
+        .oauth_credential_generation
+        .as_deref()
+    {
+        None => XaiOAuthGenerationPointer::Absent,
+        Some(generation) if codewhale_config::is_valid_xai_oauth_generation(generation) => {
+            XaiOAuthGenerationPointer::Valid
+        }
+        Some(_) => XaiOAuthGenerationPointer::Invalid,
+    }
+}
+
+/// Resolve the same xAI route facts the runtime uses, without asking the
+/// durable credential store for a secret. `ConfigToml::resolve_runtime_options`
+/// deliberately uses an in-memory store, so this is safe for diagnostic output
+/// that must remain structural/non-probing.
+fn xai_auth_diagnostics(
+    store: &ConfigStore,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> XaiAuthDiagnostics {
+    // We only need the effective endpoint here. Suppressing API-key
+    // resolution keeps valid-owned and consent-only diagnostics structural:
+    // they must not read ambient credential state merely to describe a route.
+    let mut route_overrides = runtime_overrides_for_provider(runtime_overrides, ProviderKind::Xai);
+    route_overrides.api_key = None;
+    route_overrides.auth_mode = Some("none".to_string());
+    let resolved = store.config.resolve_runtime_options(&route_overrides);
+    let official_endpoint =
+        provider_base_url_is_official(ProviderKind::Xai, resolved.base_url.as_str());
+    // The TUI activates xAI OAuth only from `[providers.xai] auth_mode`; a
+    // root-level auth mode may influence generic API-key policy but must never
+    // turn an inert xAI generation pointer into an OAuth route.
+    let auth_mode = store.config.providers.xai.auth_mode.clone();
+    let generation = xai_oauth_generation_pointer(store);
+    let oauth_selected = xai_oauth_mode_selected(auth_mode.as_deref());
+    let route = if !official_endpoint || !oauth_selected {
+        XaiAuthDiagnosticRoute::ApiKey
+    } else {
+        match generation {
+            XaiOAuthGenerationPointer::Valid => XaiAuthDiagnosticRoute::OwnedOAuth,
+            XaiOAuthGenerationPointer::Invalid => XaiAuthDiagnosticRoute::NeedsRepair,
+            XaiOAuthGenerationPointer::Absent
+                if external_read_consent(store, ProviderKind::Xai).is_some() =>
+            {
+                XaiAuthDiagnosticRoute::ExternalConsent
+            }
+            XaiOAuthGenerationPointer::Absent => XaiAuthDiagnosticRoute::ApiKey,
+        }
+    };
+
+    XaiAuthDiagnostics {
+        base_url: resolved.base_url,
+        official_endpoint,
+        auth_mode,
+        oauth_selected,
+        generation,
+        route,
+    }
+}
+
+/// Return the API-key route exactly as the dispatcher would resolve it. This
+/// is the critical distinction for a global `--base-url` or `XAI_BASE_URL`:
+/// official-provider config, keyring, and ambient keys must not cross onto an
+/// unrelated custom endpoint.
+fn xai_runtime_api_key(
+    store: &ConfigStore,
+    secrets: &Secrets,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> XaiRuntimeApiKey {
+    let resolved = store.config.resolve_runtime_options_with_secrets(
+        &runtime_overrides_for_provider(runtime_overrides, ProviderKind::Xai),
+        secrets,
+    );
+    debug_assert_eq!(resolved.provider, ProviderKind::Xai);
+    XaiRuntimeApiKey {
+        source: resolved.api_key_source,
+        last4: resolved.api_key.as_deref().map(last4_label),
+    }
+}
+
+fn api_key_source_name(
+    config_key: Option<&str>,
+    keyring_key: Option<&str>,
+    env_key: Option<&(&'static str, String)>,
+) -> Option<&'static str> {
+    if config_key.is_some() {
+        Some("config")
+    } else if keyring_key.is_some() {
+        Some("secret store")
+    } else if env_key.is_some() {
+        Some("env")
+    } else {
+        None
+    }
+}
+
+fn xai_status_summary_source(
+    diagnostics: &XaiAuthDiagnostics,
+    api_key: Option<&XaiRuntimeApiKey>,
+) -> String {
+    match diagnostics.route {
+        XaiAuthDiagnosticRoute::OwnedOAuth => {
+            "Codewhale-owned OAuth configured/unprobed (valid generation pointer)".to_string()
+        }
+        XaiAuthDiagnosticRoute::NeedsRepair => {
+            let api_key = api_key
+                .and_then(XaiRuntimeApiKey::source_name)
+                .unwrap_or("no runtime-effective API key");
+            format!("needs repair (invalid OAuth generation pointer; API-key fallback: {api_key})")
+        }
+        XaiAuthDiagnosticRoute::ExternalConsent => {
+            "external consent configured/unprobed".to_string()
+        }
+        XaiAuthDiagnosticRoute::ApiKey => api_key
+            .and_then(XaiRuntimeApiKey::source_name)
+            .unwrap_or("unset")
+            .to_string(),
+    }
+}
+
+fn xai_credential_route_label(
+    diagnostics: &XaiAuthDiagnostics,
+    api_key: Option<&XaiRuntimeApiKey>,
+) -> String {
+    match diagnostics.route {
+        XaiAuthDiagnosticRoute::OwnedOAuth => {
+            "Codewhale-owned OAuth configured/unprobed (valid generation pointer; storage unprobed)"
+                .to_string()
+        }
+        XaiAuthDiagnosticRoute::NeedsRepair => {
+            let api_key = api_key
+                .and_then(XaiRuntimeApiKey::source_with_last4)
+                .unwrap_or_else(|| "no runtime-effective API key".to_string());
+            format!(
+                "xAI OAuth needs repair (invalid Codewhale-owned generation pointer; Grok CLI consent blocked; API-key fallback: {api_key})"
+            )
+        }
+        XaiAuthDiagnosticRoute::ExternalConsent => {
+            "external read-only consent configured/unprobed".to_string()
+        }
+        XaiAuthDiagnosticRoute::ApiKey => api_key
+            .and_then(XaiRuntimeApiKey::source_with_last4)
+            .unwrap_or_else(|| "missing".to_string()),
+    }
+}
+
+fn xai_table_storage_status(
+    api_key: Option<&XaiRuntimeApiKey>,
+    source: RuntimeApiKeySource,
+) -> &'static str {
+    match api_key {
+        Some(api_key) if api_key.uses(source) => "set",
+        Some(_) => "-",
+        // The selected structural OAuth/consent route intentionally does not
+        // establish whether any API-key storage is populated.
+        None => "unprobed",
+    }
+}
+
+fn xai_list_storage_status(
+    api_key: Option<&XaiRuntimeApiKey>,
+    source: RuntimeApiKeySource,
+) -> &'static str {
+    match api_key {
+        Some(api_key) if api_key.uses(source) => "yes",
+        Some(_) => "no",
+        None => "?",
+    }
+}
+
+fn xai_list_route(
+    diagnostics: &XaiAuthDiagnostics,
+    api_key: Option<&XaiRuntimeApiKey>,
+) -> &'static str {
+    match diagnostics.route {
+        XaiAuthDiagnosticRoute::OwnedOAuth => "owned-oauth-configured",
+        XaiAuthDiagnosticRoute::NeedsRepair => "needs-repair",
+        XaiAuthDiagnosticRoute::ExternalConsent => "external-consent-configured",
+        XaiAuthDiagnosticRoute::ApiKey => match api_key.and_then(|api_key| api_key.source) {
+            Some(RuntimeApiKeySource::Cli) => "cli",
+            Some(RuntimeApiKeySource::ConfigFile) => "config",
+            Some(RuntimeApiKeySource::Keyring) => "store",
+            Some(RuntimeApiKeySource::Env) => "env",
+            None => "missing",
+        },
+    }
+}
+
+fn xai_storage_detail(
+    diagnostics: &XaiAuthDiagnostics,
+    api_key: Option<&XaiRuntimeApiKey>,
+    source: RuntimeApiKeySource,
+) -> String {
+    match api_key {
+        Some(api_key) if api_key.uses(source) => api_key
+            .last4
+            .as_deref()
+            .map(|last4| format!("runtime-effective, last4: {last4}"))
+            .unwrap_or_else(|| "runtime-effective".to_string()),
+        Some(_) if diagnostics.is_custom_endpoint() => {
+            "not eligible for this custom xAI endpoint".to_string()
+        }
+        Some(_) => "not selected by the runtime resolver".to_string(),
+        None if diagnostics.evaluates_runtime_api_key() && diagnostics.is_custom_endpoint() => {
+            "not eligible for this custom xAI endpoint".to_string()
+        }
+        None if diagnostics.evaluates_runtime_api_key() => {
+            "not set for this runtime route".to_string()
+        }
+        None => "unprobed (structural OAuth/consent route)".to_string(),
+    }
+}
+
+fn xai_lookup_order(diagnostics: &XaiAuthDiagnostics) -> String {
+    match diagnostics.route {
+        XaiAuthDiagnosticRoute::OwnedOAuth => {
+            "lookup order: configured Codewhale-owned OAuth generation (storage unprobed); Grok CLI consent blocked".to_string()
+        }
+        XaiAuthDiagnosticRoute::NeedsRepair => {
+            "lookup order: invalid Codewhale-owned OAuth generation blocks Grok CLI consent; runtime-effective API-key fallback: CLI -> config -> secret store -> env".to_string()
+        }
+        XaiAuthDiagnosticRoute::ExternalConsent => {
+            "lookup order: configured consent-gated exact Grok CLI file (availability unprobed)".to_string()
+        }
+        XaiAuthDiagnosticRoute::ApiKey if diagnostics.is_custom_endpoint() => {
+            "lookup order: endpoint-bound API key only for this custom xAI endpoint (explicit CLI key or route-bound config key)".to_string()
+        }
+        XaiAuthDiagnosticRoute::ApiKey => {
+            "lookup order: CLI -> config -> secret store -> env".to_string()
+        }
+    }
+}
+
+fn xai_get_line(diagnostics: &XaiAuthDiagnostics, api_key: Option<&XaiRuntimeApiKey>) -> String {
+    match diagnostics.route {
+        XaiAuthDiagnosticRoute::OwnedOAuth => {
+            "xai: configured (source: Codewhale-owned OAuth generation; valid pointer; storage unprobed)".to_string()
+        }
+        XaiAuthDiagnosticRoute::NeedsRepair => {
+            let api_key = match api_key.and_then(XaiRuntimeApiKey::source_name) {
+                Some("config") => "config-file".to_string(),
+                Some("secret store") => "secret-store".to_string(),
+                Some("env") => "env".to_string(),
+                Some("cli") => "cli".to_string(),
+                Some(other) => other.to_string(),
+                None => "no runtime-effective API key".to_string(),
+            };
+            format!(
+                "xai: needs repair (invalid Codewhale-owned OAuth generation pointer; Grok CLI consent blocked; API-key fallback: {api_key})"
+            )
+        }
+        XaiAuthDiagnosticRoute::ExternalConsent => {
+            "xai: configured (source: external read-only consent; availability unprobed)".to_string()
+        }
+        XaiAuthDiagnosticRoute::ApiKey => match api_key.and_then(XaiRuntimeApiKey::source_name) {
+                Some("config") => "xai: set (source: config-file)".to_string(),
+                Some("secret store") => "xai: set (source: secret-store)".to_string(),
+                Some("env") => "xai: set (source: env)".to_string(),
+                Some("cli") => "xai: set (source: cli)".to_string(),
+                Some(other) => format!("xai: set (source: {other})"),
+                None => "xai: not set".to_string(),
+            },
+    }
+}
+
+fn auth_get_line_with_runtime(
+    store: &ConfigStore,
+    secrets: &Secrets,
+    provider: ProviderKind,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> String {
+    let slot = provider_slot(provider);
+    if provider == ProviderKind::Xai {
+        let diagnostics = xai_auth_diagnostics(store, runtime_overrides);
+        let api_key = diagnostics
+            .evaluates_runtime_api_key()
+            .then(|| xai_runtime_api_key(store, secrets, runtime_overrides));
+        return xai_get_line(&diagnostics, api_key.as_ref());
+    }
+
+    let config_key = provider_config_api_key(store, provider);
+    let keyring_key = config_key
+        .is_none()
+        .then(|| provider_keyring_api_key(secrets, provider))
+        .flatten();
+    let env_key = provider_env_value(provider);
+
+    match api_key_source_name(config_key, keyring_key.as_deref(), env_key.as_ref()) {
+        Some("config") => format!("{slot}: set (source: config-file)"),
+        Some("secret store") => format!("{slot}: set (source: secret-store)"),
+        Some("env") => format!("{slot}: set (source: env)"),
+        Some(other) => format!("{slot}: set (source: {other})"),
+        None => format!("{slot}: not set"),
+    }
+}
+
+#[cfg(test)]
 fn auth_status_all_providers(store: &ConfigStore, secrets: &Secrets) -> Vec<String> {
+    auth_status_all_providers_with_runtime(store, secrets, &CliRuntimeOverrides::default())
+}
+
+fn auth_status_all_providers_with_runtime(
+    store: &ConfigStore,
+    secrets: &Secrets,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> Vec<String> {
     let active_provider = store.config.provider;
     let mut lines = Vec::new();
     lines.push(format!(
@@ -2278,6 +2672,28 @@ fn auth_status_all_providers(store: &ConfigStore, secrets: &Secrets) -> Vec<Stri
     lines.push("-".repeat(70));
 
     for provider in ProviderKind::ALL {
+        if provider == ProviderKind::Xai {
+            let diagnostics = xai_auth_diagnostics(store, runtime_overrides);
+            let api_key = diagnostics
+                .evaluates_runtime_api_key()
+                .then(|| xai_runtime_api_key(store, secrets, runtime_overrides));
+            let active_marker = if provider == active_provider {
+                " *"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "{:<14} {:<8} {:<10} {:<8} {}{}",
+                provider.as_str(),
+                xai_table_storage_status(api_key.as_ref(), RuntimeApiKeySource::ConfigFile),
+                xai_table_storage_status(api_key.as_ref(), RuntimeApiKeySource::Keyring),
+                xai_table_storage_status(api_key.as_ref(), RuntimeApiKeySource::Env),
+                xai_status_summary_source(&diagnostics, api_key.as_ref()),
+                active_marker
+            ));
+            continue;
+        }
+
         let config_key = provider_config_api_key(store, provider);
         let keyring_key = provider_keyring_api_key(secrets, provider);
         let env_key = provider_env_value(provider);
@@ -2292,22 +2708,22 @@ fn auth_status_all_providers(store: &ConfigStore, secrets: &Secrets) -> Vec<Stri
             // OAuth-file (or env token) based — config/keyring keys are not
             // consulted for it.
             if env_key.is_some() {
-                "env"
+                "env".to_string()
             } else if external_selected {
-                "external consent (not probed)"
+                "external consent (not probed)".to_string()
             } else {
-                "unset"
+                "unset".to_string()
             }
         } else if external_selected {
-            "external consent (not probed)"
+            "external consent (not probed)".to_string()
         } else if config_key.is_some() {
-            "config"
+            "config".to_string()
         } else if keyring_key.is_some() {
-            "keyring"
+            "keyring".to_string()
         } else if env_key.is_some() {
-            "env"
+            "env".to_string()
         } else {
-            "unset"
+            "unset".to_string()
         };
 
         let active_marker = if provider == active_provider {
@@ -2333,11 +2749,35 @@ fn auth_status_all_providers(store: &ConfigStore, secrets: &Secrets) -> Vec<Stri
     lines
 }
 
+#[cfg(test)]
 fn auth_list_lines(store: &ConfigStore, secrets: &Secrets) -> Vec<String> {
+    auth_list_lines_with_runtime(store, secrets, &CliRuntimeOverrides::default())
+}
+
+fn auth_list_lines_with_runtime(
+    store: &ConfigStore,
+    secrets: &Secrets,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push("provider     config store env  active".to_string());
+    lines.push("provider     config store env  route".to_string());
     for provider in ProviderKind::ALL {
         let slot = provider_slot(provider);
+        if provider == ProviderKind::Xai {
+            let diagnostics = xai_auth_diagnostics(store, runtime_overrides);
+            let api_key = diagnostics
+                .evaluates_runtime_api_key()
+                .then(|| xai_runtime_api_key(store, secrets, runtime_overrides));
+            lines.push(format!(
+                "{slot:<12}  {}     {}      {}   {}",
+                xai_list_storage_status(api_key.as_ref(), RuntimeApiKeySource::ConfigFile),
+                xai_list_storage_status(api_key.as_ref(), RuntimeApiKeySource::Keyring),
+                xai_list_storage_status(api_key.as_ref(), RuntimeApiKeySource::Env),
+                xai_list_route(&diagnostics, api_key.as_ref())
+            ));
+            continue;
+        }
+
         let file = provider_config_set(store, provider);
         let keyring = (!file).then(|| provider_keyring_set(secrets, provider));
         let env = provider_env_set(provider);
@@ -2371,47 +2811,68 @@ fn auth_list_lines(store: &ConfigStore, secrets: &Secrets) -> Vec<String> {
     lines
 }
 
+#[cfg(test)]
 fn auth_status_lines_for_provider(
     store: &ConfigStore,
     secrets: &Secrets,
     provider: ProviderKind,
 ) -> Vec<String> {
+    auth_status_lines_for_provider_with_runtime(
+        store,
+        secrets,
+        provider,
+        &CliRuntimeOverrides::default(),
+    )
+}
+
+fn auth_status_lines_for_provider_with_runtime(
+    store: &ConfigStore,
+    secrets: &Secrets,
+    provider: ProviderKind,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> Vec<String> {
+    if provider == ProviderKind::Xai {
+        return xai_auth_status_lines_for_provider(store, secrets, runtime_overrides);
+    }
+
     let config_key = provider_config_api_key(store, provider);
     let keyring_key = provider_keyring_api_key(secrets, provider);
     let env_key = provider_env_value(provider);
     let external = external_consent(store, provider);
     let external_selected = external_oauth_selected(store, provider);
 
-    let active_source = if provider == ProviderKind::OpenaiCodex {
-        if env_key.is_some() {
-            "env"
+    let active_label = {
+        let active_source = if provider == ProviderKind::OpenaiCodex {
+            if env_key.is_some() {
+                "env"
+            } else if external_selected {
+                "external read-only consent (availability not probed)"
+            } else {
+                "missing"
+            }
         } else if external_selected {
             "external read-only consent (availability not probed)"
+        } else if config_key.is_some() {
+            "config"
+        } else if keyring_key.is_some() {
+            "secret store"
+        } else if env_key.is_some() {
+            "env"
         } else {
             "missing"
-        }
-    } else if external_selected {
-        "external read-only consent (availability not probed)"
-    } else if config_key.is_some() {
-        "config"
-    } else if keyring_key.is_some() {
-        "secret store"
-    } else if env_key.is_some() {
-        "env"
-    } else {
-        "missing"
+        };
+        let active_last4 = if provider == ProviderKind::OpenaiCodex {
+            env_key.as_ref().map(|(_, value)| last4_label(value))
+        } else {
+            config_key
+                .map(last4_label)
+                .or_else(|| keyring_key.as_deref().map(last4_label))
+                .or_else(|| env_key.as_ref().map(|(_, value)| last4_label(value)))
+        };
+        active_last4
+            .map(|last4| format!("{active_source} (last4: {last4})"))
+            .unwrap_or_else(|| active_source.to_string())
     };
-    let active_last4 = if provider == ProviderKind::OpenaiCodex {
-        env_key.as_ref().map(|(_, value)| last4_label(value))
-    } else {
-        config_key
-            .map(last4_label)
-            .or_else(|| keyring_key.as_deref().map(last4_label))
-            .or_else(|| env_key.as_ref().map(|(_, value)| last4_label(value)))
-    };
-    let active_label = active_last4
-        .map(|last4| format!("{active_source} (last4: {last4})"))
-        .unwrap_or_else(|| active_source.to_string());
 
     let env_var_label = env_key
         .as_ref()
@@ -2431,19 +2892,18 @@ fn auth_status_lines_for_provider(
 
     let lookup_order = if provider == ProviderKind::OpenaiCodex {
         "lookup order: env -> consent-gated exact Codex CLI file".to_string()
-    } else if provider == ProviderKind::Xai && external_selected {
-        "lookup order: Codewhale-owned OAuth -> consent-gated exact Grok CLI file -> API key fallback".to_string()
     } else {
         "lookup order: config -> secret store -> env".to_string()
     };
     let auth_mode = if provider == ProviderKind::OpenaiCodex {
-        "codex_oauth"
+        "codex_oauth".to_string()
     } else {
         provider_cfg
             .auth_mode
             .as_deref()
             .or(store.config.auth_mode.as_deref())
             .unwrap_or("api_key")
+            .to_string()
     };
 
     let mut lines = vec![
@@ -2465,10 +2925,152 @@ fn auth_status_lines_for_provider(
         ),
         format!("env var: {env_var_label} ({env_status})"),
     ];
+
     if let Ok((source, expected_path)) = external_credential_target(provider, None) {
         let status = codewhale_config::external_credential_consent_status(
             external,
             provider,
+            source,
+            &expected_path,
+            store.config.provider,
+        );
+        lines.push(format!(
+            "external credentials: {} (provider={}, source={}, owner={}, path={}, consent_version={}, state={}, scope_valid={}, ambient_path_changed={}; file not probed)",
+            status.access.as_str(),
+            status.provider,
+            status.source.as_str(),
+            status.owner,
+            codewhale_config::quote_os_path(&status.path),
+            status.consent_version,
+            status.route_state,
+            status.scope_valid,
+            status.ambient_path_changed,
+        ));
+        lines.push(format!("semantics: {}", status.semantics));
+        lines.push(format!("revoke: {}", status.revoke_command));
+        if let Some(warning) = status.ambient_path_warning() {
+            lines.push(warning);
+        }
+    } else {
+        lines.push("external credentials: disabled (no file was probed)".to_string());
+    }
+    lines
+}
+
+fn xai_auth_status_lines_for_provider(
+    store: &ConfigStore,
+    secrets: &Secrets,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> Vec<String> {
+    let diagnostics = xai_auth_diagnostics(store, runtime_overrides);
+    let api_key = diagnostics
+        .evaluates_runtime_api_key()
+        .then(|| xai_runtime_api_key(store, secrets, runtime_overrides));
+    let external = external_consent(store, ProviderKind::Xai);
+    let selected_marker = if store.config.provider == ProviderKind::Xai {
+        " (selected provider)"
+    } else {
+        ""
+    };
+    let provider_cfg = &store.config.providers.xai;
+    let model = provider_cfg.model.as_deref().unwrap_or("(default)");
+    let auth_mode = diagnostics.auth_mode.as_deref().unwrap_or("api_key");
+
+    let mut lines = vec![
+        format!("provider: xai{selected_marker}"),
+        format!("route: {}", diagnostics.base_url),
+        format!("model: {model}"),
+        format!("auth mode: {auth_mode}"),
+        format!(
+            "credential route: {}",
+            xai_credential_route_label(&diagnostics, api_key.as_ref())
+        ),
+        xai_lookup_order(&diagnostics),
+        format!(
+            "config file: {} ({})",
+            codewhale_config::quote_os_path(store.path()),
+            xai_storage_detail(
+                &diagnostics,
+                api_key.as_ref(),
+                RuntimeApiKeySource::ConfigFile
+            )
+        ),
+        format!(
+            "secret store: {} ({})",
+            secrets.backend_name(),
+            xai_storage_detail(&diagnostics, api_key.as_ref(), RuntimeApiKeySource::Keyring)
+        ),
+        format!(
+            "env var: {} ({})",
+            provider_env_vars(ProviderKind::Xai).join("/"),
+            xai_storage_detail(&diagnostics, api_key.as_ref(), RuntimeApiKeySource::Env)
+        ),
+        format!(
+            "endpoint policy: {}",
+            if diagnostics.official_endpoint {
+                "official xAI endpoint"
+            } else {
+                "custom xAI endpoint; API-key-only (owned and external OAuth are inactive)"
+            }
+        ),
+    ];
+
+    lines.push(match diagnostics.generation {
+        XaiOAuthGenerationPointer::Absent => "xAI OAuth generation: absent".to_string(),
+        XaiOAuthGenerationPointer::Valid
+            if diagnostics.route == XaiAuthDiagnosticRoute::OwnedOAuth =>
+        {
+            "xAI OAuth generation: configured Codewhale-owned pointer (storage unprobed)"
+                .to_string()
+        }
+        XaiOAuthGenerationPointer::Valid => {
+            "xAI OAuth generation: valid but inactive for this route".to_string()
+        }
+        XaiOAuthGenerationPointer::Invalid => {
+            "xAI OAuth generation: invalid Codewhale-owned pointer".to_string()
+        }
+    });
+
+    match diagnostics.route {
+        XaiAuthDiagnosticRoute::OwnedOAuth => {
+            lines.push(
+                "external credentials: blocked by the configured Codewhale-owned xAI OAuth generation (file not probed)"
+                    .to_string(),
+            );
+            return lines;
+        }
+        XaiAuthDiagnosticRoute::NeedsRepair => {
+            lines.push(
+                "external credentials: blocked by the invalid Codewhale-owned xAI OAuth generation pointer (file not probed)"
+                    .to_string(),
+            );
+            lines.push(
+                "repair: run `codewhale auth xai-device` to replace the owned generation, or switch [providers.xai] auth_mode to \"api_key\" and remove oauth_credential_generation. Grok CLI consent remains blocked until the pointer is absent."
+                    .to_string(),
+            );
+            return lines;
+        }
+        XaiAuthDiagnosticRoute::ApiKey if diagnostics.is_custom_endpoint() => {
+            lines.push(
+                "external credentials: unavailable on a custom xAI endpoint (API-key-only; file not probed)"
+                    .to_string(),
+            );
+            return lines;
+        }
+        XaiAuthDiagnosticRoute::ApiKey if !diagnostics.oauth_selected && external.is_some() => {
+            lines.push(
+                "external credentials: configured but inactive because xAI OAuth mode is not selected (file not probed)"
+                    .to_string(),
+            );
+            return lines;
+        }
+        XaiAuthDiagnosticRoute::ApiKey | XaiAuthDiagnosticRoute::ExternalConsent => {}
+    }
+
+    if let Ok((source, expected_path)) = external_credential_target(ProviderKind::Xai, None) {
+        let status = codewhale_config::external_credential_consent_status(
+            external,
+            ProviderKind::Xai,
             source,
             &expected_path,
             store.config.provider,
@@ -2512,14 +3114,38 @@ fn last4_label(value: &str) -> String {
     format!("...{last4}")
 }
 
-fn run_auth_command(store: &mut ConfigStore, command: AuthCommand) -> Result<()> {
-    run_auth_command_with_secrets(store, command, &Secrets::auto_detect())
+fn run_auth_command_with_runtime(
+    store: &mut ConfigStore,
+    command: AuthCommand,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> Result<()> {
+    run_auth_command_with_secrets_and_runtime(
+        store,
+        command,
+        &Secrets::auto_detect(),
+        runtime_overrides,
+    )
 }
 
+#[cfg(test)]
 fn run_auth_command_with_secrets(
     store: &mut ConfigStore,
     command: AuthCommand,
     secrets: &Secrets,
+) -> Result<()> {
+    run_auth_command_with_secrets_and_runtime(
+        store,
+        command,
+        secrets,
+        &CliRuntimeOverrides::default(),
+    )
+}
+
+fn run_auth_command_with_secrets_and_runtime(
+    store: &mut ConfigStore,
+    command: AuthCommand,
+    secrets: &Secrets,
+    runtime_overrides: &CliRuntimeOverrides,
 ) -> Result<()> {
     match command {
         AuthCommand::XaiDevice => {
@@ -2622,12 +3248,19 @@ fn run_auth_command_with_secrets(
             match provider {
                 Some(p) => {
                     let provider: ProviderKind = p.into();
-                    for line in auth_status_lines_for_provider(store, secrets, provider) {
+                    for line in auth_status_lines_for_provider_with_runtime(
+                        store,
+                        secrets,
+                        provider,
+                        runtime_overrides,
+                    ) {
                         println!("{line}");
                     }
                 }
                 None => {
-                    for line in auth_status_all_providers(store, secrets) {
+                    for line in
+                        auth_status_all_providers_with_runtime(store, secrets, runtime_overrides)
+                    {
                         println!("{line}");
                     }
                 }
@@ -2672,24 +3305,10 @@ fn run_auth_command_with_secrets(
         }
         AuthCommand::Get { provider } => {
             let provider: ProviderKind = provider.into();
-            let slot = provider_slot(provider);
-            let in_file = provider_config_set(store, provider);
-            let in_keyring = !in_file && provider_keyring_set(secrets, provider);
-            let in_env = provider_env_set(provider);
-            // Report the highest-priority source that has it.
-            let source = if in_file {
-                Some("config-file")
-            } else if in_keyring {
-                Some("secret-store")
-            } else if in_env {
-                Some("env")
-            } else {
-                None
-            };
-            match source {
-                Some(source) => println!("{slot}: set (source: {source})"),
-                None => println!("{slot}: not set"),
-            }
+            println!(
+                "{}",
+                auth_get_line_with_runtime(store, secrets, provider, runtime_overrides)
+            );
             Ok(())
         }
         AuthCommand::Clear { provider } => {
@@ -2703,7 +3322,7 @@ fn run_auth_command_with_secrets(
             }
         }
         AuthCommand::List => {
-            for line in auth_list_lines(store, secrets) {
+            for line in auth_list_lines_with_runtime(store, secrets, runtime_overrides) {
                 println!("{line}");
             }
             Ok(())
@@ -3906,6 +4525,64 @@ mod tests {
                     std::env::remove_var(self.name);
                 }
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingKeyringStore {
+        gets: Mutex<Vec<String>>,
+        values: Mutex<std::collections::BTreeMap<String, String>>,
+    }
+
+    impl RecordingKeyringStore {
+        fn set_value(&self, key: &str, value: &str) {
+            self.values
+                .lock()
+                .expect("recording values lock")
+                .insert(key.to_string(), value.to_string());
+        }
+
+        fn queried(&self) -> Vec<String> {
+            self.gets.lock().expect("recording gets lock").clone()
+        }
+    }
+
+    impl codewhale_secrets::KeyringStore for RecordingKeyringStore {
+        fn get(
+            &self,
+            key: &str,
+        ) -> std::result::Result<Option<String>, codewhale_secrets::SecretsError> {
+            self.gets
+                .lock()
+                .expect("recording gets lock")
+                .push(key.to_string());
+            Ok(self
+                .values
+                .lock()
+                .expect("recording values lock")
+                .get(key)
+                .cloned())
+        }
+
+        fn set(
+            &self,
+            key: &str,
+            value: &str,
+        ) -> std::result::Result<(), codewhale_secrets::SecretsError> {
+            self.set_value(key, value);
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> std::result::Result<(), codewhale_secrets::SecretsError> {
+            self.values
+                .lock()
+                .expect("recording values lock")
+                .remove(key);
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "recording"
         }
     }
 
@@ -5157,6 +5834,22 @@ model = "qwen-2.5-7b"
     }
 
     #[test]
+    fn auth_help_describes_runtime_effective_diagnostics() {
+        let get = help_for(&["codewhale", "auth", "get", "--help"]);
+        assert!(get.contains("effective credential route"), "{get}");
+        assert!(get.contains("structural OAuth/repair state"), "{get}");
+
+        let status = help_for(&["codewhale", "auth", "status", "--help"]);
+        assert!(
+            status.contains("runtime-effective credential route state"),
+            "{status}"
+        );
+
+        let list = help_for(&["codewhale", "auth", "list", "--help"]);
+        assert!(list.contains("runtime-effective auth state"), "{list}");
+    }
+
+    #[test]
     fn auth_set_writes_secret_store_and_keeps_config_credential_free() {
         use codewhale_secrets::{InMemoryKeyringStore, KeyringStore};
         use std::sync::Arc;
@@ -5572,6 +6265,499 @@ model = "qwen-2.5-7b"
             "{changed}"
         );
         assert!(!changed.contains(&ambient_path_str), "{changed}");
+    }
+
+    #[test]
+    fn xai_valid_owned_generation_blocks_external_consent_without_storage_probes() {
+        use std::sync::Arc;
+
+        let _lock = env_lock();
+        let _xai_key = ScopedEnvVar::remove("XAI_API_KEY");
+        let _xai_base = ScopedEnvVar::remove("XAI_BASE_URL");
+        let _auth_mode = ScopedEnvVar::remove("DEEPSEEK_AUTH_MODE");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let external_path = dir.path().join("grok-auth.json");
+        let external_raw = "external owner bytes must not be read";
+        std::fs::write(&external_path, external_raw).expect("external auth trap");
+        let _grok_auth_path = ScopedEnvVar::set("GROK_AUTH_PATH", &external_path.to_string_lossy());
+
+        let mut store = ConfigStore::load(Some(config_path)).expect("store should load");
+        store.config.provider = ProviderKind::Xai;
+        store.config.providers.xai.auth_mode = Some("oauth".to_string());
+        store.config.providers.xai.oauth_credential_generation =
+            Some("xai-auth-0123456789abcdef0123456789abcdef.json".to_string());
+        store.config.providers.xai.external_credentials =
+            Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                ProviderKind::Xai,
+                codewhale_config::ExternalCredentialSource::GrokCli,
+                external_path.clone(),
+            ));
+        let keyring = Arc::new(RecordingKeyringStore::default());
+        let secrets = Secrets::new(keyring.clone());
+
+        let scoped = auth_status_lines_for_provider(&store, &secrets, ProviderKind::Xai).join("\n");
+        assert!(
+            scoped.contains(
+                "credential route: Codewhale-owned OAuth configured/unprobed (valid generation pointer; storage unprobed)"
+            ),
+            "{scoped}"
+        );
+        assert!(scoped.contains("external credentials: blocked by the configured Codewhale-owned xAI OAuth generation"), "{scoped}");
+        assert!(
+            scoped.contains(
+                "xAI OAuth generation: configured Codewhale-owned pointer (storage unprobed)"
+            ),
+            "{scoped}"
+        );
+        assert!(
+            !scoped.contains("active source: Codewhale-owned OAuth"),
+            "a valid pointer is configured/unprobed, not an active credential: {scoped}"
+        );
+        assert!(
+            !scoped.contains("fallback"),
+            "an owned generation must never advertise Grok CLI fallback: {scoped}"
+        );
+
+        let all = auth_status_all_providers(&store, &secrets).join("\n");
+        let xai_row = all
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI status row");
+        assert!(
+            xai_row.contains("Codewhale-owned OAuth configured/unprobed"),
+            "{xai_row}"
+        );
+
+        let list = auth_list_lines(&store, &secrets).join("\n");
+        let xai_list_row = list
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI list row");
+        assert!(
+            xai_list_row.ends_with("owned-oauth-configured"),
+            "{xai_list_row}"
+        );
+
+        let get = auth_get_line_with_runtime(
+            &store,
+            &secrets,
+            ProviderKind::Xai,
+            &CliRuntimeOverrides::default(),
+        );
+        assert!(
+            get.starts_with("xai: configured (source: Codewhale-owned OAuth generation"),
+            "{get}"
+        );
+        assert!(!get.starts_with("xai: set"), "{get}");
+        assert!(!get.contains("fallback"), "{get}");
+        assert!(
+            !keyring.queried().iter().any(|slot| slot == "xai"),
+            "owned OAuth diagnostics must not query the xAI API-key store: {:?}",
+            keyring.queried()
+        );
+        assert_eq!(
+            std::fs::read_to_string(external_path).expect("external trap unchanged"),
+            external_raw
+        );
+
+        store.config.providers.xai.auth_mode = None;
+        store.config.auth_mode = Some("oauth".to_string());
+        assert_eq!(
+            xai_auth_diagnostics(&store, &CliRuntimeOverrides::default()).route,
+            XaiAuthDiagnosticRoute::ApiKey,
+            "a root auth mode must not select the xAI OAuth runtime route"
+        );
+    }
+
+    #[test]
+    fn xai_invalid_generation_requires_repair_blocks_external_and_keeps_api_key_diagnostics() {
+        use std::sync::Arc;
+
+        let _lock = env_lock();
+        let _xai_key = ScopedEnvVar::remove("XAI_API_KEY");
+        let _xai_base = ScopedEnvVar::remove("XAI_BASE_URL");
+        let _auth_mode = ScopedEnvVar::remove("DEEPSEEK_AUTH_MODE");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let external_path = dir.path().join("grok-auth.json");
+        let external_raw = "external owner bytes must remain unread";
+        std::fs::write(&external_path, external_raw).expect("external auth trap");
+        let _grok_auth_path = ScopedEnvVar::set("GROK_AUTH_PATH", &external_path.to_string_lossy());
+
+        let mut store = ConfigStore::load(Some(config_path)).expect("store should load");
+        store.config.provider = ProviderKind::Xai;
+        store.config.providers.xai.auth_mode = Some("oauth".to_string());
+        store.config.providers.xai.api_key = Some("fake-cfg-key-1234".to_string());
+        store.config.providers.xai.oauth_credential_generation = Some("../unsafe.json".to_string());
+        store.config.providers.xai.external_credentials =
+            Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                ProviderKind::Xai,
+                codewhale_config::ExternalCredentialSource::GrokCli,
+                external_path.clone(),
+            ));
+        let keyring = Arc::new(RecordingKeyringStore::default());
+        let secrets = Secrets::new(keyring.clone());
+
+        let scoped = auth_status_lines_for_provider(&store, &secrets, ProviderKind::Xai).join("\n");
+        assert!(
+            scoped.contains("credential route: xAI OAuth needs repair"),
+            "{scoped}"
+        );
+        assert!(
+            scoped.contains("API-key fallback: config (last4: ...1234)"),
+            "{scoped}"
+        );
+        assert!(scoped.contains("external credentials: blocked by the invalid Codewhale-owned xAI OAuth generation pointer"), "{scoped}");
+        assert!(
+            scoped.contains("repair: run `codewhale auth xai-device`"),
+            "{scoped}"
+        );
+        assert!(
+            !scoped.contains("external read-only consent (availability not probed)"),
+            "invalid owned pointers must not activate Grok CLI consent: {scoped}"
+        );
+
+        let all = auth_status_all_providers(&store, &secrets).join("\n");
+        let xai_row = all
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI status row");
+        assert!(xai_row.contains("needs repair"), "{xai_row}");
+        assert!(xai_row.contains("API-key fallback: config"), "{xai_row}");
+
+        let list = auth_list_lines(&store, &secrets).join("\n");
+        let xai_list_row = list
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI list row");
+        assert!(xai_list_row.ends_with("needs-repair"), "{xai_list_row}");
+
+        let get = auth_get_line_with_runtime(
+            &store,
+            &secrets,
+            ProviderKind::Xai,
+            &CliRuntimeOverrides::default(),
+        );
+        assert!(get.contains("xai: needs repair"), "{get}");
+        assert!(get.contains("API-key fallback: config-file"), "{get}");
+        assert!(
+            !keyring.queried().iter().any(|slot| slot == "xai"),
+            "an invalid owned pointer must not query the xAI API-key store: {:?}",
+            keyring.queried()
+        );
+        assert_eq!(
+            std::fs::read_to_string(external_path).expect("external trap unchanged"),
+            external_raw
+        );
+    }
+
+    #[test]
+    fn xai_cli_custom_endpoint_rejects_inherited_api_key_sources() {
+        use std::sync::Arc;
+
+        let _lock = env_lock();
+        let _xai_key = ScopedEnvVar::set("XAI_API_KEY", "fake-ambient-key-3333");
+        let _xai_base = ScopedEnvVar::remove("XAI_BASE_URL");
+        let _auth_mode = ScopedEnvVar::remove("DEEPSEEK_AUTH_MODE");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let external_path = dir.path().join("grok-auth.json");
+        let external_raw = "external owner bytes must remain unprobed";
+        std::fs::write(&external_path, external_raw).expect("external auth trap");
+        let _grok_auth_path = ScopedEnvVar::set("GROK_AUTH_PATH", &external_path.to_string_lossy());
+
+        let mut store = ConfigStore::load(Some(config_path)).expect("store should load");
+        store.config.provider = ProviderKind::Xai;
+        store.config.providers.xai.api_key = Some("fake-cfg-key-1111".to_string());
+        store.config.providers.xai.auth_mode = Some("oauth".to_string());
+        store.config.providers.xai.oauth_credential_generation =
+            Some("xai-auth-0123456789abcdef0123456789abcdef.json".to_string());
+        store.config.providers.xai.external_credentials =
+            Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                ProviderKind::Xai,
+                codewhale_config::ExternalCredentialSource::GrokCli,
+                external_path.clone(),
+            ));
+        let keyring = Arc::new(RecordingKeyringStore::default());
+        keyring.set_value("xai", "fake-store-key-2222");
+        let secrets = Secrets::new(keyring.clone());
+        let runtime_overrides = CliRuntimeOverrides {
+            base_url: Some("https://gateway.example.test/v1".to_string()),
+            ..CliRuntimeOverrides::default()
+        };
+
+        let scoped = auth_status_lines_for_provider_with_runtime(
+            &store,
+            &secrets,
+            ProviderKind::Xai,
+            &runtime_overrides,
+        )
+        .join("\n");
+        assert!(
+            scoped.contains("route: https://gateway.example.test/v1"),
+            "{scoped}"
+        );
+        assert!(scoped.contains("credential route: missing"), "{scoped}");
+        assert!(
+            scoped.contains("custom xAI endpoint; API-key-only"),
+            "{scoped}"
+        );
+        assert!(
+            scoped.contains("not eligible for this custom xAI endpoint"),
+            "{scoped}"
+        );
+        assert!(
+            scoped.contains("external credentials: unavailable on a custom xAI endpoint"),
+            "{scoped}"
+        );
+        for redacted_tail in ["...1111", "...2222", "...3333"] {
+            assert!(
+                !scoped.contains(redacted_tail),
+                "custom CLI route must not advertise an inherited credential: {scoped}"
+            );
+        }
+
+        let all =
+            auth_status_all_providers_with_runtime(&store, &secrets, &runtime_overrides).join("\n");
+        let xai_row = all
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI status row");
+        assert!(xai_row.contains("unset"), "{xai_row}");
+        assert!(
+            !xai_row.contains("config") && !xai_row.contains("keyring") && !xai_row.contains("env"),
+            "xAI summary must show runtime-effective sources only: {xai_row}"
+        );
+
+        let list = auth_list_lines_with_runtime(&store, &secrets, &runtime_overrides).join("\n");
+        let xai_list_row = list
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI list row");
+        assert!(xai_list_row.ends_with("missing"), "{xai_list_row}");
+
+        let get =
+            auth_get_line_with_runtime(&store, &secrets, ProviderKind::Xai, &runtime_overrides);
+        assert_eq!(get, "xai: not set");
+        assert!(
+            !keyring.queried().iter().any(|slot| slot == "xai"),
+            "a global custom endpoint must not query xAI keyring state: {:?}",
+            keyring.queried()
+        );
+        assert_eq!(
+            std::fs::read_to_string(external_path).expect("external trap unchanged"),
+            external_raw
+        );
+    }
+
+    #[test]
+    fn xai_env_custom_endpoint_rejects_inherited_api_key_sources() {
+        use std::sync::Arc;
+
+        let _lock = env_lock();
+        let _xai_key = ScopedEnvVar::set("XAI_API_KEY", "fake-ambient-key-6666");
+        let _xai_base = ScopedEnvVar::set("XAI_BASE_URL", "https://env-gateway.example.test/v1");
+        let _auth_mode = ScopedEnvVar::remove("DEEPSEEK_AUTH_MODE");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let external_path = dir.path().join("grok-auth.json");
+        let external_raw = "external owner bytes must remain unprobed";
+        std::fs::write(&external_path, external_raw).expect("external auth trap");
+        let _grok_auth_path = ScopedEnvVar::set("GROK_AUTH_PATH", &external_path.to_string_lossy());
+
+        let mut store = ConfigStore::load(Some(config_path)).expect("store should load");
+        store.config.provider = ProviderKind::Xai;
+        store.config.providers.xai.api_key = Some("fake-cfg-key-4444".to_string());
+        store.config.providers.xai.auth_mode = Some("oauth".to_string());
+        store.config.providers.xai.oauth_credential_generation =
+            Some("xai-auth-0123456789abcdef0123456789abcdef.json".to_string());
+        store.config.providers.xai.external_credentials =
+            Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                ProviderKind::Xai,
+                codewhale_config::ExternalCredentialSource::GrokCli,
+                external_path.clone(),
+            ));
+        let keyring = Arc::new(RecordingKeyringStore::default());
+        keyring.set_value("xai", "fake-store-key-5555");
+        let secrets = Secrets::new(keyring.clone());
+
+        let scoped = auth_status_lines_for_provider(&store, &secrets, ProviderKind::Xai).join("\n");
+        assert!(
+            scoped.contains("route: https://env-gateway.example.test/v1"),
+            "{scoped}"
+        );
+        assert!(scoped.contains("credential route: missing"), "{scoped}");
+        assert!(
+            scoped.contains("custom xAI endpoint; API-key-only"),
+            "{scoped}"
+        );
+        for redacted_tail in ["...4444", "...5555", "...6666"] {
+            assert!(
+                !scoped.contains(redacted_tail),
+                "custom env route must not advertise an inherited credential: {scoped}"
+            );
+        }
+
+        let all = auth_status_all_providers(&store, &secrets).join("\n");
+        let xai_row = all
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI status row");
+        assert!(xai_row.contains("unset"), "{xai_row}");
+
+        let list = auth_list_lines(&store, &secrets).join("\n");
+        let xai_list_row = list
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI list row");
+        assert!(xai_list_row.ends_with("missing"), "{xai_list_row}");
+
+        assert_eq!(
+            auth_get_line_with_runtime(
+                &store,
+                &secrets,
+                ProviderKind::Xai,
+                &CliRuntimeOverrides::default(),
+            ),
+            "xai: not set"
+        );
+        assert!(
+            !keyring.queried().iter().any(|slot| slot == "xai"),
+            "an XAI_BASE_URL custom route must not query xAI keyring state: {:?}",
+            keyring.queried()
+        );
+        assert_eq!(
+            std::fs::read_to_string(external_path).expect("external trap unchanged"),
+            external_raw
+        );
+    }
+
+    #[test]
+    fn xai_config_bound_custom_endpoint_uses_its_route_key() {
+        use std::sync::Arc;
+
+        let _lock = env_lock();
+        let _xai_key = ScopedEnvVar::remove("XAI_API_KEY");
+        let _xai_base = ScopedEnvVar::remove("XAI_BASE_URL");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut store = ConfigStore::load(Some(config_path)).expect("store should load");
+        store.config.provider = ProviderKind::Xai;
+        store.config.providers.xai.base_url =
+            Some("https://bound-gateway.example.test/v1".to_string());
+        store.config.providers.xai.api_key = Some("fake-bound-key-7777".to_string());
+        let keyring = Arc::new(RecordingKeyringStore::default());
+        keyring.set_value("xai", "fake-store-key-8888");
+        let secrets = Secrets::new(keyring.clone());
+
+        let scoped = auth_status_lines_for_provider(&store, &secrets, ProviderKind::Xai).join("\n");
+        assert!(
+            scoped.contains("credential route: config (last4: ...7777)"),
+            "{scoped}"
+        );
+        assert!(
+            scoped.contains("config file:") && scoped.contains("runtime-effective, last4: ...7777"),
+            "{scoped}"
+        );
+        assert_eq!(
+            auth_get_line_with_runtime(
+                &store,
+                &secrets,
+                ProviderKind::Xai,
+                &CliRuntimeOverrides::default(),
+            ),
+            "xai: set (source: config-file)"
+        );
+        assert!(
+            !keyring.queried().iter().any(|slot| slot == "xai"),
+            "an endpoint-bound config key should resolve before the xAI keyring: {:?}",
+            keyring.queried()
+        );
+    }
+
+    #[test]
+    fn xai_absent_generation_with_consent_is_external_configured_and_unprobed() {
+        use std::sync::Arc;
+
+        let _lock = env_lock();
+        let _xai_key = ScopedEnvVar::remove("XAI_API_KEY");
+        let _xai_base = ScopedEnvVar::remove("XAI_BASE_URL");
+        let _auth_mode = ScopedEnvVar::remove("DEEPSEEK_AUTH_MODE");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let external_path = dir.path().join("grok-auth.json");
+        let external_raw = "external owner bytes remain unprobed";
+        std::fs::write(&external_path, external_raw).expect("external auth trap");
+        let _grok_auth_path = ScopedEnvVar::set("GROK_AUTH_PATH", &external_path.to_string_lossy());
+
+        let mut store = ConfigStore::load(Some(config_path)).expect("store should load");
+        store.config.provider = ProviderKind::Xai;
+        store.config.providers.xai.auth_mode = Some("oauth".to_string());
+        store.config.providers.xai.external_credentials =
+            Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                ProviderKind::Xai,
+                codewhale_config::ExternalCredentialSource::GrokCli,
+                external_path.clone(),
+            ));
+        let keyring = Arc::new(RecordingKeyringStore::default());
+        let secrets = Secrets::new(keyring.clone());
+
+        let scoped = auth_status_lines_for_provider(&store, &secrets, ProviderKind::Xai).join("\n");
+        assert!(
+            scoped.contains("credential route: external read-only consent configured/unprobed"),
+            "{scoped}"
+        );
+        assert!(
+            scoped.contains("external credentials: read_only"),
+            "{scoped}"
+        );
+        assert!(
+            scoped.contains(
+                "lookup order: configured consent-gated exact Grok CLI file (availability unprobed)"
+            ),
+            "{scoped}"
+        );
+
+        let all = auth_status_all_providers(&store, &secrets).join("\n");
+        let xai_row = all
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI status row");
+        assert!(
+            xai_row.contains("external consent configured/unprobed"),
+            "{xai_row}"
+        );
+
+        let list = auth_list_lines(&store, &secrets).join("\n");
+        let xai_list_row = list
+            .lines()
+            .find(|line| line.starts_with("xai"))
+            .expect("xAI list row");
+        assert!(
+            xai_list_row.ends_with("external-consent-configured"),
+            "{xai_list_row}"
+        );
+
+        let get = auth_get_line_with_runtime(
+            &store,
+            &secrets,
+            ProviderKind::Xai,
+            &CliRuntimeOverrides::default(),
+        );
+        assert!(
+            get.contains("source: external read-only consent; availability unprobed"),
+            "{get}"
+        );
+        assert!(
+            !keyring.queried().iter().any(|slot| slot == "xai"),
+            "external-consent diagnostics must not query the xAI API-key store: {:?}",
+            keyring.queried()
+        );
+        assert_eq!(
+            std::fs::read_to_string(external_path).expect("external trap unchanged"),
+            external_raw
+        );
     }
 
     #[test]
