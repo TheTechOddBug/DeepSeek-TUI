@@ -107,6 +107,7 @@ test("bundle helper creates the exact nine archives and checksum manifest", () =
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codewhale-bundle-assembly-"));
   const input = path.join(tempRoot, "input");
   const output = path.join(tempRoot, "output");
+  const repeatedOutput = path.join(tempRoot, "output-repeated");
   try {
     fs.mkdirSync(input, { recursive: true });
     for (const name of allReleaseAssetNames().filter((asset) =>
@@ -116,12 +117,19 @@ test("bundle helper creates the exact nine archives and checksum manifest", () =
     )) {
       const artifactDirectory = path.join(input, name);
       fs.mkdirSync(artifactDirectory, { recursive: true });
-      fs.writeFileSync(path.join(artifactDirectory, name), `fixture:${name}\n`, { mode: 0o755 });
+      // GitHub's artifact transport normalizes regular files to 0644. The
+      // bundler must restore executable modes for non-Windows archives.
+      fs.writeFileSync(path.join(artifactDirectory, name), `fixture:${name}\n`, { mode: 0o644 });
     }
 
     execFileSync(
       "bash",
       [path.join(repoRoot, "scripts/release/create-release-bundles.sh"), input, output],
+      { cwd: repoRoot, stdio: "pipe" },
+    );
+    execFileSync(
+      "bash",
+      [path.join(repoRoot, "scripts/release/create-release-bundles.sh"), input, repeatedOutput],
       { cwd: repoRoot, stdio: "pipe" },
     );
     assert.deepEqual(
@@ -134,7 +142,17 @@ test("bundle helper creates the exact nine archives and checksum manifest", () =
     );
     for (const name of BUNDLE_ASSET_NAMES) {
       assert.equal(checksums.get(name), sha256(path.join(output, name)));
+      assert.deepEqual(
+        fs.readFileSync(path.join(output, name)),
+        fs.readFileSync(path.join(repeatedOutput, name)),
+        `${name} should be byte-reproducible for identical inputs`,
+      );
     }
+    assert.deepEqual(
+      fs.readFileSync(path.join(output, BUNDLE_CHECKSUM_MANIFEST)),
+      fs.readFileSync(path.join(repeatedOutput, BUNDLE_CHECKSUM_MANIFEST)),
+      "bundle checksum manifest should be reproducible",
+    );
 
     const linuxEntries = execFileSync(
       "tar",
@@ -143,6 +161,17 @@ test("bundle helper creates the exact nine archives and checksum manifest", () =
     );
     for (const entry of ["codewhale", "codew", "codewhale-tui", "install.sh"]) {
       assert.match(linuxEntries, new RegExp(`codewhale-linux-x64/${entry}\\n`));
+    }
+    const extracted = path.join(tempRoot, "extracted");
+    fs.mkdirSync(extracted);
+    execFileSync(
+      "tar",
+      ["-xzf", path.join(output, "codewhale-linux-x64.tar.gz"), "-C", extracted],
+      { stdio: "pipe" },
+    );
+    for (const entry of ["codewhale", "codew", "codewhale-tui", "install.sh"]) {
+      const mode = fs.statSync(path.join(extracted, "codewhale-linux-x64", entry)).mode & 0o777;
+      assert.equal(mode, 0o755, `${entry} should remain executable after artifact transport`);
     }
     const portableEntries = execFileSync(
       "unzip",

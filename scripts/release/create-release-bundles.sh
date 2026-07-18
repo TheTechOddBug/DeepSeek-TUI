@@ -9,6 +9,12 @@ fi
 artifact_dir="$1"
 bundle_dir="$2"
 
+# Archive metadata must be stable across recovery builds. The public workflow
+# still refuses to replace existing release assets; reproducible packaging is a
+# diagnostic and provenance aid, not permission to overwrite published bytes.
+export TZ=UTC
+archive_timestamp="200001010000"
+
 if [[ ! -d "${artifact_dir}" ]]; then
   echo "input artifact directory does not exist: ${artifact_dir}" >&2
   exit 1
@@ -52,6 +58,15 @@ bundle() {
   cp "${artifact_dir}/${shim_src}/${shim_src}" "${stage_dir}/${shim_dst}"
   cp "${artifact_dir}/${tui_src}/${tui_src}" "${stage_dir}/${tui_dst}"
 
+  # actions/upload-artifact intentionally normalizes downloaded files to 0644.
+  # Restore the executable contract before constructing Unix archives.
+  if [[ "${platform}" != windows-* ]]; then
+    chmod 0755 \
+      "${stage_dir}/${cli_dst}" \
+      "${stage_dir}/${shim_dst}" \
+      "${stage_dir}/${tui_dst}"
+  fi
+
   if [[ "${variant}" != "portable" ]]; then
     if [[ "${platform}" == windows-* ]]; then
       cp scripts/release/install.bat "${stage_dir}/"
@@ -62,11 +77,26 @@ bundle() {
     fi
   fi
 
+  # zip and tar both record mtimes; normalize every staged entry so identical
+  # inputs do not produce packaging-only checksum drift on a rerun.
+  find "${stage_dir}" -exec touch -t "${archive_timestamp}" {} +
+
   local archive="${bundle_dir}/${stem}.${ext}"
   if [[ "${ext}" == "zip" ]]; then
-    (cd "${stage_root}" && zip -qr "${archive}" "${stem}/")
+    (cd "${stage_root}" && zip -Xqr "${archive}" "${stem}/")
+  elif tar --version 2>/dev/null | grep -q 'GNU tar'; then
+    tar \
+      --sort=name \
+      --mtime='2000-01-01 00:00:00 UTC' \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      --format=ustar \
+      -cf - \
+      -C "${stage_root}" \
+      "${stem}/" | gzip -n > "${archive}"
   else
-    tar -czf "${archive}" -C "${stage_root}" "${stem}/"
+    COPYFILE_DISABLE=1 tar -cf - -C "${stage_root}" "${stem}/" | gzip -n > "${archive}"
   fi
 
   local checksum
