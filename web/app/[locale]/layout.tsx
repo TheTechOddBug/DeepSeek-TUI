@@ -47,11 +47,11 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     path: "/",
     locale,
     title: isZh
-      ? "Codewhale 文档与开源运行时"
-      : "Codewhale documentation and open-source runtime",
+      ? "Codewhale — 一个运行时，所有模型，你的机器"
+      : "Codewhale — One runtime. Every model. Your machine.",
     description: isZh
-      ? "安装 Codewhale，并查找有关模式、权限、工具、提供商、配置、运行时 API 和社区贡献的准确文档。"
-      : "Install Codewhale and find precise documentation for modes, permissions, tools, providers, configuration, the runtime API, and community contributions.",
+      ? "开源终端编程智能体，适配任意模型，开放模型优先。TUI、CLI 与本地工具——运行在你自己的机器上。Rust 编写，MIT 许可。"
+      : "Open-source terminal coding agent for any model, open models first. TUI, CLI, and local tools — runs on your machine. Rust, MIT.",
   });
 }
 

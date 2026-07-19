@@ -70,26 +70,32 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           <div className="portal-hero-copy">
             <div className="portal-mark">
               <Whale size={28} className="text-current" />
-              <span>{isZh ? "Codewhale 文档" : "Codewhale documentation"}</span>
+              <span>{isZh ? "一个运行时 · 所有模型 · 你的机器" : "One runtime · every model · your machine"}</span>
             </div>
-            <h1>{isZh ? "Codewhale 文档" : "Codewhale documentation"}</h1>
+            <h1>Codewhale</h1>
             <p className="portal-lede">
               {isZh
-                ? "安装这个开源终端编程智能体，连接你已有的模型提供商，并在需要时查找有关模式、权限、工具、配置和运行时集成的准确说明。"
-                : "Install the open-source terminal coding agent, connect the provider you already use, and find precise guidance for modes, permissions, tools, configuration, and runtime integrations."}
+                ? "Codewhale 是运行在终端里的编程智能体。适配任意模型；开放模型优先。给它一个提供商、一个模型和一个任务：它会读你的代码、改文件、跑命令、检查自己的工作，在任务完成或需要你介入时停下。交互式工作用 TUI，脚本和 CI 用 codewhale exec。Rust 编写，MIT 许可，运行在你自己的机器上。"
+                : "Codewhale is a coding agent for your terminal. It works with any model; open models first. Give it a provider, a model, and a task: it reads your code, edits files, runs commands, checks its work, and stops when the job is done or it needs you. Use the TUI for interactive work, codewhale exec for scripts and CI. Rust, MIT, runs on your machine."}
             </p>
             <div className="portal-actions">
-              <Link href={`/${locale}/docs`} className="portal-button portal-button-primary">
-                {isZh ? "浏览文档" : "Browse the documentation"}
+              <Link href={`/${locale}/install`} className="portal-button portal-button-primary">
+                {isZh ? "安装" : "Install"}
               </Link>
-              <Link href={`/${locale}/install`} className="portal-button portal-button-secondary">
-                {isZh ? "查看安装指南" : "Read the installation guide"}
+              <Link href={`/${locale}/docs`} className="portal-button portal-button-secondary">
+                {isZh ? "文档" : "Docs"}
               </Link>
+              <a
+                href="https://github.com/Hmbown/CodeWhale"
+                className="portal-button portal-button-secondary"
+              >
+                GitHub
+              </a>
             </div>
             <p className="portal-meta">
               {isZh
-                ? `当前运行时版本为 ${facts.version ?? "0.8.x"}，支持 ${facts.providers.length} 个提供商，并采用 ${facts.license ?? "MIT"} 许可证。`
-                : `The current runtime is version ${facts.version ?? "0.8.x"}, supports ${facts.providers.length} providers, and is licensed under ${facts.license ?? "MIT"}.`}
+                ? `当前运行时版本为 ${facts.version ?? "0.9.x"}，支持 ${facts.providers.length} 个提供商，并采用 ${facts.license ?? "MIT"} 许可证。`
+                : `The current runtime is version ${facts.version ?? "0.9.x"}, supports ${facts.providers.length} providers, and is licensed under ${facts.license ?? "MIT"}.`}
             </p>
           </div>
 
