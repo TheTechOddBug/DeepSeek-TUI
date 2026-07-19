@@ -29,12 +29,15 @@
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::sandbox::SandboxPolicy;
+use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use crate::tui::widgets::{ApprovalWidget, ElevationWidget, Renderable};
 use codewhale_config::ToolAskRule;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use serde_json::Value;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -181,6 +184,15 @@ impl AskRuleSavePreview {
 const ASK_RULE_SAVE_PREVIEW_MAX_ENTRIES: usize = 4;
 
 impl ApprovalRequest {
+    /// Mechanical repo-law asks are a distinct authority boundary, not an
+    /// ordinary risk prompt. The engine stamps this stable prefix when a
+    /// `.codewhale/constitution.json` ask rule forces review.
+    #[must_use]
+    pub fn is_repo_law_prompt(&self) -> bool {
+        self.description.starts_with("Repo law holds this write:")
+            && self.description.contains(".codewhale/constitution.json")
+    }
+
     /// Presentation stakes for this request (see [`ApprovalStakes`]).
     #[must_use]
     pub fn stakes(&self) -> ApprovalStakes {
@@ -773,16 +785,13 @@ fn file_write_preview_lines(tool_name: &str, params: &Value) -> Option<Vec<Strin
             lines.extend(prefixed_preview_lines("with this", "+ ", &replace, 3));
             Some(lines)
         }
-        "apply_patch" => params
-            .get("patch")
-            .and_then(Value::as_str)
-            .and_then(apply_patch_preview_lines)
-            .or_else(|| {
-                params
-                    .get("changes")
-                    .and_then(Value::as_array)
-                    .and_then(|changes| changes_preview_lines(changes))
-            }),
+        "apply_patch" => match normalize_apply_patch_input(params) {
+            Ok(NormalizedApplyPatchInput::Patch(patch)) => apply_patch_preview_lines(patch),
+            Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
+                changes_preview_lines(entries)
+            }
+            Err(_) => None,
+        },
         _ => None,
     }
     .filter(|lines| !lines.is_empty())
@@ -1213,6 +1222,7 @@ impl ApprovalOption {
 pub struct ApprovalView {
     request: ApprovalRequest,
     selected: usize,
+    row_hitboxes: RefCell<Vec<Rect>>,
     locale: Locale,
     timeout: Option<Duration>,
     requested_at: Instant,
@@ -1230,6 +1240,7 @@ impl ApprovalView {
         Self {
             request,
             selected: 0,
+            row_hitboxes: RefCell::new(Vec::new()),
             locale,
             timeout: None,
             requested_at: Instant::now(),
@@ -1267,6 +1278,10 @@ impl ApprovalView {
     /// Selected option for the renderer (used by the widget tests too).
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    pub(crate) fn set_mouse_hitboxes(&self, hitboxes: Vec<Rect>) {
+        *self.row_hitboxes.borrow_mut() = hitboxes;
     }
 
     /// Risk level for the renderer's accent picking.
@@ -1400,6 +1415,32 @@ impl ModalView for ApprovalView {
             }
             KeyCode::Char('v') | KeyCode::Char('V') => self.emit_params_pager(),
             KeyCode::Esc => self.emit_decision(ReviewDecision::Abort, false),
+            _ => ViewAction::None,
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.select_prev();
+                ViewAction::None
+            }
+            MouseEventKind::ScrollDown => {
+                self.select_next();
+                ViewAction::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let clicked = self.row_hitboxes.borrow().iter().position(|rect| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                });
+                if let Some(index) = clicked {
+                    return self.commit_option(ApprovalOption::from_index_for(
+                        &self.request.tool_name,
+                        index,
+                    ));
+                }
+                ViewAction::None
+            }
             _ => ViewAction::None,
         }
     }
@@ -1588,6 +1629,7 @@ pub struct ElevationView {
     request: ElevationRequest,
     selected: usize,
     locale: Locale,
+    row_hitboxes: RefCell<Vec<Rect>>,
 }
 
 impl ElevationView {
@@ -1596,6 +1638,7 @@ impl ElevationView {
             request,
             selected: 0,
             locale,
+            row_hitboxes: RefCell::new(Vec::new()),
         }
     }
 
@@ -1669,8 +1712,36 @@ impl ModalView for ElevationView {
         }
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.select_prev();
+                ViewAction::None
+            }
+            MouseEventKind::ScrollDown => {
+                self.select_next();
+                ViewAction::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let clicked = self.row_hitboxes.borrow().iter().position(|rect| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                });
+                if let Some(index) = clicked {
+                    return self.emit_decision(self.request.options[index].clone());
+                }
+                ViewAction::None
+            }
+            _ => ViewAction::None,
+        }
+    }
+
     fn render(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
-        let elevation_widget = ElevationWidget::new(&self.request, self.selected, self.locale);
+        let elevation_widget = ElevationWidget::new_with_hitboxes(
+            &self.request,
+            self.selected,
+            self.locale,
+            &self.row_hitboxes,
+        );
         elevation_widget.render(area, buf);
     }
 }
@@ -1682,7 +1753,8 @@ impl ModalView for ElevationView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
 
     fn create_key_event(code: KeyCode) -> KeyEvent {
@@ -2087,7 +2159,7 @@ mod tests {
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     {
                         "path": "src/lib.rs",
                         "content": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
@@ -2124,13 +2196,39 @@ mod tests {
     }
 
     #[test]
+    fn prominent_details_apply_patch_legacy_changes_includes_preview() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "changes": [{
+                    "path": "src/lib.rs",
+                    "content": "fn legacy() {}\n"
+                }]
+            }),
+            "tool:apply_patch",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("legacy changes preview");
+
+        assert!(preview.iter().any(|line| line == "file: src/lib.rs"));
+        assert!(preview.iter().any(|line| line == "+ fn legacy() {}"));
+    }
+
+    #[test]
     fn apply_patch_changes_array_preview_reports_second_file_when_first_fills_buffer() {
         let request = ApprovalRequest::new(
             "test-id",
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     {
                         "path": "src/lib.rs",
                         "content": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
@@ -2464,7 +2562,7 @@ diff --git a/src/b.rs b/src/b.rs
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     { "path": "src/a.rs", "content": "one" },
                     { "path": "/workspace/src/a.rs", "content": "two" }
                 ]
@@ -2533,7 +2631,7 @@ diff --git a/src/b.rs b/src/b.rs
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     { "path": "src/a.rs", "content": "safe" },
                     { "path": "../escape.rs", "content": "unsafe" }
                 ]
@@ -2713,6 +2811,29 @@ diff --git a/src/b.rs b/src/b.rs
     fn benign_enter_approves_in_one_step() {
         let mut view = ApprovalView::new(benign_request());
         let action = view.handle_key(create_key_event(KeyCode::Enter));
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+                decision: ReviewDecision::Approved,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn mouse_click_renders_and_approves_inline_option() {
+        let mut view = ApprovalView::new(benign_request());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+            .expect("render approval prompt");
+        let rect = view.row_hitboxes.borrow()[0];
+        let action = view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
         assert!(matches!(
             action,
             ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
@@ -3095,7 +3216,7 @@ diff --git a/src/b.rs b/src/b.rs
         // The selection prose moved into the per-option key badges; the footer
         // keeps only the escape-hatch hints.
         assert!(
-            joined.contains("full params"),
+            joined.contains("Pg↑/↓ review"),
             "footer controls hint missing:\n{joined}"
         );
         assert!(joined.contains("read_file"));
@@ -3103,7 +3224,7 @@ diff --git a/src/b.rs b/src/b.rs
 
     #[test]
     fn approval_footer_hints_use_muted_contrast_tier() {
-        // #3380: the footer key hints ("v: full params · Esc: abort") must
+        // #3380: the footer key hints ("Pg↑/↓ review · v details · Esc abort") must
         // render one contrast tier above TEXT_HINT — TEXT_MUTED, the same
         // color the app-wide ActionHint modal footers use for labels.
         use crate::palette;
@@ -3115,7 +3236,7 @@ diff --git a/src/b.rs b/src/b.rs
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
         ModalView::render(&view, Rect::new(0, 0, w, h), &mut buf);
 
-        let target: Vec<String> = "full params".chars().map(|c| c.to_string()).collect();
+        let target: Vec<String> = "Pg↑/↓ review".chars().map(|c| c.to_string()).collect();
         let mut found = None;
         for y in 0..h {
             let symbols: Vec<String> = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
@@ -3148,7 +3269,7 @@ diff --git a/src/b.rs b/src/b.rs
         );
         assert_approval_key_badges_visible(&joined);
         assert!(
-            joined.contains("full params"),
+            joined.contains("Pg↑/↓ review"),
             "footer controls hint missing:\n{joined}"
         );
         assert!(
@@ -3203,7 +3324,7 @@ diff --git a/src/b.rs b/src/b.rs
             "routine write must not use the destructive zh badge:\n{joined}"
         );
         assert!(
-            joined.contains("v：完整参数"),
+            joined.contains("Pg↑/↓回看"),
             "missing zh footer controls hint:\n{joined}"
         );
         assert!(
@@ -3214,6 +3335,31 @@ diff --git a/src/b.rs b/src/b.rs
             joined.contains("仅本次批准"),
             "missing zh approve option:\n{joined}"
         );
+    }
+
+    #[test]
+    fn approval_review_and_save_hints_stay_on_one_row_at_80_columns() {
+        for &locale in Locale::shipped() {
+            let view = ApprovalView::new_for_locale(destructive_request(), locale);
+            let lines = render_lines(&view, 80, 40);
+            let review_rows = lines
+                .iter()
+                .filter(|line| line.contains("Pg↑/↓"))
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                review_rows.len(),
+                1,
+                "expected one approval review-hint row for {locale:?}:\n{}",
+                lines.join("\n")
+            );
+            let controls = review_rows[0];
+            assert!(
+                controls.contains("Esc") && controls.contains(" s "),
+                "review, abort, and save-rule hints wrapped for {locale:?}:\n{}",
+                lines.join("\n")
+            );
+        }
     }
 
     #[test]

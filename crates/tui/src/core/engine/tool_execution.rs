@@ -391,6 +391,7 @@ impl Engine {
                     ToolError::PathEscape { .. } => "path_escape",
                     ToolError::ExecutionFailed { .. } => "execution_failed",
                     ToolError::Timeout { .. } => "timeout",
+                    ToolError::Cancelled { .. } => "cancelled",
                     ToolError::NotAvailable { .. } => "not_available",
                     ToolError::PermissionDenied { .. } => "permission_denied",
                 };

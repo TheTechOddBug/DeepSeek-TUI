@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::session_manager::{
     create_saved_session_with_id_and_mode, create_saved_session_with_mode,
 };
-use crate::tui::app::{App, AppAction, AppMode};
-use crate::tui::history::{HistoryCell, history_cells_from_message};
+use crate::tui::app::{App, AppAction};
+use crate::tui::history::HistoryCell;
 use crate::tui::session_picker::SessionPickerView;
 
 use super::CommandResult;
@@ -31,7 +31,9 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
-    session.metadata.model_provider = app.api_provider.as_str().to_string();
+    session
+        .metadata
+        .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     app.sync_cost_to_metadata(&mut session.metadata);
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
@@ -39,6 +41,7 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
         Ok(state) => state,
         Err(err) => return CommandResult::error(format!("Failed to snapshot Work state: {err}")),
     };
+    session.last_auto_route = app.auto_route_for_persistence();
     let save_path = explicit_save_path.unwrap_or_else(|| {
         let dir = crate::session_manager::default_sessions_dir()
             .unwrap_or_else(|_| app.workspace.clone());
@@ -56,11 +59,16 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
                 Ok(j) => j,
                 Err(e) => return CommandResult::error(format!("Failed to serialize session: {e}")),
             };
-            match std::fs::write(&save_path, json) {
+            match crate::utils::write_atomic(&save_path, json.as_bytes()) {
                 Ok(()) => {
                     app.current_session_id = Some(session.metadata.id.clone());
                     app.current_session_metadata = Some(session.metadata.clone());
                     app.session_title = Some(session.metadata.title.clone());
+                    if let Err(err) = app.publish_pending_work_state() {
+                        return CommandResult::error(format!(
+                            "Session saved, but Work views were not published: {err}"
+                        ));
+                    }
                     CommandResult::message(format!(
                         "Session saved to {} (ID: {})",
                         save_path.display(),
@@ -105,7 +113,9 @@ pub fn fork(app: &mut App) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
-    parent.metadata.model_provider = app.api_provider.as_str().to_string();
+    parent
+        .metadata
+        .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     if let Some(cached) = app
         .current_session_metadata
         .as_ref()
@@ -127,6 +137,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         Err(err) => return CommandResult::error(format!("Failed to snapshot Work state: {err}")),
     };
     parent.work_state = work_state.clone();
+    parent.last_auto_route = app.auto_route_for_persistence();
 
     if let Err(err) = manager.save_session(&parent) {
         return CommandResult::error(format!("Failed to save parent session: {err}"));
@@ -140,15 +151,23 @@ pub fn fork(app: &mut App) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
-    forked.metadata.model_provider = app.api_provider.as_str().to_string();
+    forked
+        .metadata
+        .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     forked.metadata.copy_cost_from(&parent.metadata);
     forked.metadata.mark_forked_from(&parent.metadata);
     forked.context_references = app.session_context_references.clone();
     forked.artifacts = app.session_artifacts.clone();
     forked.work_state = work_state;
+    forked.last_auto_route = app.auto_route_for_persistence();
 
     if let Err(err) = manager.save_session(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
+    }
+    if let Err(err) = app.publish_pending_work_state() {
+        return CommandResult::error(format!(
+            "Sessions saved, but Work views were not published: {err}"
+        ));
     }
 
     app.current_session_id = Some(forked.metadata.id.clone());
@@ -265,112 +284,20 @@ pub fn load(app: &mut App, path: Option<&str>) -> CommandResult {
         }
     };
 
-    let session: crate::session_manager::SavedSession = match serde_json::from_str(&content) {
+    let _session: crate::session_manager::SavedSession = match serde_json::from_str(&content) {
         Ok(s) => s,
         Err(e) => {
             return CommandResult::error(format!("Failed to parse session file: {e}"));
         }
     };
 
-    if let Err(err) = app.restore_work_state(session.work_state.as_ref()) {
-        return CommandResult::error(format!("Failed to restore saved Work state: {err}"));
-    }
-
-    app.api_messages.clone_from(&session.messages);
-    app.clear_history();
-    let messages = app.api_messages.clone();
-    let mut message_to_cell = std::collections::HashMap::new();
-    for (message_index, message) in messages.iter().enumerate() {
-        let cells = history_cells_from_message(message);
-        let base = app.history.len();
-        if message.role == "user"
-            && let Some(offset) = cells
-                .iter()
-                .position(|cell| matches!(cell, HistoryCell::User { .. }))
-        {
-            message_to_cell.insert(message_index, base + offset);
-        }
-        app.extend_history(cells);
-    }
-    app.sync_context_references_from_session(&session.context_references, &message_to_cell);
-    app.mark_history_updated();
-    app.viewport.transcript_selection.clear();
-    let previous_provider = app.api_provider;
-    if let Some(provider) = crate::config::ApiProvider::parse(&session.metadata.model_provider) {
-        app.api_provider = provider;
-        app.reasoning_effort = app.reasoning_effort.normalize_for_provider(provider);
-        if provider != previous_provider {
-            // A context override belongs to the route that supplied it. A
-            // file load can cross providers without the live Config value in
-            // scope, so never leak the previous provider's limit into the
-            // restored route.
-            app.set_active_context_window_override(None);
-        }
-    }
-    app.set_model_selection(session.metadata.model.clone());
-    app.active_route_limits = if app.auto_model {
-        app.context_window_override_limits()
-    } else {
-        crate::route_runtime::resolve_route_candidate(
-            app.api_provider,
-            Some(&app.model),
-            Some(&session.metadata.model),
-            None,
-            app.active_context_window_override,
-        )
-        .ok()
-        .and_then(|candidate| crate::route_budget::known_route_limits(candidate.limits))
-        .or_else(|| app.context_window_override_limits())
-    };
-    app.update_model_compaction_budget();
-    app.workspace.clone_from(&session.metadata.workspace);
-    if let Some(mode) = session.metadata.mode.as_deref().and_then(AppMode::parse) {
-        app.set_mode(mode);
-    }
-    app.session.total_tokens = u32::try_from(session.metadata.total_tokens).unwrap_or(u32::MAX);
-    app.session.total_conversation_tokens = app.session.total_tokens;
-    // Accumulated token breakdown is per-runtime-session; zero on load.
-    app.session.reset_token_breakdown();
-    app.session.session_cost = 0.0;
-    app.session.session_cost_cny = 0.0;
-    app.session.subagent_cost = 0.0;
-    app.session.subagent_cost_cny = 0.0;
-    app.session.subagent_cost_event_seqs.clear();
-    app.session.displayed_cost_high_water = 0.0;
-    app.session.displayed_cost_high_water_cny = 0.0;
-    app.session.last_prompt_tokens = None;
-    app.session.last_completion_tokens = None;
-    app.session.last_output_throughput = None;
-    app.session.last_prompt_cache_hit_tokens = None;
-    app.session.last_prompt_cache_miss_tokens = None;
-    app.session.last_reasoning_replay_tokens = None;
-    app.session.turn_cache_history.clear();
-    app.current_session_id = Some(session.metadata.id.clone());
-    app.current_session_metadata = Some(session.metadata.clone());
-    app.session_title = Some(session.metadata.title.clone());
-    app.session_artifacts = session.artifacts.clone();
-    app.system_prompt = session
-        .system_prompt
-        .clone()
-        .map(crate::models::SystemPrompt::Text);
-    app.scroll_to_bottom();
-
-    CommandResult::with_message_and_action(
-        format!(
-            "Session loaded from {} (ID: {}, {} messages)",
-            load_path.display(),
-            crate::session_manager::truncate_id(&session.metadata.id),
-            session.metadata.message_count
-        ),
-        crate::tui::app::AppAction::SyncSession {
-            session_id: app.current_session_id.clone(),
-            messages: app.api_messages.clone(),
-            system_prompt: app.system_prompt.clone(),
-            model: app.model.clone(),
-            workspace: app.workspace.clone(),
-            mode: app.mode,
-        },
-    )
+    // The command layer only validates the file shape. The event loop reloads
+    // Config once and applies the session plus route atomically before it
+    // rebuilds or syncs the engine.
+    // Success is reported only after the event loop re-reads live Config and
+    // atomically applies the session route. Emitting it here would leave a
+    // false receipt in the current transcript if that final validation fails.
+    CommandResult::action(crate::tui::app::AppAction::LoadSession(load_path))
 }
 
 /// Trigger context compaction
@@ -506,7 +433,8 @@ fn export_turn_handoff(app: &mut App, dest: Option<&str>) -> CommandResult {
 pub fn sessions(app: &mut App, arg: Option<&str>) -> CommandResult {
     let trimmed = arg.unwrap_or("").trim();
     if trimmed.is_empty() {
-        app.view_stack.push(SessionPickerView::new(&app.workspace));
+        app.view_stack
+            .push(SessionPickerView::new(&app.workspace, app.ui_locale));
         return CommandResult::ok();
     }
 
@@ -515,7 +443,8 @@ pub fn sessions(app: &mut App, arg: Option<&str>) -> CommandResult {
     match action.as_str() {
         "prune" => prune(app, parts.next()),
         "show" | "list" | "picker" => {
-            app.view_stack.push(SessionPickerView::new(&app.workspace));
+            app.view_stack
+                .push(SessionPickerView::new(&app.workspace, app.ui_locale));
             CommandResult::ok()
         }
         _ => CommandResult::error(format!(
@@ -594,7 +523,7 @@ fn line_to_string(line: ratatui::text::Line<'static>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DEFAULT_TEXT_MODEL};
+    use crate::config::Config;
     use crate::test_support::EnvVarGuard;
     use crate::tui::app::{App, AppMode, ReasoningEffort, TuiOptions, TurnCacheRecord};
     use std::time::Instant;
@@ -667,6 +596,41 @@ mod tests {
     }
 
     #[test]
+    fn save_preserves_latest_auto_route_receipt() {
+        let tmpdir = TempDir::new().unwrap();
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let save_path = tmpdir.path().join("auto_route_session.json");
+        let receipt = crate::model_routing::AutoRouteReceipt {
+            tier: crate::model_routing::AutoRouteTier::Fast,
+            pair: crate::model_routing::AutoRoutePair {
+                strong: crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+                fast: Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string()),
+            },
+            scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
+            data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
+            reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+                crate::model_routing::AutoRouteHeuristicReason::ShortRequest,
+            ),
+        };
+        app.set_model_selection("auto".to_string());
+        app.last_effective_provider = Some(crate::config::ApiProvider::Zai);
+        app.last_effective_provider_identity = Some("zai".to_string());
+        app.last_effective_model = Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string());
+        app.last_auto_route_receipt = Some(receipt.clone());
+
+        let result = save(&mut app, Some(save_path.to_str().unwrap()));
+
+        assert!(!result.is_error);
+        let saved: crate::session_manager::SavedSession =
+            serde_json::from_str(&std::fs::read_to_string(save_path).unwrap()).unwrap();
+        let route = saved.last_auto_route.expect("latest Auto route");
+        assert_eq!(route.provider, crate::config::ApiProvider::Zai);
+        assert_eq!(route.provider_identity, "zai");
+        assert_eq!(route.model, crate::config::ZAI_GLM_5_TURBO_MODEL);
+        assert_eq!(route.receipt, receipt);
+    }
+
+    #[test]
     fn fork_saves_parent_and_switches_to_child_session() {
         let tmpdir = TempDir::new().unwrap();
         let _lock = crate::test_support::lock_test_env();
@@ -675,6 +639,7 @@ mod tests {
         let home_guard = EnvVarGuard::set("HOME", &home);
         let previous_home = home_guard.previous();
         let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "lm-studio");
         app.current_session_id = Some("parent-session".to_string());
         let mut cached_parent = create_saved_session_with_id_and_mode(
             "parent-session".to_string(),
@@ -699,6 +664,29 @@ mod tests {
                 cache_control: None,
             }],
         });
+        {
+            let mut todos = app.todos.try_lock().expect("todos lock");
+            todos.add(
+                "preserve fork Work".to_string(),
+                crate::tools::todo::TodoStatus::InProgress,
+            );
+        }
+        {
+            let mut plan = app.plan_state.try_lock().expect("plan lock");
+            plan.update(crate::tools::plan::UpdatePlanArgs {
+                objective: Some("Fork without Work drift".to_string()),
+                ..crate::tools::plan::UpdatePlanArgs::default()
+            });
+        }
+        app.cycle_effort();
+        let expected_work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("graph-backed Work state");
+        assert!(
+            expected_work.graph.is_some(),
+            "fork fixture must use a graph"
+        );
 
         let result = fork(&mut app);
 
@@ -714,6 +702,11 @@ mod tests {
             .expect("parent saved");
         let child = manager.load_session(&new_id).expect("child saved");
         assert_eq!(parent.messages.len(), 1);
+        assert_eq!(parent.metadata.model_provider, "custom");
+        assert_eq!(
+            parent.metadata.model_provider_id.as_deref(),
+            Some("lm-studio")
+        );
         assert_eq!(parent.metadata.title, cached_parent.title);
         assert_eq!(parent.metadata.created_at, cached_parent.created_at);
         assert_eq!(
@@ -721,6 +714,13 @@ mod tests {
             Some("parent-session")
         );
         assert_eq!(child.metadata.forked_from_message_count, Some(1));
+        assert_eq!(child.metadata.model_provider, "custom");
+        assert_eq!(
+            child.metadata.model_provider_id.as_deref(),
+            Some("lm-studio")
+        );
+        assert_eq!(parent.work_state.as_ref(), Some(&expected_work));
+        assert_eq!(child.work_state.as_ref(), Some(&expected_work));
         let cached_child = app
             .current_session_metadata
             .as_ref()
@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_valid_session_restores_state() {
+    fn test_load_valid_session_defers_state_restore_to_event_loop() {
         let tmpdir = TempDir::new().unwrap();
         let mut app1 = create_test_app_with_tmpdir(&tmpdir);
         // Set up some state to save
@@ -1045,28 +1045,20 @@ mod tests {
                 },
             });
         let result = load(&mut app2, Some(save_path.to_str().unwrap()));
-        assert!(result.message.is_some());
-        let msg = result.message.unwrap();
-        assert!(msg.contains("Session loaded from"));
-        assert!(msg.contains("ID:"));
-        assert!(msg.contains("messages"));
-        assert_eq!(app2.api_messages.len(), 1);
-        assert_eq!(app2.session.total_tokens, 500);
-        assert_eq!(app2.mode, AppMode::Plan);
-        assert!(app2.current_session_id.is_some());
-        assert!(app2.system_prompt.is_none());
-        assert!(app2.session_context_references.is_empty());
+        assert_eq!(result.message, None);
+        assert!(app2.api_messages.is_empty());
+        assert_eq!(app2.session.total_tokens, 0);
+        assert!(app2.current_session_id.is_none());
+        assert!(app2.system_prompt.is_some());
+        assert_eq!(app2.session_context_references.len(), 1);
         assert!(matches!(
             result.action,
-            Some(AppAction::SyncSession {
-                mode: AppMode::Plan,
-                ..
-            })
+            Some(AppAction::LoadSession(path)) if path == save_path
         ));
     }
 
     #[test]
-    fn explicit_save_and_load_round_trip_work_state() {
+    fn explicit_save_persists_work_state_and_load_defers_application() {
         let tmpdir = TempDir::new().unwrap();
         let mut saved_app = create_test_app_with_tmpdir(&tmpdir);
         {
@@ -1091,10 +1083,15 @@ mod tests {
         let mut loaded_app = create_test_app_with_tmpdir(&tmpdir);
         let loaded = load(&mut loaded_app, Some(save_path.to_str().unwrap()));
         assert!(!loaded.is_error, "{:?}", loaded.message);
-        assert_eq!(
-            loaded_app.work_state_snapshot().expect("snapshot"),
-            expected
-        );
+        assert_eq!(loaded_app.work_state_snapshot().expect("snapshot"), None);
+        assert!(matches!(
+            loaded.action,
+            Some(AppAction::LoadSession(path)) if path == save_path
+        ));
+        let saved_session: crate::session_manager::SavedSession =
+            serde_json::from_str(&std::fs::read_to_string(&save_path).expect("saved session file"))
+                .expect("saved session JSON");
+        assert_eq!(saved_session.work_state, expected);
     }
 
     #[test]
@@ -1118,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn load_auto_model_session_restores_auto_mode() {
+    fn load_auto_model_session_defers_model_restore_to_event_loop() {
         let tmpdir = TempDir::new().unwrap();
         let mut saved_app = create_test_app_with_tmpdir(&tmpdir);
         saved_app.set_model_selection("auto".to_string());
@@ -1133,17 +1130,17 @@ mod tests {
         let result = load(&mut app, Some(save_path.to_str().unwrap()));
 
         assert!(!result.is_error);
-        assert!(app.auto_model);
-        assert_eq!(app.model, "auto");
-        assert_eq!(app.model_selection_for_persistence(), "auto");
-        assert_eq!(app.last_effective_model, None);
-        assert_eq!(app.last_effective_reasoning_effort, None);
-        assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
-        assert_eq!(app.effective_model_for_budget(), DEFAULT_TEXT_MODEL);
+        assert!(!app.auto_model);
+        assert_eq!(app.model, "deepseek-v4-flash");
+        assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::LoadSession(path)) if path == save_path
+        ));
     }
 
     #[test]
-    fn load_restores_artifact_registry() {
+    fn load_defers_artifact_registry_restore_to_event_loop() {
         let tmpdir = TempDir::new().unwrap();
         let mut saved_app = create_test_app_with_tmpdir(&tmpdir);
         saved_app
@@ -1179,11 +1176,16 @@ mod tests {
         let result = load(&mut app, Some(save_path.to_str().unwrap()));
 
         assert!(!result.is_error);
-        assert_eq!(app.session_artifacts, saved_app.session_artifacts);
+        assert_eq!(app.session_artifacts.len(), 1);
+        assert_eq!(app.session_artifacts[0].id, "art_stale");
+        assert!(matches!(
+            result.action,
+            Some(AppAction::LoadSession(path)) if path == save_path
+        ));
     }
 
     #[test]
-    fn load_resets_cache_history_and_cost() {
+    fn load_defers_telemetry_reset_to_event_loop() {
         let tmpdir = TempDir::new().unwrap();
         let mut saved_app = create_test_app_with_tmpdir(&tmpdir);
         saved_app.api_messages.push(crate::models::Message {
@@ -1212,6 +1214,7 @@ mod tests {
         app.session.last_reasoning_replay_tokens = Some(12);
         app.push_turn_cache_record(TurnCacheRecord {
             provider: None,
+            provider_identity: None,
             model: None,
             auto_model: false,
             input_tokens: 120,
@@ -1224,22 +1227,17 @@ mod tests {
 
         let result = load(&mut app, Some(save_path.to_str().unwrap()));
 
-        assert!(result.message.is_some());
-        assert_eq!(app.session.total_tokens, 500);
-        assert_eq!(app.session.total_conversation_tokens, 500);
-        assert_eq!(app.session.session_cost, 0.0);
-        assert_eq!(app.session.session_cost_cny, 0.0);
-        assert_eq!(app.session.subagent_cost, 0.0);
-        assert_eq!(app.session.subagent_cost_cny, 0.0);
-        assert!(app.session.subagent_cost_event_seqs.is_empty());
-        assert_eq!(app.session.displayed_cost_high_water, 0.0);
-        assert_eq!(app.session.displayed_cost_high_water_cny, 0.0);
-        assert_eq!(app.session.last_prompt_tokens, None);
-        assert_eq!(app.session.last_completion_tokens, None);
-        assert_eq!(app.session.last_prompt_cache_hit_tokens, None);
-        assert_eq!(app.session.last_prompt_cache_miss_tokens, None);
-        assert_eq!(app.session.last_reasoning_replay_tokens, None);
-        assert!(app.session.turn_cache_history.is_empty());
+        assert_eq!(result.message, None);
+        assert_eq!(app.session.total_tokens, 0);
+        assert_eq!(app.session.session_cost, 1.25);
+        assert_eq!(app.session.session_cost_cny, 9.13);
+        assert_eq!(app.session.subagent_cost, 0.75);
+        assert_eq!(app.session.subagent_cost_cny, 5.48);
+        assert_eq!(app.session.turn_cache_history.len(), 1);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::LoadSession(path)) if path == save_path
+        ));
     }
 
     #[test]
@@ -1265,6 +1263,22 @@ mod tests {
             content: "Hi there".to_string(),
             streaming: false,
         });
+        {
+            let mut todos = app.todos.try_lock().expect("todos lock");
+            todos.add(
+                "export must not mutate this".to_string(),
+                crate::tools::todo::TodoStatus::InProgress,
+            );
+        }
+        app.cycle_effort();
+        let work_before = app.work_state_snapshot().expect("Work snapshot");
+        assert!(
+            work_before
+                .as_ref()
+                .and_then(|work| work.graph.as_ref())
+                .is_some(),
+            "export fixture must use graph-backed Work"
+        );
 
         let export_path = tmpdir.path().join("export.md");
         let result = export(&mut app, Some(export_path.to_str().unwrap()));
@@ -1278,6 +1292,12 @@ mod tests {
         assert!(content.contains("**Model:**"));
         assert!(content.contains("**You:**"));
         assert!(content.contains("**Assistant:**"));
+        assert_eq!(
+            app.work_state_snapshot()
+                .expect("Work snapshot after export"),
+            work_before,
+            "export is a projection and must never write Work state"
+        );
     }
 
     #[test]

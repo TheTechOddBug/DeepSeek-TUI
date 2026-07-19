@@ -213,6 +213,10 @@ pub struct Usage {
     pub prompt_cache_hit_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_miss_tokens: Option<u32>,
+    /// Cache-creation / cache-write tokens (Anthropic `cache_creation_input_tokens`).
+    /// Billed at the cache-write rate when the pricing row publishes one (#4318).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_write_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
     /// Approximate input tokens spent re-sending prior `reasoning_content`
@@ -360,16 +364,24 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
             Some(128_000)
         }
         "claude-haiku-4-5" => Some(64_000),
-        "arcee-ai/trinity-large-thinking"
-        | "trinity-large-thinking"
-        | "moonshotai/kimi-k2.7-code"
+        "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" => Some(262_144),
+        // Kimi K2.7 Code has a 256K context window but its documented default
+        // maximum generation is 32K. Keeping those separate prevents the
+        // input budget from collapsing to the 1K emergency floor (#4368).
+        "moonshotai/kimi-k2.7-code"
         | "moonshotai/kimi-k2.6"
         | "kimi-k2.7-code"
         | "kimi-k2.6"
-        | "kimi-for-coding" => Some(262_144),
+        | "kimi-for-coding" => Some(32_768),
         "minimax/minimax-m3" | "minimax-m3" => Some(524_288),
-        "qwen/qwen3.6-35b-a3b" | "qwen/qwen3.6-27b" => Some(262_140),
-        "qwen/qwen3.6-flash" | "qwen/qwen3.6-max-preview" | "qwen/qwen3.6-plus" => Some(65_536),
+        // Alibaba's published limit is 65,536 output tokens; the earlier
+        // 262,140 mirrored the context window (data-entry smell flagged by
+        // MODEL_PROVIDER_AUDIT A2/D-7, vendor-verified 2026-07-12).
+        "qwen/qwen3.6-35b-a3b"
+        | "qwen/qwen3.6-27b"
+        | "qwen/qwen3.6-flash"
+        | "qwen/qwen3.6-max-preview"
+        | "qwen/qwen3.6-plus" => Some(65_536),
         "z-ai/glm-5.1" | "z-ai/glm-5.2" | "z-ai/glm-5-turbo" | "glm-5.1" | "glm-5.2"
         | "glm-5-turbo" => Some(131_072),
         "xiaomi/mimo-v2.5-pro"
@@ -415,8 +427,10 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "claude-fable-5"
             | "gpt-5-codex"
             | "gpt-5.3-codex"
+            | "trinity-mini"
             | "arcee-ai/trinity-large-thinking"
             | "trinity-large-thinking"
+            | "thinkingmachines/inkling"
             | "google/gemma-4-31b-it"
             | "google/gemma-4-31b-it:free"
             | "google/gemma-4-26b-a4b-it"
@@ -445,6 +459,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "qwen/qwen3.6-max-preview"
             | "qwen/qwen3.6-27b"
             | "qwen/qwen3.6-plus"
+            | "qwen/qwen3.7-plus"
             | "tencent/hy3-preview"
             | "xiaomi/mimo-v2.5-pro"
             | "xiaomi/mimo-v2.5"
@@ -506,7 +521,7 @@ fn is_openai_codex_model(model_lower: &str) -> bool {
     )
 }
 
-fn has_date_snapshot_suffix(model_lower: &str, prefix: &str) -> bool {
+pub(crate) fn has_date_snapshot_suffix(model_lower: &str, prefix: &str) -> bool {
     let Some(rest) = model_lower.strip_prefix(prefix) else {
         return false;
     };
@@ -900,14 +915,24 @@ mod tests {
     }
 
     #[test]
-    fn arcee_direct_models_have_static_windows_without_reasoning_flag() {
+    fn arcee_direct_models_preserve_verified_capabilities_only() {
         assert_eq!(
             context_window_for_model("trinity-large-preview"),
             Some(262_144)
         );
         assert!(!model_supports_reasoning("trinity-large-preview"));
         assert_eq!(context_window_for_model("trinity-mini"), Some(128_000));
-        assert!(!model_supports_reasoning("trinity-mini"));
+        assert_eq!(max_output_tokens_for_model("trinity-mini"), None);
+        assert!(model_supports_reasoning("trinity-mini"));
+    }
+
+    #[test]
+    fn qwen37_plus_and_inkling_reasoning_do_not_invent_limits() {
+        for model in ["qwen/qwen3.7-plus", "thinkingmachines/inkling"] {
+            assert_eq!(context_window_for_model(model), None, "{model}");
+            assert_eq!(max_output_tokens_for_model(model), None, "{model}");
+            assert!(model_supports_reasoning(model), "{model}");
+        }
     }
 
     #[test]
@@ -961,6 +986,7 @@ mod tests {
         // ids without the OpenRouter vendor prefix; both spellings must
         // resolve identical metadata (#1310 ride-along on #3023).
         for (model, expected_window) in [
+            ("kimi-k3", 1_048_576),
             ("kimi-k2.7-code", 262_144),
             ("kimi-k2.6", 262_144),
             ("minimax-m3", 1_000_000),
@@ -982,12 +1008,14 @@ mod tests {
         // vision model): same compact window as 5.1 but reasoning-capable.
         assert_eq!(context_window_for_model("z-ai/glm-5-turbo"), Some(202_752));
         assert!(model_supports_reasoning("z-ai/glm-5-turbo"));
-        assert_eq!(max_output_tokens_for_model("kimi-k2.7-code"), Some(262_144));
-        assert_eq!(max_output_tokens_for_model("kimi-k2.6"), Some(262_144));
         assert_eq!(
-            max_output_tokens_for_model("kimi-for-coding"),
-            Some(262_144)
+            crate::model_catalog::resolved_max_output("kimi-k2.7-code"),
+            Some(32_768)
         );
+        assert_eq!(max_output_tokens_for_model("kimi-k2.7-code"), Some(32_768));
+        assert_eq!(max_output_tokens_for_model("kimi-k2.6"), Some(32_768));
+        assert_eq!(max_output_tokens_for_model("kimi-for-coding"), Some(32_768));
+        assert_eq!(max_output_tokens_for_model("kimi-k3"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("minimax-m3"), Some(524_288));
         assert_eq!(max_output_tokens_for_model("glm-5.1"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("glm-5.2"), Some(131_072));

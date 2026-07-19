@@ -21,8 +21,11 @@ use codewhale_config::catalog::{
     ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
 };
 use codewhale_config::route::ReadyRouteCandidate;
+use codewhale_config::{auth_mode_disables_api_key, is_upstream_auth_header};
 
-use crate::config::{ApiProvider, Config, RetryPolicy, wire_model_for_provider};
+use crate::config::{
+    ApiProvider, Config, RetryPolicy, validate_route, wire_model_for_provider_route,
+};
 use crate::llm_client::{
     LlmClient, LlmError, RetryConfig as LlmRetryConfig, extract_retry_after,
     sanitize_http_error_body, with_retry,
@@ -164,8 +167,16 @@ pub struct SpeechSynthesisResponse {
 pub struct DeepSeekClient {
     pub(super) http_client: reqwest::Client,
     api_key: String,
+    /// Exact configured credential values removed from model-bound tool
+    /// results. Structural redaction handles config/JSON assignments, while
+    /// this list closes the gap for bare provider tokens with no recognizable
+    /// prefix (for example token-plan and provider-specific keys).
+    model_bound_secret_values: Arc<Vec<String>>,
     pub(super) base_url: String,
     pub(super) api_provider: ApiProvider,
+    /// ChatGPT account id captured through the same consent-gated credential
+    /// resolution as the Codex bearer token.
+    pub(super) codex_account_id: Option<String>,
     retry: RetryPolicy,
     default_model: String,
     connection_health: Arc<AsyncMutex<ConnectionHealth>>,
@@ -182,6 +193,25 @@ const RECOVERY_PROBE_COOLDOWN: Duration = Duration::from_secs(15);
 const DEFAULT_CLIENT_RATE_LIMIT_RPS: f64 = 8.0;
 const DEFAULT_CLIENT_RATE_LIMIT_BURST: f64 = 16.0;
 const ALLOW_INSECURE_HTTP_ENV: &str = "DEEPSEEK_ALLOW_INSECURE_HTTP";
+
+fn client_user_agent(api_provider: ApiProvider) -> &'static str {
+    // The ChatGPT Codex backend is the sole route with a documented
+    // compatibility exception. Kimi Code, including K3, must keep the normal
+    // Codewhale identity rather than impersonating a Kimi CLI.
+    if api_provider == ApiProvider::OpenaiCodex {
+        concat!(
+            "codex_cli_rs/0.137.0 (CodeWhale ",
+            env!("CARGO_PKG_VERSION"),
+            ")"
+        )
+    } else {
+        concat!(
+            "Mozilla/5.0 (compatible; codewhale/",
+            env!("CARGO_PKG_VERSION"),
+            "; +https://github.com/Hmbown/CodeWhale)"
+        )
+    }
+}
 
 /// Upper bound on a single sleep inside the provider-wide rate-limit pause
 /// loop in `send_with_retry`. The pause window lives in process-global state
@@ -386,8 +416,10 @@ impl Clone for DeepSeekClient {
         Self {
             http_client: self.http_client.clone(),
             api_key: self.api_key.clone(),
+            model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
             base_url: self.base_url.clone(),
             api_provider: self.api_provider,
+            codex_account_id: self.codex_account_id.clone(),
             retry: self.retry.clone(),
             default_model: self.default_model.clone(),
             connection_health: self.connection_health.clone(),
@@ -398,6 +430,160 @@ impl Clone for DeepSeekClient {
             stream_idle_timeout: self.stream_idle_timeout,
         }
     }
+}
+
+const MIN_EXACT_SECRET_CHARS: usize = 8;
+
+fn push_model_bound_secret(values: &mut Vec<String>, value: Option<&str>) {
+    let Some(value) = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.chars().count() >= MIN_EXACT_SECRET_CHARS)
+    else {
+        return;
+    };
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn model_bound_secret_store_slot(provider: ApiProvider) -> Option<&'static str> {
+    match provider {
+        ApiProvider::DeepseekCN => Some("deepseek"),
+        ApiProvider::SiliconflowCn => Some("siliconflow"),
+        ApiProvider::Custom => None,
+        _ => Some(provider.as_str()),
+    }
+}
+
+fn push_file_backed_model_bound_secrets(values: &mut Vec<String>) {
+    // Unit tests must never inspect the developer's real credential store.
+    // The isolated regression below opts in with a temporary CODEWHALE_HOME,
+    // matching Config's existing secret-store test discipline.
+    #[cfg(test)]
+    if std::env::var_os("CODEWHALE_HOME").is_none()
+        || std::env::var_os("CODEWHALE_SECRET_BACKEND").is_none()
+    {
+        return;
+    }
+
+    // Redaction needs only a best-effort view of inactive file-backed
+    // credentials. It must not cause a legacy-store migration merely because a
+    // client is being constructed (notably for `doctor`'s live probe). Keep
+    // this file-only to avoid a burst of OS-keychain prompts for inactive
+    // providers; the active credential is already supplied by the route
+    // resolver.
+    let secrets = codewhale_secrets::Secrets::file_backed_read_only();
+    let mut slots = Vec::new();
+    for provider in ApiProvider::all()
+        .iter()
+        .copied()
+        .chain(std::iter::once(ApiProvider::DeepseekCN))
+    {
+        let Some(slot) = model_bound_secret_store_slot(provider) else {
+            continue;
+        };
+        if !slots.contains(&slot) {
+            slots.push(slot);
+        }
+    }
+    // The legacy literal `provider = "custom"` route owns this durable slot.
+    slots.push("custom");
+
+    for slot in slots {
+        if let Ok(Some(secret)) = secrets.get(slot) {
+            push_model_bound_secret(values, Some(&secret));
+        }
+    }
+}
+
+fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    push_model_bound_secret(&mut values, Some(active_api_key));
+    push_model_bound_secret(&mut values, config.api_key.as_deref());
+    push_model_bound_secret(&mut values, config.sandbox_api_key.as_deref());
+    push_model_bound_secret(
+        &mut values,
+        config
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key.as_deref()),
+    );
+    push_model_bound_secret(
+        &mut values,
+        config
+            .vision_model
+            .as_ref()
+            .and_then(|vision| vision.api_key.as_deref()),
+    );
+
+    if let Some(headers) = config.http_headers.as_ref() {
+        for (name, value) in headers {
+            if is_upstream_auth_header(name) {
+                push_model_bound_secret(&mut values, Some(value));
+            }
+        }
+    }
+
+    for provider in ApiProvider::all()
+        .iter()
+        .copied()
+        .chain(std::iter::once(ApiProvider::DeepseekCN))
+        .filter(|provider| *provider != ApiProvider::Custom)
+    {
+        for env_name in provider.env_vars() {
+            if let Ok(value) = std::env::var(env_name) {
+                push_model_bound_secret(&mut values, Some(&value));
+            }
+        }
+        let Some(provider_config) = config.provider_config_for(provider) else {
+            continue;
+        };
+        push_model_bound_secret(&mut values, provider_config.api_key.as_deref());
+        if let Some(headers) = provider_config.http_headers.as_ref() {
+            for (name, value) in headers {
+                if is_upstream_auth_header(name) {
+                    push_model_bound_secret(&mut values, Some(value));
+                }
+            }
+        }
+    }
+
+    if let Some(providers) = config.providers.as_ref() {
+        for provider_config in providers.custom.values() {
+            push_model_bound_secret(&mut values, provider_config.api_key.as_deref());
+            if let Some(env_name) = provider_config
+                .api_key_env
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                && let Ok(value) = std::env::var(env_name)
+            {
+                push_model_bound_secret(&mut values, Some(&value));
+            }
+            if let Some(headers) = provider_config.http_headers.as_ref() {
+                for (name, value) in headers {
+                    if is_upstream_auth_header(name) {
+                        push_model_bound_secret(&mut values, Some(value));
+                    }
+                }
+            }
+        }
+    }
+
+    push_file_backed_model_bound_secrets(&mut values);
+
+    // Replace longer values first in case one credential happens to contain
+    // another as a prefix.
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values
+}
+
+fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
+    let mut redacted = text.to_string();
+    for secret in exact_secret_values {
+        redacted = redacted.replace(secret, codewhale_config::persistence::REDACTED);
+    }
+    codewhale_config::persistence::redact_secrets(&redacted)
 }
 
 // === Helpers ===
@@ -716,8 +902,8 @@ impl DeepSeekClient {
     /// `config`.
     pub fn from_candidate(config: &Config, candidate: &ReadyRouteCandidate) -> Result<Self> {
         Self::from_parts(
-            candidate.endpoint.base_url.clone(),
-            candidate.wire_model_id.as_str().to_string(),
+            candidate.endpoint().base_url.clone(),
+            candidate.wire_model_id().as_str().to_string(),
             config,
         )
     }
@@ -728,12 +914,24 @@ impl DeepSeekClient {
     /// the two entry points; everything else (auth, provider, retry, headers,
     /// timeouts) is derived from `config` so the two paths cannot drift.
     fn from_parts(base_url: String, default_model: String, config: &Config) -> Result<Self> {
-        let api_key = config.deepseek_api_key()?;
         let api_provider = config.api_provider();
+        if api_provider == ApiProvider::OpencodeGo {
+            validate_route(api_provider, &default_model).map_err(anyhow::Error::msg)?;
+        }
+        let (api_key, codex_account_id) = if api_provider == ApiProvider::OpenaiCodex {
+            let credentials = config.codex_credentials()?;
+            (credentials.access_token, credentials.account_id)
+        } else {
+            (config.deepseek_api_key()?, None)
+        };
+        let model_bound_secret_values =
+            Arc::new(configured_model_bound_secret_values(config, &api_key));
         validate_base_url_security(&base_url)?;
         let retry = config.retry_policy();
         let stream_idle_timeout = Duration::from_secs(config.stream_chunk_timeout_secs());
         let http_headers = config.http_headers();
+        let auth_disabled =
+            auth_mode_disables_api_key(config.auth_mode_for_provider(api_provider).as_deref());
         let insecure_skip_tls_verify = config.insecure_skip_tls_verify();
         let path_suffix = config
             .provider_config_for(api_provider)
@@ -778,14 +976,21 @@ impl DeepSeekClient {
             ));
         }
 
-        let http_client =
-            Self::build_http_client(&api_key, &http_headers, api_provider, &base_url)?;
+        let http_client = Self::build_http_client_with_auth_mode(
+            &api_key,
+            &http_headers,
+            api_provider,
+            &base_url,
+            auth_disabled,
+        )?;
 
         Ok(Self {
             http_client,
             api_key,
+            model_bound_secret_values,
             base_url,
             api_provider,
+            codex_account_id,
             retry,
             default_model,
             connection_health: Arc::new(AsyncMutex::new(ConnectionHealth::default())),
@@ -797,32 +1002,77 @@ impl DeepSeekClient {
         })
     }
 
+    /// Return a request whose tool results are safe to send to an upstream
+    /// model provider.
+    ///
+    /// Tool output is untrusted model-bound data: it can contain a whole
+    /// config file, a bare credential emitted by a shell command, or a
+    /// spillover receipt whose backing content is later persisted by the chat
+    /// adapter. Keep this boundary above all protocol adapters so Chat,
+    /// Anthropic Messages, and OpenAI Responses — streaming and non-streaming
+    /// alike — receive the same sanitized payload.
+    fn prepare_model_bound_request(&self, mut request: MessageRequest) -> MessageRequest {
+        let repair =
+            crate::tool_history_repair::repair_tool_call_pairs_for_provider(&mut request.messages);
+        if !repair.is_empty() {
+            tracing::warn!(
+                repaired_call_ids = ?repair.repaired_call_ids,
+                duplicate_result_ids = ?repair.duplicate_result_ids,
+                orphan_result_ids = ?repair.orphan_result_ids,
+                "repaired tool call/result history before provider projection"
+            );
+        }
+        for message in &mut request.messages {
+            for block in &mut message.content {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    *content = redact_model_bound_text(content, &self.model_bound_secret_values);
+                }
+            }
+        }
+        request
+    }
+
+    /// Redact configured credentials from text that has been flattened into a
+    /// normal model-bound text block. Most requests preserve tool results as
+    /// structured blocks and are sanitized by `prepare_model_bound_request`,
+    /// but routing/classification prompts intentionally summarize them first.
+    pub(crate) fn redact_model_bound_text(&self, text: &str) -> String {
+        redact_model_bound_text(text, &self.model_bound_secret_values)
+    }
+
+    #[cfg(test)]
     fn build_http_client(
         api_key: &str,
         extra_headers: &HashMap<String, String>,
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<reqwest::Client> {
-        let headers = build_default_headers(api_key, extra_headers, api_provider, base_url)?;
-        // The ChatGPT Codex backend sits behind Cloudflare bot protection that
-        // only admits the Codex CLI's user agent; present a codex_cli_rs UA on
-        // that path so the request is handled like the official client.
-        let user_agent: &str = if api_provider == ApiProvider::OpenaiCodex {
-            concat!(
-                "codex_cli_rs/0.137.0 (CodeWhale ",
-                env!("CARGO_PKG_VERSION"),
-                ")"
-            )
-        } else {
-            concat!(
-                "Mozilla/5.0 (compatible; codewhale/",
-                env!("CARGO_PKG_VERSION"),
-                "; +https://github.com/Hmbown/CodeWhale)"
-            )
-        };
+        Self::build_http_client_with_auth_mode(
+            api_key,
+            extra_headers,
+            api_provider,
+            base_url,
+            false,
+        )
+    }
+
+    fn build_http_client_with_auth_mode(
+        api_key: &str,
+        extra_headers: &HashMap<String, String>,
+        api_provider: ApiProvider,
+        base_url: &str,
+        auth_disabled: bool,
+    ) -> Result<reqwest::Client> {
+        let headers = build_default_headers(
+            api_key,
+            extra_headers,
+            api_provider,
+            base_url,
+            auth_disabled,
+        )?;
         let mut builder = crate::tls::reqwest_client_builder()
             .default_headers(headers)
-            .user_agent(user_agent)
+            .user_agent(client_user_agent(api_provider))
             .connect_timeout(Duration::from_secs(30))
             .tcp_keepalive(Some(Duration::from_secs(30)))
             .http2_keep_alive_interval(Some(Duration::from_secs(15)))
@@ -850,6 +1100,7 @@ impl DeepSeekClient {
             extra_headers,
             ApiProvider::Deepseek,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            false,
         )
     }
 
@@ -860,7 +1111,17 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<HeaderMap> {
-        build_default_headers(api_key, extra_headers, api_provider, base_url)
+        build_default_headers(api_key, extra_headers, api_provider, base_url, false)
+    }
+
+    #[cfg(test)]
+    fn default_headers_for_provider_with_auth_disabled(
+        api_key: &str,
+        extra_headers: &HashMap<String, String>,
+        api_provider: ApiProvider,
+        base_url: &str,
+    ) -> Result<HeaderMap> {
+        build_default_headers(api_key, extra_headers, api_provider, base_url, true)
     }
 }
 
@@ -869,6 +1130,7 @@ fn build_default_headers(
     extra_headers: &HashMap<String, String>,
     api_provider: ApiProvider,
     base_url: &str,
+    auth_disabled: bool,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -883,7 +1145,9 @@ fn build_default_headers(
             HeaderValue::from_static("2023-06-01"),
         );
     }
-    let auth_header_name = if !api_key.is_empty()
+    let auth_header_name = if auth_disabled {
+        None
+    } else if !api_key.is_empty()
         && api_provider_uses_anthropic_messages(api_provider)
         && api_provider != ApiProvider::Openmodel
     {
@@ -913,6 +1177,9 @@ fn build_default_headers(
         if name.is_empty() || value.is_empty() {
             continue;
         }
+        if auth_disabled && is_upstream_auth_header(name) {
+            continue;
+        }
         let header_name = HeaderName::from_bytes(name.as_bytes())?;
         if header_name == AUTHORIZATION
             || header_name == CONTENT_TYPE
@@ -935,12 +1202,21 @@ fn is_auth_dialect_header(header_name: &HeaderName) -> bool {
 fn api_provider_uses_anthropic_messages(api_provider: ApiProvider) -> bool {
     matches!(
         api_provider,
-        ApiProvider::Anthropic | ApiProvider::DeepseekAnthropic | ApiProvider::Openmodel
+        ApiProvider::Anthropic
+            | ApiProvider::DeepseekAnthropic
+            | ApiProvider::MinimaxAnthropic
+            | ApiProvider::Openmodel
     )
 }
 
 fn api_provider_skips_models_probe(api_provider: ApiProvider) -> bool {
     matches!(api_provider, ApiProvider::DeepseekAnthropic)
+}
+
+#[must_use]
+#[cfg(test)]
+pub(crate) fn provider_api_key_verification_is_observed(api_provider: ApiProvider) -> bool {
+    !api_provider_skips_models_probe(api_provider)
 }
 
 /// Verify a provider API key by hitting the `/models` endpoint
@@ -960,7 +1236,7 @@ pub async fn verify_provider_api_key(
         // way; accept the key optimistically (same as health_check).
         return Ok(());
     }
-    let headers = build_default_headers(api_key, &Default::default(), provider, base_url)
+    let headers = build_default_headers(api_key, &Default::default(), provider, base_url, false)
         .map_err(|err| format!("failed to build auth headers: {err:#}"))?;
     let client = crate::tls::reqwest_client_builder()
         .default_headers(headers)
@@ -1131,7 +1407,7 @@ impl DeepSeekClient {
         model: &str,
         target_language: &str,
     ) -> Result<String> {
-        let model = wire_model_for_provider(self.api_provider, model);
+        let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
         if api_provider_uses_anthropic_messages(self.api_provider) {
             let response = self
                 .handle_anthropic_message(translation_message_request(text, model, target_language))
@@ -1195,6 +1471,7 @@ impl DeepSeekClient {
             .context("Failed to read models response body")?;
 
         parse_models_response(&response_text)
+            .map(|models| apply_provider_model_cutline(self.api_provider, models))
     }
 
     /// The catalog provider id for this client (the `ProviderKind` slug, falling
@@ -1270,8 +1547,10 @@ impl DeepSeekClient {
                 })
                 .collect()
         } else {
-            let models =
-                parse_models_response(&body).map_err(|_| CatalogRefreshError::InvalidResponse)?;
+            let models = apply_provider_model_cutline(
+                self.api_provider,
+                parse_models_response(&body).map_err(|_| CatalogRefreshError::InvalidResponse)?,
+            );
             if models.is_empty() {
                 return Err(CatalogRefreshError::EmptyList);
             }
@@ -1287,8 +1566,10 @@ impl DeepSeekClient {
                     limit: None,
                     cost: None,
                     modalities: None,
+                    attachment: None,
                     reasoning: None,
                     tool_call: None,
+                    structured_output: None,
                     reasoning_options: Vec::new(),
                     source: CatalogSource::Live {
                         base_url_fingerprint: fingerprint.clone(),
@@ -1360,7 +1641,7 @@ impl DeepSeekClient {
         }
 
         let audio_format = normalize_audio_format(&request.audio_format);
-        let model = wire_model_for_provider(self.api_provider, &model);
+        let model = wire_model_for_provider_route(self.api_provider, &self.base_url, &model);
         let model_lower = model.to_ascii_lowercase();
         let instruction = request
             .instruction
@@ -1646,6 +1927,7 @@ impl LlmClient for DeepSeekClient {
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
         let _permit = self.acquire_provider_request_permit().await;
+        let request = self.prepare_model_bound_request(request);
         if self.api_provider == ApiProvider::OpenaiCodex {
             return self.handle_responses_message(request).await;
         }
@@ -1660,6 +1942,7 @@ impl LlmClient for DeepSeekClient {
         request: MessageRequest,
     ) -> Result<crate::llm_client::StreamEventBox> {
         let permit = self.acquire_provider_request_permit().await;
+        let request = self.prepare_model_bound_request(request);
         if self.api_provider == ApiProvider::OpenaiCodex {
             let stream = self.handle_responses_stream(request).await?;
             return Ok(Self::hold_provider_request_permit_for_stream(
@@ -1769,6 +2052,32 @@ pub(super) fn parse_models_response(payload: &str) -> Result<Vec<AvailableModel>
     models.sort_by(|a, b| a.id.cmp(&b.id));
     models.dedup_by(|a, b| a.id == b.id);
     Ok(models)
+}
+
+/// Apply provider-owned protocol cutlines to a live `/models` response.
+///
+/// OpenCode Go mixes OpenAI Chat Completions and Anthropic Messages models in
+/// one roster. Codewhale's `OpencodeGo` route is intentionally Chat-only, so
+/// both `/models` consumers must share this filter before publishing choices.
+fn apply_provider_model_cutline(
+    provider: ApiProvider,
+    models: Vec<AvailableModel>,
+) -> Vec<AvailableModel> {
+    if provider != ApiProvider::OpencodeGo {
+        return models;
+    }
+
+    let mut models: Vec<_> = models
+        .into_iter()
+        .filter_map(|mut model| {
+            let canonical = crate::config::opencode_go_chat_model_id(&model.id)?;
+            model.id = canonical.to_string();
+            Some(model)
+        })
+        .collect();
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    models
 }
 
 /// Parse an OpenRouter `/models` response, preserving server-side ordering and
@@ -1893,8 +2202,10 @@ fn openrouter_to_catalog_offering(
         limit,
         cost,
         modalities,
+        attachment: None,
         reasoning,
         tool_call,
+        structured_output: None,
         reasoning_options: Vec::new(),
         source: CatalogSource::Live {
             base_url_fingerprint: base_url_fingerprint.to_string(),
@@ -1987,10 +2298,12 @@ pub(super) fn apply_reasoning_effort(
                 // #3024: Ollama OpenAI-compat endpoint accepts think param.
                 body["think"] = json!(false);
             }
-            ApiProvider::Anthropic | ApiProvider::DeepseekAnthropic | ApiProvider::Openmodel => {
-                // #3014: thinking/effort shaping happens natively inside
-                // client/anthropic.rs (adaptive thinking + output_config),
-                // not via OpenAI-dialect fields.
+            ApiProvider::Anthropic
+            | ApiProvider::DeepseekAnthropic
+            | ApiProvider::MinimaxAnthropic
+            | ApiProvider::Openmodel => {
+                // Thinking shaping happens in the Messages adapter, which
+                // applies each provider's supported control fields.
             }
             ApiProvider::NvidiaNim => {
                 body["chat_template_kwargs"] = json!({
@@ -2003,6 +2316,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
+            ApiProvider::OpencodeGo => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2072,10 +2386,12 @@ pub(super) fn apply_reasoning_effort(
                 // #3024: Ollama think param.
                 body["think"] = json!(true);
             }
-            ApiProvider::Anthropic | ApiProvider::DeepseekAnthropic | ApiProvider::Openmodel => {
-                // #3014: thinking/effort shaping happens natively inside
-                // client/anthropic.rs (adaptive thinking + output_config),
-                // not via OpenAI-dialect fields.
+            ApiProvider::Anthropic
+            | ApiProvider::DeepseekAnthropic
+            | ApiProvider::MinimaxAnthropic
+            | ApiProvider::Openmodel => {
+                // Thinking shaping happens in the Messages adapter, which
+                // applies each provider's supported control fields.
             }
             ApiProvider::NvidiaNim => {
                 body["chat_template_kwargs"] = json!({
@@ -2095,6 +2411,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
+            ApiProvider::OpencodeGo => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2144,10 +2461,12 @@ pub(super) fn apply_reasoning_effort(
                 // #3024: Ollama think param.
                 body["think"] = json!(true);
             }
-            ApiProvider::Anthropic | ApiProvider::DeepseekAnthropic | ApiProvider::Openmodel => {
-                // #3014: thinking/effort shaping happens natively inside
-                // client/anthropic.rs (adaptive thinking + output_config),
-                // not via OpenAI-dialect fields.
+            ApiProvider::Anthropic
+            | ApiProvider::DeepseekAnthropic
+            | ApiProvider::MinimaxAnthropic
+            | ApiProvider::Openmodel => {
+                // Thinking shaping happens in the Messages adapter, which
+                // applies each provider's supported control fields.
             }
             ApiProvider::NvidiaNim => {
                 body["chat_template_kwargs"] = json!({
@@ -2167,6 +2486,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
+            ApiProvider::OpencodeGo => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2238,6 +2558,7 @@ pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
         output_tokens: output_tokens.min(u64::from(u32::MAX)) as u32,
         prompt_cache_hit_tokens,
         prompt_cache_miss_tokens,
+        prompt_cache_write_tokens: None,
         reasoning_tokens,
         reasoning_replay_tokens: None,
         server_tool_use,
@@ -2260,7 +2581,7 @@ impl DeepSeekClient {
             );
         }
         let url = api_url_with_suffix(&self.base_url, "beta/completions", None);
-        let model = wire_model_for_provider(self.api_provider, model);
+        let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
         let body = json!({
             "model": model,
             "prompt": prompt,
@@ -2294,6 +2615,7 @@ impl DeepSeekClient {
 
 mod anthropic;
 mod chat;
+mod provider_native_search;
 mod responses;
 
 fn extract_sse_data_value(line: &str) -> Option<&str> {
@@ -2317,6 +2639,7 @@ fn take_sse_line(buffer: &mut Vec<u8>) -> Option<String> {
 }
 
 pub(crate) use chat::{CacheWarmupKey, PromptInspection};
+pub(crate) use provider_native_search::{ProviderNativeSearchClient, ProviderNativeSearchRequest};
 
 pub(crate) fn inspect_prompt_for_request(request: &MessageRequest) -> PromptInspection {
     chat::inspect_prompt_for_request(request)
@@ -2335,6 +2658,7 @@ mod tests {
         parse_chat_message, parse_sse_chunk, sanitize_thinking_mode_messages, tool_to_chat,
         tool_to_chat_for_base_url,
     };
+    use crate::client::responses::build_responses_body;
     use crate::config::{ProviderConfig, ProvidersConfig};
     use crate::models::{
         ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, Tool,
@@ -2360,6 +2684,464 @@ mod tests {
         }
     }
 
+    const CONFIG_SECRET_SENTINELS: [&str; 8] = [
+        "deepseek-config-secret-001",
+        "arcee-config-secret-002",
+        "moonshot-config-secret-003",
+        "openrouter-config-secret-004",
+        "together-config-secret-005",
+        "xiaomi-config-secret-006",
+        "zai-active-config-secret-007",
+        "sakana-config-secret-008",
+    ];
+
+    #[test]
+    fn codex_client_uses_one_coherent_external_credential_snapshot() {
+        let _env = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir().expect("credential fixture");
+        let path = temp
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("auth.json");
+        let token_a = crate::test_support::future_test_jwt("a");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "tokens": {"access_token": token_a.clone(), "account_id": "account-a"}
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write fixture");
+        let _auth_path = crate::test_support::EnvVarGuard::set("OPENAI_CODEX_AUTH_FILE", &path);
+        let _access = crate::test_support::EnvVarGuard::remove("OPENAI_CODEX_ACCESS_TOKEN");
+        let _legacy_access = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+        let config = Config {
+            provider: Some(ApiProvider::OpenaiCodex.as_str().to_string()),
+            providers: Some(ProvidersConfig {
+                openai_codex: ProviderConfig {
+                    auth_mode: Some("oauth".to_string()),
+                    external_credentials: Some(
+                        codewhale_config::ExternalCredentialConsentToml::read_only(
+                            codewhale_config::ProviderKind::OpenaiCodex,
+                            codewhale_config::ExternalCredentialSource::CodexCli,
+                            path.clone(),
+                        ),
+                    ),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+
+        crate::external_credentials::reset_side_effect_trap();
+        let client = DeepSeekClient::new(&config).expect("Codex client");
+        assert_eq!(client.api_key, token_a);
+        assert_eq!(client.codex_account_id.as_deref(), Some("account-a"));
+        assert_eq!(
+            crate::external_credentials::side_effect_trap_counts(),
+            (1, 1),
+            "bearer and account id must come from one secure open/read"
+        );
+
+        // An owner rotation after construction cannot splice account B into
+        // the already-resolved bearer snapshot.
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({"tokens": {"access_token": crate::test_support::future_test_jwt("b"), "account_id": "account-b"}})).expect("serialize rotated fixture"),
+        )
+        .expect("rotate fixture");
+        assert_eq!(client.api_key, token_a);
+        assert_eq!(client.codex_account_id.as_deref(), Some("account-a"));
+    }
+
+    fn client_with_config_secret_sentinels() -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        DeepSeekClient::new(&Config {
+            provider: Some("zai".to_string()),
+            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
+            providers: Some(ProvidersConfig {
+                arcee: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[1].to_string()),
+                    ..ProviderConfig::default()
+                },
+                moonshot: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[2].to_string()),
+                    ..ProviderConfig::default()
+                },
+                openrouter: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[3].to_string()),
+                    ..ProviderConfig::default()
+                },
+                together: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[4].to_string()),
+                    ..ProviderConfig::default()
+                },
+                xiaomi_mimo: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[5].to_string()),
+                    ..ProviderConfig::default()
+                },
+                zai: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                    ..ProviderConfig::default()
+                },
+                sakana: ProviderConfig {
+                    api_key: Some(CONFIG_SECRET_SENTINELS[7].to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("client with secret sentinels")
+    }
+
+    fn request_with_tool_result(content: impl Into<String>) -> MessageRequest {
+        MessageRequest {
+            model: "glm-5.2".to_string(),
+            messages: vec![
+                Message {
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-secret-test".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({"path": "config.toml"}),
+                        caller: None,
+                    }],
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-secret-test".to_string(),
+                        content: content.into(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 128,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    fn tool_result_content(request: &MessageRequest) -> &str {
+        request
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .expect("tool result content")
+    }
+
+    #[test]
+    fn model_bound_request_repairs_dangling_tool_call_before_adapter_projection() {
+        let client = client_with_config_secret_sentinels();
+        let mut request = request_with_tool_result("unused");
+        request.messages.pop();
+
+        let prepared = client.prepare_model_bound_request(request);
+
+        assert!(prepared.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error: Some(true),
+                        ..
+                    } if tool_use_id == "call-secret-test"
+                        && content.contains("crashed_and_repaired")
+                )
+            })
+        }));
+        assert_eq!(
+            prepared.messages.last().expect("repaired result").role,
+            "user"
+        );
+        assert!(!prepared.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text, .. }
+                        if text.contains("[tool_history_repair]")
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn model_bound_request_redacts_configured_secrets_and_bare_active_key() {
+        let client = client_with_config_secret_sentinels();
+        let config_dump = format!(
+            "api_key = \"{}\"\n[providers.arcee]\napi_key = \"{}\"\n\
+             ordinary_setting = \"keep-me\"\nall bare values: {}",
+            CONFIG_SECRET_SENTINELS[0],
+            CONFIG_SECRET_SENTINELS[1],
+            CONFIG_SECRET_SENTINELS.join(" ")
+        );
+
+        let prepared = client.prepare_model_bound_request(request_with_tool_result(config_dump));
+        let content = tool_result_content(&prepared);
+
+        for secret in CONFIG_SECRET_SENTINELS {
+            assert!(!content.contains(secret), "secret survived redaction");
+        }
+        assert!(content.contains(codewhale_config::persistence::REDACTED));
+        assert!(content.contains("ordinary_setting"));
+        assert!(content.contains("keep-me"));
+    }
+
+    #[test]
+    fn model_bound_request_redacts_inactive_file_store_and_environment_secrets() {
+        const FILE_STORED_INACTIVE: &str = "inactive-arcee-file-secret-901";
+        const BUILTIN_ENV_SECRET: &str = "inactive-arcee-env-secret-902";
+        const CUSTOM_ENV_NAME: &str = "CW_TEST_CUSTOM_PROVIDER_API_KEY";
+        const CUSTOM_ENV_SECRET: &str = "inactive-custom-env-secret-903";
+
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let codewhale_home = tmp.path().join("codewhale-home");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create isolated home");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let _secret_backend =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+        let builtin_env_name = ApiProvider::Arcee
+            .env_vars()
+            .first()
+            .copied()
+            .expect("Arcee API-key environment variable");
+        let _builtin_env =
+            crate::test_support::EnvVarGuard::set(builtin_env_name, BUILTIN_ENV_SECRET);
+        let _custom_env = crate::test_support::EnvVarGuard::set(CUSTOM_ENV_NAME, CUSTOM_ENV_SECRET);
+
+        codewhale_secrets::Secrets::file_backed()
+            .set("arcee", FILE_STORED_INACTIVE)
+            .expect("write isolated inactive provider credential");
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = DeepSeekClient::new(&Config {
+            provider: Some("zai".to_string()),
+            providers: Some(ProvidersConfig {
+                zai: ProviderConfig {
+                    api_key: Some("active-zai-secret-900".to_string()),
+                    ..ProviderConfig::default()
+                },
+                custom: HashMap::from([(
+                    "example-custom".to_string(),
+                    ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        api_key_env: Some(CUSTOM_ENV_NAME.to_string()),
+                        ..ProviderConfig::default()
+                    },
+                )]),
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("client with inactive file-store credential");
+        let prepared = client.prepare_model_bound_request(request_with_tool_result(format!(
+            "retrieved values: {FILE_STORED_INACTIVE} {BUILTIN_ENV_SECRET} {CUSTOM_ENV_SECRET}\nordinary output survives"
+        )));
+        let content = tool_result_content(&prepared);
+
+        for secret in [FILE_STORED_INACTIVE, BUILTIN_ENV_SECRET, CUSTOM_ENV_SECRET] {
+            assert!(
+                !content.contains(secret),
+                "inactive secret survived: {secret}"
+            );
+        }
+        assert!(content.contains(codewhale_config::persistence::REDACTED));
+        assert!(content.contains("ordinary output survives"));
+    }
+
+    #[test]
+    fn model_bound_request_leaves_ordinary_tool_output_unchanged() {
+        let client = client_with_config_secret_sentinels();
+        let ordinary = "tests passed: 42\nREADME.md updated\n";
+        let prepared =
+            client.prepare_model_bound_request(request_with_tool_result(ordinary.to_string()));
+        assert_eq!(tool_result_content(&prepared), ordinary);
+    }
+
+    #[test]
+    fn short_chat_tool_payload_is_redacted_before_wire_serialization() {
+        let client = client_with_config_secret_sentinels();
+        let prepared = client.prepare_model_bound_request(request_with_tool_result(format!(
+            "active token: {}",
+            CONFIG_SECRET_SENTINELS[6]
+        )));
+        let wire = build_chat_messages_for_request(&prepared);
+        let serialized = serde_json::to_string(&wire).expect("serialize chat wire messages");
+
+        assert!(!serialized.contains(CONFIG_SECRET_SENTINELS[6]));
+        assert!(serialized.contains(codewhale_config::persistence::REDACTED));
+    }
+
+    #[test]
+    fn configured_secret_redaction_reaches_all_protocol_bodies() {
+        let client = client_with_config_secret_sentinels();
+        let prepared = client.prepare_model_bound_request(request_with_tool_result(format!(
+            "safe output then {}",
+            CONFIG_SECRET_SENTINELS[6]
+        )));
+
+        let chat = serde_json::to_string(&build_chat_messages_for_request(&prepared))
+            .expect("serialize Chat Completions body");
+        let anthropic = client.build_anthropic_body(&prepared, false).to_string();
+        let responses = build_responses_body(&prepared).to_string();
+
+        for (route, body) in [
+            ("chat", chat.as_str()),
+            ("anthropic", anthropic.as_str()),
+            ("responses", responses.as_str()),
+        ] {
+            assert!(
+                !body.contains(CONFIG_SECRET_SENTINELS[6]),
+                "{route} body retained the configured credential"
+            );
+            assert!(
+                body.contains(codewhale_config::persistence::REDACTED),
+                "{route} body lost the redaction marker"
+            );
+        }
+    }
+
+    // This test deliberately serializes access to process-global spillover
+    // state while awaiting the retrieval path.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn retrieved_turn_loop_spillover_is_sanitized_before_model_wire() {
+        let _guard = crate::tools::truncate::TEST_SPILLOVER_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spillover_root = tmp.path().join(".codewhale").join("tool_outputs");
+        let prior = crate::tools::truncate::set_test_spillover_root(Some(spillover_root.clone()));
+        struct Restore(Option<std::path::PathBuf>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::tools::truncate::set_test_spillover_root(self.0.take());
+            }
+        }
+        let _restore = Restore(prior);
+
+        let head = (0..40)
+            .map(|_| format!("{}\n", "safe-head".repeat(100)))
+            .collect::<String>();
+        let tail = (0..80)
+            .map(|_| format!("{}\n", "safe-tail".repeat(100)))
+            .collect::<String>();
+        let raw = format!("{head}\n{}\n{tail}", CONFIG_SECRET_SENTINELS[6]);
+        assert!(
+            raw.len() > crate::tools::truncate::SPILLOVER_THRESHOLD_BYTES,
+            "fixture must enter turn-loop spillover"
+        );
+
+        let mut spilled = crate::tools::spec::ToolResult::success(raw.clone());
+        let path = crate::tools::truncate::apply_spillover(&mut spilled, "call-local-secret")
+            .expect("turn-loop spillover");
+        assert_eq!(path.parent(), Some(spillover_root.as_path()));
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read local spillover")
+                .contains(CONFIG_SECRET_SENTINELS[6]),
+            "the full raw result remains available only in the local spillover store"
+        );
+        assert!(
+            !spilled.content.contains(CONFIG_SECRET_SENTINELS[6]),
+            "middle-only secret should not be present in retained head/tail"
+        );
+
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let retrieved = crate::tools::spec::ToolSpec::execute(
+            &crate::tools::tool_result_retrieval::RetrieveToolResultTool,
+            json!({
+                "ref": "call-local-secret",
+                "mode": "query",
+                "query": CONFIG_SECRET_SENTINELS[6],
+            }),
+            &context,
+        )
+        .await
+        .expect("retrieve secret-bearing local spillover slice");
+        assert!(retrieved.content.contains(CONFIG_SECRET_SENTINELS[6]));
+
+        let client = client_with_config_secret_sentinels();
+        let prepared =
+            client.prepare_model_bound_request(request_with_tool_result(retrieved.content));
+        let wire = serde_json::to_string(&build_chat_messages_for_request(&prepared))
+            .expect("serialize sanitized retrieval result");
+        assert!(!wire.contains(CONFIG_SECRET_SENTINELS[6]));
+        assert!(wire.contains(codewhale_config::persistence::REDACTED));
+    }
+
+    #[test]
+    fn sha_spillover_persists_only_sanitized_tool_result() {
+        let _guard = crate::tools::truncate::TEST_SPILLOVER_GUARD
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = crate::tools::truncate::set_test_spillover_root(Some(
+            tmp.path().join(".codewhale").join("tool_outputs"),
+        ));
+        struct Restore(Option<std::path::PathBuf>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::tools::truncate::set_test_spillover_root(self.0.take());
+            }
+        }
+        let _restore = Restore(prior);
+
+        let client = client_with_config_secret_sentinels();
+        let raw = format!(
+            "{}\ncredential={}\n{}",
+            "ordinary output ".repeat(80),
+            CONFIG_SECRET_SENTINELS[6],
+            "tail ".repeat(80)
+        );
+        assert!(raw.len() > 1024, "fixture must enter SHA persistence path");
+        let raw_sha = crate::hashing::sha256_hex(raw.as_bytes());
+        let prepared = client.prepare_model_bound_request(request_with_tool_result(raw));
+        let sanitized = tool_result_content(&prepared).to_string();
+        let sanitized_sha = crate::hashing::sha256_hex(sanitized.as_bytes());
+
+        let wire = build_chat_messages_for_request(&prepared);
+        let serialized = serde_json::to_string(&wire).expect("serialize chat wire messages");
+        assert!(!serialized.contains(CONFIG_SECRET_SENTINELS[6]));
+
+        let sanitized_path = crate::tools::truncate::sha_spillover_path(&sanitized_sha)
+            .expect("sanitized spillover path");
+        let persisted = std::fs::read_to_string(&sanitized_path)
+            .expect("sanitized tool output should be persisted");
+        assert_eq!(persisted, sanitized);
+        assert!(!persisted.contains(CONFIG_SECRET_SENTINELS[6]));
+        assert!(persisted.contains(codewhale_config::persistence::REDACTED));
+
+        let raw_path =
+            crate::tools::truncate::sha_spillover_path(&raw_sha).expect("raw spillover path");
+        assert!(
+            !raw_path.exists(),
+            "unsanitized tool output must never be persisted by the wire adapter"
+        );
+    }
+
     fn deepseek_anthropic_client(server: &MockServer) -> DeepSeekClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let providers = ProvidersConfig {
@@ -2376,6 +3158,24 @@ mod tests {
             ..Config::default()
         })
         .expect("deepseek anthropic client")
+    }
+
+    fn minimax_anthropic_client_with_base_url(base_url: String) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let providers = ProvidersConfig {
+            minimax_anthropic: ProviderConfig {
+                api_key: Some("minimax-test".to_string()),
+                base_url: Some(base_url),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        };
+        DeepSeekClient::new(&Config {
+            provider: Some("minimax-anthropic".to_string()),
+            providers: Some(providers),
+            ..Config::default()
+        })
+        .expect("minimax anthropic client")
     }
 
     fn zai_client_for_test() -> DeepSeekClient {
@@ -2622,6 +3422,14 @@ mod tests {
             api_url("https://api.deepseek.com/beta", "models"),
             "https://api.deepseek.com/v1/models"
         );
+        assert_eq!(
+            api_url("https://api.minimax.io/anthropic", "models"),
+            "https://api.minimax.io/anthropic/v1/models"
+        );
+        assert_eq!(
+            api_url("https://api.minimaxi.com/anthropic", "models"),
+            "https://api.minimaxi.com/anthropic/v1/models"
+        );
         // explicit v<N> versions other than /v1 should be preserved
         assert_eq!(
             api_url(
@@ -2651,6 +3459,62 @@ mod tests {
         extra.insert("X-Blank".to_string(), "   ".to_string());
         let headers = DeepSeekClient::default_headers("sk-test", &extra).expect("headers");
         assert!(headers.get("x-blank").is_none());
+    }
+
+    #[test]
+    fn disabled_auth_strips_every_auth_header_dialect_at_client_sink() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "aUtHoRiZaTiOn".to_string(),
+            "Bearer configured-secret".to_string(),
+        );
+        extra.insert("X-API-Key".to_string(), "configured-x-key".to_string());
+        extra.insert("Api-Key".to_string(), "configured-key".to_string());
+        extra.insert(
+            "Proxy-Authorization".to_string(),
+            "Basic configured-proxy-secret".to_string(),
+        );
+        extra.insert(
+            "X-Auth-Token".to_string(),
+            "configured-auth-token".to_string(),
+        );
+        extra.insert(
+            "X-Access-Token".to_string(),
+            "configured-access-token".to_string(),
+        );
+        extra.insert(
+            "X-Goog-Api-Key".to_string(),
+            "configured-google-key".to_string(),
+        );
+        extra.insert("Cookie".to_string(), "session=secret".to_string());
+        extra.insert("X-Route-Metadata".to_string(), "safe".to_string());
+
+        let headers = DeepSeekClient::default_headers_for_provider_with_auth_disabled(
+            "generated-secret",
+            &extra,
+            ApiProvider::Deepseek,
+            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+        )
+        .expect("headers");
+
+        for name in [
+            "authorization",
+            "x-api-key",
+            "api-key",
+            "proxy-authorization",
+            "x-auth-token",
+            "x-access-token",
+            "x-goog-api-key",
+            "cookie",
+        ] {
+            assert!(headers.get(name).is_none(), "disabled auth leaked {name}");
+        }
+        assert_eq!(
+            headers
+                .get("x-route-metadata")
+                .and_then(|value| value.to_str().ok()),
+            Some("safe")
+        );
     }
 
     #[test]
@@ -2856,6 +3720,31 @@ mod tests {
     }
 
     #[test]
+    fn minimax_anthropic_uses_anthropic_header_dialect() {
+        let headers = DeepSeekClient::default_headers_for_provider(
+            "minimax-test",
+            &HashMap::new(),
+            ApiProvider::MinimaxAnthropic,
+            crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL,
+        )
+        .expect("headers");
+
+        assert_eq!(
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("minimax-test")
+        );
+        assert_eq!(
+            headers
+                .get("anthropic-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2023-06-01")
+        );
+        assert!(headers.get(AUTHORIZATION).is_none());
+    }
+
+    #[test]
     fn openmodel_uses_bearer_auth_with_anthropic_version() {
         let mut extra = HashMap::new();
         extra.insert("Authorization".to_string(), "Bearer wrong".to_string());
@@ -2921,6 +3810,11 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
         assert_eq!(
+            body.get("model").and_then(Value::as_str),
+            Some("deepseek-chat"),
+            "custom Messages endpoints own their model ids: {body}"
+        );
+        assert_eq!(
             body.pointer("/messages/0/role").and_then(Value::as_str),
             Some("user")
         );
@@ -2947,11 +3841,86 @@ mod tests {
         let client = deepseek_anthropic_client(&server);
 
         assert!(client.health_check().await.expect("health check"));
+        assert!(!provider_api_key_verification_is_observed(
+            ApiProvider::DeepseekAnthropic
+        ));
         let requests = server.received_requests().await.expect("recorded requests");
         assert!(
             requests.is_empty(),
             "DeepSeek Anthropic-compatible route must not probe /models"
         );
+    }
+
+    #[tokio::test]
+    async fn minimax_anthropic_health_check_uses_models_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models"))
+            .and(header("x-api-key", "minimax-test"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = minimax_anthropic_client_with_base_url(format!("{}/anthropic", server.uri()));
+
+        assert!(client.health_check().await.expect("health check"));
+    }
+
+    #[tokio::test]
+    async fn minimax_anthropic_request_uses_messages_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .and(header("x-api-key", "minimax-test"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "MiniMax-M3",
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = minimax_anthropic_client_with_base_url(format!("{}/anthropic", server.uri()));
+        let response = client
+            .create_message(MessageRequest {
+                model: "MiniMax-M3".to_string(),
+                messages: vec![Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "hello".to_string(),
+                        cache_control: None,
+                    }],
+                }],
+                max_tokens: 32,
+                system: None,
+                tools: None,
+                tool_choice: None,
+                metadata: None,
+                thinking: None,
+                reasoning_effort: Some("off".to_string()),
+                stream: Some(false),
+                temperature: None,
+                top_p: None,
+            })
+            .await
+            .expect("message succeeds");
+
+        assert_eq!(response.content.len(), 1);
+        let requests = server.received_requests().await.expect("recorded requests");
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("request JSON");
+        assert_eq!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("disabled")
+        );
+        assert!(body.get("output_config").is_none(), "{body}");
     }
 
     #[tokio::test]
@@ -3763,6 +4732,15 @@ mod tests {
         let mut body = json!({});
         apply_reasoning_effort(&mut body, Some("off"), ApiProvider::Moonshot);
         assert_eq!(body, json!({ "thinking": { "type": "disabled" } }));
+    }
+
+    #[test]
+    fn moonshot_uses_codewhale_user_agent_not_kimi_cli_identity() {
+        let user_agent = client_user_agent(ApiProvider::Moonshot);
+
+        assert!(user_agent.contains("codewhale/"));
+        assert!(!user_agent.to_ascii_lowercase().contains("kimi_cli"));
+        assert!(!user_agent.to_ascii_lowercase().contains("kimi-code-cli"));
     }
 
     #[test]
@@ -4580,6 +5558,23 @@ mod tests {
         .expect("openrouter client")
     }
 
+    fn opencode_go_client_for(server: &MockServer) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        DeepSeekClient::new(&Config {
+            provider: Some("opencode-go".to_string()),
+            providers: Some(ProvidersConfig {
+                opencode_go: ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some(server.uri()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("OpenCode Go client")
+    }
+
     async fn mount_models_json(server: &MockServer, status: u16, body: serde_json::Value) {
         Mock::given(method("GET"))
             .and(path("/v1/models"))
@@ -4618,6 +5613,79 @@ mod tests {
 
         assert!(err.contains("HTTP 401"), "status is preserved: {err}");
         assert!(err.contains("密钥无效"), "unicode body is preserved: {err}");
+    }
+
+    #[test]
+    fn opencode_go_client_rejects_messages_only_config_models() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        for model in [
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+        ] {
+            let config = Config {
+                provider: Some("opencode-go".to_string()),
+                providers: Some(ProvidersConfig {
+                    opencode_go: ProviderConfig {
+                        api_key: Some("test-key".to_string()),
+                        model: Some(model.to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                ..Config::default()
+            };
+            let err = DeepSeekClient::new(&config)
+                .err()
+                .expect("Messages-only model must fail before client construction");
+            assert!(err.to_string().contains("Chat Completions"), "{err:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_go_live_model_paths_keep_only_chat_completions_rows() {
+        let server = MockServer::start().await;
+        let mut rows: Vec<_> = crate::config::OPENCODE_GO_CHAT_MODELS
+            .iter()
+            .map(|id| json!({"id": id}))
+            .collect();
+        rows.extend([
+            json!({"id": "minimax-m3"}),
+            json!({"id": "minimax-m2.7"}),
+            json!({"id": "minimax-m2.5"}),
+            json!({"id": "qwen3.7-max"}),
+            json!({"id": "qwen3.7-plus"}),
+            json!({"id": "qwen3.6-plus"}),
+        ]);
+        mount_models_json(&server, 200, json!({"data": rows})).await;
+        let client = opencode_go_client_for(&server);
+
+        let listed = client.list_models().await.expect("filtered model list");
+        let listed: std::collections::BTreeSet<_> =
+            listed.into_iter().map(|model| model.id).collect();
+        let expected: std::collections::BTreeSet<_> = crate::config::OPENCODE_GO_CHAT_MODELS
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect();
+        assert_eq!(listed, expected);
+
+        let delta = client.fetch_catalog_delta().await.expect("filtered delta");
+        assert_eq!(delta.provider, "opencode-go");
+        let delta_ids: std::collections::BTreeSet<_> = delta
+            .offerings
+            .iter()
+            .map(|offering| offering.wire_model_id.clone())
+            .collect();
+        assert_eq!(delta_ids, expected);
+        assert!(
+            delta
+                .offerings
+                .iter()
+                .all(|offering| offering.endpoint_key == "chat")
+        );
     }
 
     #[tokio::test]
@@ -5454,8 +6522,11 @@ mod tests {
             .expect("client should construct from candidate");
 
         // The transport is bound to the candidate, not re-derived from Config.
-        assert_eq!(client.base_url, route.candidate.endpoint.base_url);
-        assert_eq!(client.default_model, route.candidate.wire_model_id.as_str());
+        assert_eq!(client.base_url, route.candidate.endpoint().base_url);
+        assert_eq!(
+            client.default_model,
+            route.candidate.wire_model_id().as_str()
+        );
     }
 
     #[test]
@@ -5523,9 +6594,9 @@ mod tests {
         assert_eq!(client.api_provider, ApiProvider::Custom);
         // The candidate carried the custom endpoint + verbatim wire model.
         assert_eq!(
-            route.candidate.endpoint.base_url,
+            route.candidate.endpoint().base_url,
             "https://api.example.com/v1"
         );
-        assert_eq!(route.candidate.wire_model_id.as_str(), "custom-model-v1");
+        assert_eq!(route.candidate.wire_model_id().as_str(), "custom-model-v1");
     }
 }

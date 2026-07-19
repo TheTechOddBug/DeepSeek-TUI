@@ -20,7 +20,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         Line::from(Span::styled(
             "codewhale",
             Style::default()
-                .fg(palette::WHALE_ACCENT_PRIMARY)
+                .fg(palette::WHALE_HUMAN)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -134,6 +134,14 @@ mod tests {
     }
 
     #[test]
+    fn welcome_wordmark_uses_the_human_brand_lane() {
+        let app = test_app_with_locale(Locale::En);
+        let welcome = lines(&app);
+        assert_eq!(welcome[0].spans[0].style.fg, Some(palette::WHALE_HUMAN));
+        assert_ne!(palette::WHALE_HUMAN, palette::WHALE_ACTION);
+    }
+
+    #[test]
     fn welcome_steps_include_optional_api_key_and_trust_screens() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut app = test_app_with_locale(Locale::En);
@@ -156,7 +164,8 @@ mod tests {
 
         let body = body(&app);
 
-        assert!(body.contains("代码在这里有两层含义"));
+        assert!(body.contains("Codewhale 会与你协作完成工作"));
+        assert!(!body.contains("代码在这里有两层含义"));
         assert!(body.contains("接下来：选择语言 -> 设置提示。"));
         assert!(!body.contains("Press Enter"));
     }

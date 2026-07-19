@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::hooks::HookEvent;
 use crate::tools::ReviewOutput;
+use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::spec::{ToolError, ToolResult};
 use crate::tui::active_cell::ActiveCell;
@@ -407,6 +408,7 @@ fn accrue_child_token_cost_if_any(app: &mut App, result: &Result<ToolResult, Too
         output_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
         prompt_cache_hit_tokens,
         prompt_cache_miss_tokens,
+        prompt_cache_write_tokens: None,
         reasoning_tokens: None,
         reasoning_replay_tokens: None,
         server_tool_use: None,
@@ -417,8 +419,10 @@ fn accrue_child_token_cost_if_any(app: &mut App, result: &Result<ToolResult, Too
         .and_then(serde_json::Value::as_str)
         .and_then(crate::config::ApiProvider::parse)
         .unwrap_or(app.api_provider);
+    let billing =
+        crate::route_billing::for_child_route(app.api_provider, app.billing_presentation, provider);
     if let Some(cost) =
-        crate::pricing::calculate_turn_cost_estimate_for_provider(provider, model, &usage)
+        crate::pricing::calculate_turn_cost_estimate_for_route(provider, model, &usage, billing)
     {
         app.accrue_subagent_cost_estimate(cost);
     }
@@ -815,9 +819,10 @@ fn apply_workflow_output_to_panel(app: &mut App, output: &str) {
                 .get("started_at_ms")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
-                run_id, label, at_ms,
-            ));
+            let mut panel =
+                crate::tui::widgets::workflow_panel::WorkflowPanel::new(run_id, label, at_ms);
+            panel.locale = app.ui_locale;
+            app.workflow_panel = Some(panel);
         }
         if let Some(panel) = app.workflow_panel.as_mut() {
             let run_id = value
@@ -863,7 +868,10 @@ fn apply_workflow_output_to_panel(app: &mut App, output: &str) {
     }
 
     // Prefer full panel hydration from summary/phases snapshot when present.
-    if let Some(panel) = crate::tui::widgets::workflow_panel::WorkflowPanel::from_run_json(&value) {
+    if let Some(mut panel) =
+        crate::tui::widgets::workflow_panel::WorkflowPanel::from_run_json(&value)
+    {
+        panel.locale = app.ui_locale;
         app.workflow_panel = Some(panel);
         app.needs_redraw = true;
         sync_workflow_history_card_from_panel(app);
@@ -1310,24 +1318,28 @@ fn parse_plan_input(input: &serde_json::Value) -> PlanSnapshot {
 }
 
 fn parse_patch_summary(input: &serde_json::Value) -> (String, String) {
-    if let Some(changes) = input.get("changes").and_then(|v| v.as_array()) {
-        let count = changes.len();
-        let path = changes
-            .first()
-            .and_then(|c| c.get("path"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| "<file>".to_string());
-        let label = if count <= 1 {
-            path
-        } else {
-            format!("{count} files")
-        };
-        let summary = format!("Changes: {count} file(s)");
-        return (label, summary);
-    }
-
-    let patch_text = input.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+    let patch_text = match normalize_apply_patch_input(input) {
+        Ok(NormalizedApplyPatchInput::Replacement {
+            entries: changes, ..
+        }) => {
+            let count = changes.len();
+            let path = changes
+                .first()
+                .and_then(|c| c.get("path"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| "<file>".to_string());
+            let label = if count <= 1 {
+                path
+            } else {
+                format!("{count} files")
+            };
+            let summary = format!("Changes: {count} file(s)");
+            return (label, summary);
+        }
+        Ok(NormalizedApplyPatchInput::Patch(patch)) => patch,
+        Err(_) => "",
+    };
     let paths = extract_patch_paths(patch_text);
     let path = input
         .get("path")
@@ -1383,24 +1395,25 @@ fn extract_patch_paths(patch: &str) -> Vec<String> {
 }
 
 pub(super) fn maybe_add_patch_preview(app: &mut App, input: &serde_json::Value) {
-    if let Some(patch) = input.get("patch").and_then(|v| v.as_str()) {
-        app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
-            title: "Patch Preview".to_string(),
-            diff: patch.to_string(),
-        })));
-        app.mark_history_updated();
-        return;
-    }
-
-    if let Some(changes) = input.get("changes").and_then(|v| v.as_array()) {
-        let preview = format_changes_preview(changes);
-        if !preview.trim().is_empty() {
+    match normalize_apply_patch_input(input) {
+        Ok(NormalizedApplyPatchInput::Patch(patch)) => {
             app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
-                title: "Changes Preview".to_string(),
-                diff: preview,
+                title: "Patch Preview".to_string(),
+                diff: patch.to_string(),
             })));
             app.mark_history_updated();
         }
+        Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
+            let preview = format_changes_preview(entries);
+            if !preview.trim().is_empty() {
+                app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
+                    title: "Changes Preview".to_string(),
+                    diff: preview,
+                })));
+                app.mark_history_updated();
+            }
+        }
+        Err(_) => {}
     }
 }
 
@@ -1591,6 +1604,19 @@ mod tests {
         assert_eq!(snapshot.items.len(), 1);
         assert_eq!(snapshot.items[0].step, "render all fields");
         assert_eq!(snapshot.items[0].status, StepStatus::Pending);
+    }
+
+    #[test]
+    fn parse_patch_summary_treats_replace_and_legacy_changes_equally() {
+        let replacements = json!([{
+            "path": "src/lib.rs",
+            "content": "fn replacement() {}\n"
+        }]);
+
+        let canonical = parse_patch_summary(&json!({"replace": replacements.clone()}));
+        let legacy = parse_patch_summary(&json!({"changes": replacements}));
+
+        assert_eq!(canonical, legacy);
     }
 
     // ── #3031: "(no output)" placeholder must not defeat compact rendering ─

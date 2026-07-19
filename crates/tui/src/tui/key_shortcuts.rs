@@ -21,7 +21,9 @@ pub(super) fn has_control_like_modifier_for_platform(
         || (is_macos && modifiers.contains(KeyModifiers::SUPER))
 }
 
-/// Copy-to-clipboard: `Cmd+C` on macOS or `Ctrl+Shift+C` elsewhere.
+/// Compatibility path for enhanced terminal clients that forward `Cmd+C` or
+/// `Ctrl+Shift+C` as key events. Most terminals consume these locally, so the
+/// user-visible Codewhale binding remains `Ctrl+C` with an active selection.
 pub(super) fn is_copy_shortcut(key: &KeyEvent) -> bool {
     let is_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
     if !is_c {
@@ -68,6 +70,32 @@ pub(super) fn activity_shortcut_label() -> &'static str {
     "Ctrl+O"
 }
 
+/// Open the whole-turn inspector. Keep this exact so the shifted variant can
+/// remain available to the external editor and a draft never changes where
+/// plain Ctrl+O routes (#4482).
+pub(super) fn is_turn_inspector_shortcut(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+/// Open the composer draft in `$VISUAL` / `$EDITOR` without colliding with
+/// the Turn Inspector. Enhanced protocols can report either character case,
+/// but SHIFT must be explicit so Windows Caps Lock cannot misroute Ctrl+O.
+/// F4 is the fallback for legacy protocols that cannot encode Ctrl+Shift+O.
+pub(super) fn is_external_editor_shortcut(key: &KeyEvent) -> bool {
+    let ctrl_shift_o = matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER);
+    let f4 = matches!(key.code, KeyCode::F(4)) && key.modifiers.is_empty();
+    ctrl_shift_o || f4
+}
+
 /// Modifier predicate for the v0.8.30 family of `Alt+<key>` transcript-
 /// nav shortcuts (`Alt+G` / `Alt+[` / `Alt+]` / `Alt+?` / `Alt+L`). Requires
 /// `Alt` and disallows `Ctrl` / `Super` so the
@@ -92,8 +120,10 @@ pub(super) fn is_macos_option_v_legacy_key_for_platform(key: &KeyEvent, is_macos
     is_macos && key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('\u{221A}'))
 }
 
-/// Paste-from-clipboard: `Cmd+V` (macOS), `Ctrl+V` (Linux/Windows), or
-/// the legacy raw `\u{16}` ETX byte some terminals emit.
+/// Paste-from-clipboard: accept `Cmd+V`, `Ctrl+V`, or the legacy raw `\u{16}`
+/// byte some terminals emit. A remote terminal normally consumes its local
+/// paste chord and sends an `Event::Paste`; accepting both modifier families
+/// still keeps enhanced-keyboard clients independent of the remote host OS.
 pub(super) fn is_paste_shortcut(key: &KeyEvent) -> bool {
     let is_v = matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'));
     let is_legacy_ctrl_v = matches!(key.code, KeyCode::Char('\u{16}'));
@@ -135,4 +165,53 @@ pub(super) fn is_ctrl_h_backspace(key: &KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT)
         && !key.modifiers.contains(KeyModifiers::SUPER)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enhanced_keyboard_clipboard_events_are_accepted_cross_platform() {
+        let mac_copy = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER);
+        let mac_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER);
+        let linux_copy = KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        let linux_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+
+        assert!(is_copy_shortcut(&mac_copy));
+        assert!(is_paste_shortcut(&mac_paste));
+        assert!(is_copy_shortcut(&linux_copy));
+        assert!(is_paste_shortcut(&linux_paste));
+    }
+
+    #[test]
+    fn ctrl_o_and_ctrl_shift_o_have_stable_distinct_routes() {
+        let inspector = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        // Crossterm's native Windows decoder applies Caps Lock to the
+        // character but does not expose Caps Lock as a modifier.
+        let inspector_caps_lock = KeyEvent::new(KeyCode::Char('O'), KeyModifiers::CONTROL);
+        let editor_lower = KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        let editor_upper = KeyEvent::new(
+            KeyCode::Char('O'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+
+        for inspector in [&inspector, &inspector_caps_lock] {
+            assert!(is_turn_inspector_shortcut(inspector));
+            assert!(!is_external_editor_shortcut(inspector));
+        }
+        for editor in [&editor_lower, &editor_upper] {
+            assert!(!is_turn_inspector_shortcut(editor));
+            assert!(is_external_editor_shortcut(editor));
+        }
+
+        let editor_legacy_fallback = KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE);
+        assert!(is_external_editor_shortcut(&editor_legacy_fallback));
+    }
 }

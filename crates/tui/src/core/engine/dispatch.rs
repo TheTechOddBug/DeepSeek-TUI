@@ -18,7 +18,9 @@
 use serde_json::json;
 
 use crate::models::{Tool, ToolCaller};
-use crate::tools::spec::{ToolError, ToolResult};
+use crate::tools::spec::{
+    ResourceClaim, ToolError, ToolExecutionOutcome, ToolResult, schedule_non_conflicting,
+};
 use crate::tui::app::AppMode;
 
 use super::ToolUseState;
@@ -32,7 +34,7 @@ pub(super) struct ToolExecOutcome {
     pub(super) name: String,
     pub(super) input: serde_json::Value,
     pub(super) started_at: std::time::Instant,
-    pub(super) result: Result<ToolResult, ToolError>,
+    pub(super) terminal: ToolExecutionOutcome,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +51,7 @@ pub(super) struct ToolExecutionPlan {
     pub(super) supports_parallel: bool,
     pub(super) read_only: bool,
     pub(super) detached_start: bool,
+    pub(super) resources: Vec<ResourceClaim>,
     pub(super) blocked_error: Option<ToolError>,
     pub(super) guard_result: Option<ToolResult>,
 }
@@ -164,7 +167,16 @@ fn mentions_mode_word(lower: &str) -> bool {
         .any(|word| word == "mode" || word == "modes")
 }
 
+#[cfg(test)]
 pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
+    format_tool_error_with_schema(err, tool_name, None)
+}
+
+pub(super) fn format_tool_error_with_schema(
+    err: &ToolError,
+    tool_name: &str,
+    input_schema: Option<&serde_json::Value>,
+) -> String {
     let message = match err {
         ToolError::InvalidInput { message } => {
             format!("Invalid input for tool '{tool_name}': {message}")
@@ -180,6 +192,7 @@ pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
         ToolError::Timeout { seconds } => format!(
             "Tool '{tool_name}' timed out after {seconds}s. Try a narrower scope or a longer timeout."
         ),
+        ToolError::Cancelled { message } => message.clone(),
         ToolError::NotAvailable { message } => {
             let lower = message.to_ascii_lowercase();
             // #3020: Pass through self-explanatory messages that already name the
@@ -215,7 +228,28 @@ pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
         }
     };
 
-    with_transient_tool_fallback_hint(message, err, tool_name)
+    let message = with_transient_tool_fallback_hint(message, err, tool_name);
+    let (category, bad_field) = match err {
+        ToolError::InvalidInput { .. } => ("invalid_input", None),
+        ToolError::MissingField { field } => ("missing_field", Some(field.as_str())),
+        ToolError::PathEscape { .. } => ("path_escape", Some("path")),
+        ToolError::NotAvailable { .. } => ("tool_not_available", Some("tool_name")),
+        _ => return message,
+    };
+    let valid_shape = input_schema.cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "type": "object",
+            "guidance": format!("Use the advertised input schema for '{tool_name}'")
+        })
+    });
+    let feedback = serde_json::json!({
+        "category": category,
+        "bad_field": bad_field,
+        "valid_shape": valid_shape,
+        "retryable": true,
+        "side_effect_status": "not_started"
+    });
+    format!("{message}\nTool validation feedback: {feedback}")
 }
 
 fn with_transient_tool_fallback_hint(message: String, err: &ToolError, tool_name: &str) -> String {
@@ -465,7 +499,17 @@ pub(super) fn parse_parallel_tool_calls(
 
 #[cfg(test)]
 pub(super) fn should_parallelize_tool_batch(plans: &[ToolExecutionPlan]) -> bool {
-    !plans.is_empty() && plans.iter().all(tool_plan_can_join_parallel_batch)
+    if plans.is_empty() || !plans.iter().all(tool_plan_can_join_parallel_batch) {
+        return false;
+    }
+    schedule_non_conflicting(
+        plans
+            .iter()
+            .map(|plan| ((), plan.resources.clone()))
+            .collect(),
+    )
+    .len()
+        == 1
 }
 
 pub(super) fn tool_plan_is_parallel_safe(plan: &ToolExecutionPlan) -> bool {
@@ -482,25 +526,27 @@ pub(super) fn plan_tool_execution_batches(
     plans: Vec<ToolExecutionPlan>,
 ) -> Vec<ToolExecutionBatch> {
     let mut batches = Vec::new();
-    let mut parallel_chunk = Vec::new();
+    let mut parallel_candidates = Vec::new();
+
+    let flush_parallel = |parallel_candidates: &mut Vec<_>,
+                          batches: &mut Vec<ToolExecutionBatch>| {
+        for chunk in schedule_non_conflicting(std::mem::take(parallel_candidates)) {
+            batches.push(ToolExecutionBatch::Parallel(chunk));
+        }
+    };
 
     for plan in plans {
         if tool_plan_can_join_parallel_batch(&plan) {
-            parallel_chunk.push(plan);
+            let resources = plan.resources.clone();
+            parallel_candidates.push((plan, resources));
             continue;
         }
 
-        if !parallel_chunk.is_empty() {
-            batches.push(ToolExecutionBatch::Parallel(std::mem::take(
-                &mut parallel_chunk,
-            )));
-        }
+        flush_parallel(&mut parallel_candidates, &mut batches);
         batches.push(ToolExecutionBatch::Serial(Box::new(plan)));
     }
 
-    if !parallel_chunk.is_empty() {
-        batches.push(ToolExecutionBatch::Parallel(parallel_chunk));
-    }
+    flush_parallel(&mut parallel_candidates, &mut batches);
 
     batches
 }

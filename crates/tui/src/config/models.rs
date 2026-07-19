@@ -40,6 +40,7 @@ pub const OPENROUTER_QWEN_3_6_35B_A3B_MODEL: &str = "qwen/qwen3.6-35b-a3b";
 pub const OPENROUTER_QWEN_3_6_MAX_PREVIEW_MODEL: &str = "qwen/qwen3.6-max-preview";
 pub const OPENROUTER_QWEN_3_6_27B_MODEL: &str = "qwen/qwen3.6-27b";
 pub const OPENROUTER_QWEN_3_6_PLUS_MODEL: &str = "qwen/qwen3.6-plus";
+pub const OPENROUTER_QWEN_3_7_PLUS_MODEL: &str = "qwen/qwen3.7-plus";
 pub const OPENROUTER_QWEN_3_7_MAX_MODEL: &str = "qwen/qwen3.7-max";
 pub const OPENROUTER_MINIMAX_M2_7_MODEL: &str = "minimax/minimax-m2.7";
 pub const OPENROUTER_NEMOTRON_3_ULTRA_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b";
@@ -56,6 +57,7 @@ pub const RECENT_OPENROUTER_LARGE_MODELS: &[&str] = &[
     OPENROUTER_QWEN_3_6_MAX_PREVIEW_MODEL,
     OPENROUTER_QWEN_3_6_27B_MODEL,
     OPENROUTER_QWEN_3_6_PLUS_MODEL,
+    OPENROUTER_QWEN_3_7_PLUS_MODEL,
     OPENROUTER_QWEN_3_7_MAX_MODEL,
     OPENROUTER_MINIMAX_M2_7_MODEL,
     OPENROUTER_NEMOTRON_3_ULTRA_MODEL,
@@ -100,6 +102,14 @@ pub const MOONSHOT_KIMI_K2_6_MODEL: &str = "kimi-k2.6";
 pub const DEFAULT_MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
 pub const DEFAULT_KIMI_CODE_MODEL: &str = "kimi-for-coding";
 pub const DEFAULT_KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str =
+    codewhale_config::provider::KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL;
+/// Official Kimi Code route model id. It is deliberately distinct from
+/// Moonshot's pay-as-you-go `kimi-k3` catalog id.
+pub const KIMI_CODE_K3_MODEL: &str = "k3";
+/// Conservative Kimi Code K3 context baseline. Higher plan entitlements must
+/// be supplied by an explicit provider configuration or fresh provider facts.
+pub const KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
 pub const DEFAULT_SGLANG_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_SGLANG_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
@@ -116,6 +126,7 @@ pub const DEFAULT_DEEPINFRA_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_DEEPINFRA_BASE_URL: &str = "https://api.deepinfra.com/v1/openai";
 pub const DEFAULT_TOGETHER_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_TOGETHER_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
+pub const TOGETHER_INKLING_MODEL: &str = "thinkingmachines/inkling";
 pub const DEFAULT_TOGETHER_BASE_URL: &str = "https://api.together.xyz/v1";
 pub const DEFAULT_QIANFAN_MODEL: &str = "ernie-4.0-turbo-8k";
 pub const DEFAULT_QIANFAN_BASE_URL: &str = "https://api.baiduqianfan.ai/v1";
@@ -162,11 +173,15 @@ pub const MINIMAX_M2_1_MODEL: &str = "MiniMax-M2.1";
 pub const MINIMAX_M2_1_HIGHSPEED_MODEL: &str = "MiniMax-M2.1-highspeed";
 pub const MINIMAX_M2_MODEL: &str = "MiniMax-M2";
 pub const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
+pub const DEFAULT_MINIMAX_ANTHROPIC_BASE_URL: &str = "https://api.minimax.io/anthropic";
 pub const DEFAULT_SAKANA_MODEL: &str = "fugu";
 pub const SAKANA_FUGU_ULTRA_MODEL: &str = "fugu-ultra-20260615";
 pub const DEFAULT_SAKANA_BASE_URL: &str = "https://api.sakana.ai/v1";
 pub const DEFAULT_LONGCAT_MODEL: &str = "LongCat-2.0";
 pub const DEFAULT_LONGCAT_BASE_URL: &str = "https://api.longcat.chat/openai/v1";
+pub const DEFAULT_OPENCODE_GO_MODEL: &str = "deepseek-v4-pro";
+pub const DEFAULT_OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+pub use codewhale_config::OPENCODE_GO_CHAT_MODELS;
 pub const DEFAULT_META_MODEL: &str = "muse-spark-1.1";
 pub const DEFAULT_META_BASE_URL: &str = "https://api.meta.ai/v1";
 pub const DEFAULT_XAI_MODEL: &str = "grok-4.5";

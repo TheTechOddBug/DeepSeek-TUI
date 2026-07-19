@@ -30,6 +30,7 @@ pub const LANGUAGE_OPTIONS: &[(char, &str, &str, &str)] = &[
         "(Latin American Spanish)",
     ),
     ('8', "vi", "Tiếng Việt", "(Vietnamese)"),
+    ('9', "ko", "한국어", "(Korean)"),
 ];
 
 pub fn lines(app: &App) -> Vec<Line<'static>> {
@@ -55,7 +56,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         let is_current = current == *tag;
         let bullet = if is_current { "●" } else { "○" };
         let bullet_color = if is_current {
-            palette::WHALE_ACCENT_PRIMARY
+            palette::WHALE_ACTION
         } else {
             palette::TEXT_MUTED
         };
