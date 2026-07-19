@@ -12,7 +12,6 @@ pub mod manifest;
 pub mod model;
 pub mod profile;
 pub mod progress;
-pub mod resources;
 pub mod retry;
 pub mod terminal;
 pub mod termination;

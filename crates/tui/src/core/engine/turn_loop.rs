@@ -1692,6 +1692,26 @@ impl Engine {
                     )));
                 }
 
+                // Prepare before hooks so every input-specific authority and
+                // scheduling field has one inspectable owner. Preparation is
+                // side-effect free; execution remains below the full gate
+                // stack exactly as before.
+                let mut prepared_policy = match prepare_tool_call(
+                    &tool_name,
+                    tool_input.clone(),
+                    tool_registry,
+                    self.session.auto_approve,
+                ) {
+                    Ok(policy) => Some(policy),
+                    Err(error) => {
+                        if blocked_error.is_none() {
+                            blocked_error = Some(error);
+                        }
+                        None
+                    }
+                };
+                let mut reprepared_after_hook = false;
+
                 if blocked_error.is_none()
                     && let Some(hook_executor) = self.config.hook_executor.as_ref()
                     && hook_executor.has_hooks_for_event(crate::hooks::HookEvent::ToolCallBefore)
@@ -1743,6 +1763,19 @@ impl Engine {
                         }
                         if let Some(updated) = fold.updated_input {
                             tool_input = updated;
+                            reprepared_after_hook = true;
+                            prepared_policy = match reprepare_tool_call_after_hook(
+                                &tool_name,
+                                tool_input.clone(),
+                                tool_registry,
+                                self.session.auto_approve,
+                            ) {
+                                Ok(policy) => Some(policy),
+                                Err(error) => {
+                                    blocked_error = Some(error);
+                                    None
+                                }
+                            };
                         }
                         if let Some(context) = fold.additional_context {
                             hook_contexts.insert(tool_id.clone(), context);
@@ -1750,41 +1783,34 @@ impl Engine {
                     }
                 }
 
-                if McpPool::is_mcp_tool(&tool_name) {
-                    read_only = mcp_tool_is_read_only(&tool_name);
-                    supports_parallel = mcp_tool_is_parallel_safe(&tool_name);
-                    approval_required = !read_only && !self.session.auto_approve;
-                    approval_description = mcp_tool_approval_description(&tool_name);
-                } else if let Some(registry) = tool_registry
-                    && let Some(spec) = registry.get(&tool_name)
-                {
+                if let Some(prepared) = prepared_policy {
                     approval_required = registered_tool_approval_required(
                         &tool_name,
-                        spec.approval_requirement_for(&tool_input),
-                        registry.context().auto_approve,
+                        prepared.call.approval,
+                        prepared.auto_approve,
                     );
-                    approval_description = spec.description().to_string();
-                    supports_parallel = spec.supports_parallel_for(&tool_input);
-                    read_only = spec.is_read_only_for(&tool_input);
-                    detached_start = spec.starts_detached_for(&tool_input);
-                } else if tool_name == CODE_EXECUTION_TOOL_NAME {
-                    approval_required = !self.session.auto_approve;
-                    approval_description =
-                        "Run model-provided Python code in local execution sandbox".to_string();
-                    supports_parallel = false;
-                    read_only = false;
-                } else if tool_name == JS_EXECUTION_TOOL_NAME {
-                    approval_required = !self.session.auto_approve;
-                    approval_description =
-                        "Run model-provided JavaScript code in local Node.js execution sandbox"
-                            .to_string();
-                    supports_parallel = false;
-                    read_only = false;
-                } else if is_tool_search_tool(&tool_name) {
-                    approval_required = false;
-                    approval_description = "Search tool catalog".to_string();
-                    supports_parallel = false;
-                    read_only = true;
+                    approval_description = prepared.call.description;
+                    supports_parallel = prepared.call.supports_parallel;
+                    read_only = prepared.call.read_only;
+                    detached_start = prepared.call.starts_detached;
+                    tool_input = prepared.call.input;
+
+                    let approval = match prepared.call.approval {
+                        ApprovalRequirement::Auto => "auto",
+                        ApprovalRequirement::Suggest => "suggest",
+                        ApprovalRequirement::Required => "required",
+                    };
+                    emit_tool_audit(json!({
+                        "event": "tool.prepared",
+                        "tool_id": tool_id.clone(),
+                        "tool_name": tool_name.clone(),
+                        "read_only": read_only,
+                        "supports_parallel": supports_parallel,
+                        "starts_detached": detached_start,
+                        "approval": approval,
+                        "resources": prepared.call.resources,
+                        "reprepared_after_hook": reprepared_after_hook,
+                    }));
                 }
 
                 if blocked_error.is_none()

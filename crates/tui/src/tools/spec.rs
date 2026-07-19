@@ -27,8 +27,8 @@ use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
 use crate::worker_profile::ShellPolicy;
 #[allow(unused_imports)]
 pub use codewhale_tools::{
-    ApprovalRequirement, ToolCapability, ToolError, ToolResult, optional_bool, optional_str,
-    optional_u64, required_str, required_u64,
+    ApprovalRequirement, PreparedToolCall, ResourceClaim, ToolCapability, ToolError, ToolResult,
+    optional_bool, optional_str, optional_u64, required_str, required_u64,
 };
 
 #[async_trait]
@@ -959,6 +959,24 @@ pub trait ToolSpec: Send + Sync {
     /// turns they do not need to block neighboring read-only inspections.
     fn starts_detached_for(&self, _input: &Value) -> bool {
         false
+    }
+
+    /// Resolve input-specific policy without performing external side effects.
+    ///
+    /// Resource claims deliberately default to global exclusivity until a
+    /// first-party tool opts into narrower, canonicalized claims. The initial
+    /// seam records this decision but leaves the existing scheduler unchanged.
+    fn prepare(&self, input: Value, _context: &ToolContext) -> Result<PreparedToolCall, ToolError> {
+        Ok(PreparedToolCall {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            read_only: self.is_read_only_for(&input),
+            supports_parallel: self.supports_parallel_for(&input),
+            starts_detached: self.starts_detached_for(&input),
+            approval: self.approval_requirement_for(&input),
+            resources: vec![ResourceClaim::GlobalExclusive],
+            input,
+        })
     }
 
     /// Returns whether this tool should be excluded from the model-visible

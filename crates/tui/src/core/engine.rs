@@ -4434,6 +4434,7 @@ mod stuck_guard;
 mod token_estimate_cache;
 mod tool_catalog;
 mod tool_execution;
+mod tool_preparation;
 mod tool_setup;
 mod turn_loop;
 pub(crate) use token_estimate_cache::TokenEstimateCache;
@@ -4462,10 +4463,9 @@ use self::dispatch::{
     ParallelToolResult, ParallelToolResultEntry, ToolApprovalStamp, ToolExecGuard, ToolExecOutcome,
     ToolExecutionBatch, ToolExecutionPlan, caller_allowed_for_tool, caller_type_for_tool_use,
     final_tool_input, format_tool_error_with_schema, malformed_tool_arguments_error,
-    malformed_tool_arguments_input, mcp_tool_approval_description, mcp_tool_is_parallel_safe,
-    mcp_tool_is_read_only, parse_parallel_tool_calls, parse_tool_input,
-    plan_tool_execution_batches, should_force_update_plan_first, should_stop_after_plan_tool,
-    stamp_tool_result_approval,
+    malformed_tool_arguments_input, mcp_tool_is_parallel_safe, parse_parallel_tool_calls,
+    parse_tool_input, plan_tool_execution_batches, should_force_update_plan_first,
+    should_stop_after_plan_tool, stamp_tool_result_approval,
 };
 #[cfg(test)]
 use self::dispatch::{format_tool_error, should_parallelize_tool_batch};
@@ -4495,6 +4495,7 @@ use self::tool_catalog::{
     preflight_requested_deferred_tool, should_default_defer_tool,
 };
 use self::tool_execution::emit_tool_audit;
+use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};
 use crate::tools::js_execution::execute_js_execution_tool;
 
 #[cfg(test)]
