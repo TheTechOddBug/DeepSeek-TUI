@@ -3600,35 +3600,15 @@ impl Engine {
                     continue;
                 }
                 seen_tasks.insert(external.clone());
-                let state = match task.status {
-                    crate::task_manager::TaskStatus::Queued => {
-                        crate::work_graph::OwnerState::Initializing
-                    }
-                    crate::task_manager::TaskStatus::Running => {
-                        crate::work_graph::OwnerState::Running
-                    }
-                    crate::task_manager::TaskStatus::Completed => {
-                        crate::work_graph::OwnerState::Completed
-                    }
-                    crate::task_manager::TaskStatus::Failed => {
-                        crate::work_graph::OwnerState::Failed
-                    }
-                    crate::task_manager::TaskStatus::Canceled => {
-                        crate::work_graph::OwnerState::Cancelled
-                    }
-                };
-                let observed_at = task
-                    .ended_at
-                    .or(task.started_at)
-                    .unwrap_or(task.created_at)
-                    .timestamp_millis();
                 if let Err(err) = work.reconcile_operation(
                     session_id,
-                    crate::work_graph::OperationOwnerSnapshot::new(
-                        external,
-                        state,
+                    crate::work_graph::task_owner_snapshot(
+                        &task.id,
+                        task.status,
                         task.lifecycle_seq,
-                        observed_at,
+                        task.created_at,
+                        task.started_at,
+                        task.ended_at,
                     ),
                 ) {
                     tracing::warn!(task_id = %task.id, error = %err, "failed to reconcile restored task owner");

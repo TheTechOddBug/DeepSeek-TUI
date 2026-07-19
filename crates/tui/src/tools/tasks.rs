@@ -14,7 +14,7 @@ use crate::command_safety::{SafetyLevel, analyze_command};
 use crate::dependencies::ExternalTool;
 use crate::task_manager::{
     NewTaskRequest, TaskArtifactRef, TaskAttemptRecord, TaskCancelDisposition, TaskGateRecord,
-    TaskRecord, TaskStatus,
+    TaskRecord,
 };
 use crate::tools::shell::{ExecShellTool, ShellWaitTool};
 use crate::tools::spec::{
@@ -23,6 +23,7 @@ use crate::tools::spec::{
 };
 use crate::work_graph::{
     CancelOutcome, OperationIntent, OperationObservation, OperationOwnerSnapshot, OwnerState,
+    task_owner_snapshot,
 };
 
 const MAX_SUMMARY_CHARS: usize = 900;
@@ -318,21 +319,16 @@ fn reconcile_task_record(context: &ToolContext, task: &TaskRecord) -> Result<(),
     if !work.has_operation_binding(Some(&context.state_namespace), &external) {
         return Ok(());
     }
-    let state = match task.status {
-        TaskStatus::Queued => OwnerState::Initializing,
-        TaskStatus::Running => OwnerState::Running,
-        TaskStatus::Completed => OwnerState::Completed,
-        TaskStatus::Failed => OwnerState::Failed,
-        TaskStatus::Canceled => OwnerState::Cancelled,
-    };
-    let observed_at = task
-        .ended_at
-        .or(task.started_at)
-        .unwrap_or(task.created_at)
-        .timestamp_millis();
     work.reconcile_operation(
         &context.state_namespace,
-        OperationOwnerSnapshot::new(external, state, task.lifecycle_seq, observed_at),
+        task_owner_snapshot(
+            &task.id,
+            task.status,
+            task.lifecycle_seq,
+            task.created_at,
+            task.started_at,
+            task.ended_at,
+        ),
     )
     .map(|_| ())
     .map_err(ToolError::execution_failed)

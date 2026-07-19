@@ -42,6 +42,7 @@ pub use events::{
 pub use ids::{BindingId, ChangeId, ProposalId, WorkEdgeId, WorkNodeId};
 pub use liveness::{
     OperationIntent, OperationOwnerSnapshot, fleet_task_owner_snapshot, lane_owner_snapshot,
+    task_owner_snapshot,
 };
 pub use migration::import_legacy;
 pub use model::{

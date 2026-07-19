@@ -105,7 +105,7 @@ use crate::tui::persistence_actor::{self, PersistRequest};
 use crate::tui::plan_prompt::PlanPromptView;
 use crate::tui::plan_todo_bridge::{PlanAcceptance, project_accepted_plan};
 use crate::tui::scrolling::TranscriptScroll;
-use crate::work_graph::{OperationOwnerSnapshot, OwnerState};
+use crate::work_graph::task_owner_snapshot;
 // SelectionAutoscroll unused
 use crate::tui::motion::{FrameRequester, MotionPolicy};
 use crate::tui::session_picker::SessionPickerView;
@@ -1851,21 +1851,16 @@ async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManag
             if !work.has_operation_binding(Some(session_id), &external) {
                 continue;
             }
-            let owner_state = match task.status {
-                TaskStatus::Queued => OwnerState::Initializing,
-                TaskStatus::Running => OwnerState::Running,
-                TaskStatus::Completed => OwnerState::Completed,
-                TaskStatus::Failed => OwnerState::Failed,
-                TaskStatus::Canceled => OwnerState::Cancelled,
-            };
-            let observed_at = task
-                .ended_at
-                .or(task.started_at)
-                .unwrap_or(task.created_at)
-                .timestamp_millis();
             match work.reconcile_operation(
                 session_id,
-                OperationOwnerSnapshot::new(external, owner_state, task.lifecycle_seq, observed_at),
+                task_owner_snapshot(
+                    &task.id,
+                    task.status,
+                    task.lifecycle_seq,
+                    task.created_at,
+                    task.started_at,
+                    task.ended_at,
+                ),
             ) {
                 Ok(changed) => lifecycle_changed |= changed,
                 Err(err) => {

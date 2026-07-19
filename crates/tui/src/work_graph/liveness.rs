@@ -7,6 +7,8 @@
 
 use super::{AcceptanceRequirement, EvidenceRef, OperationObservation, OwnerState, Ts};
 use crate::fleet::ledger::{FleetTaskLedgerStatus, FleetTaskState};
+use crate::task_manager::TaskStatus;
+use chrono::{DateTime, Utc};
 use codewhale_lane::{LaneRecord, LaneStatus};
 
 /// Spawn intent registered before an owner starts work.
@@ -86,6 +88,31 @@ impl OperationOwnerSnapshot {
     }
 }
 
+/// Translate a durable task record or summary without duplicating lifecycle
+/// semantics across the model tool, periodic TUI refresh, and engine restore.
+#[must_use]
+pub fn task_owner_snapshot(
+    id: &str,
+    status: TaskStatus,
+    lifecycle_seq: u64,
+    created_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    ended_at: Option<DateTime<Utc>>,
+) -> OperationOwnerSnapshot {
+    let state = match status {
+        TaskStatus::Queued => OwnerState::Initializing,
+        TaskStatus::Running => OwnerState::Running,
+        TaskStatus::Completed => OwnerState::Completed,
+        TaskStatus::Failed => OwnerState::Failed,
+        TaskStatus::Canceled => OwnerState::Cancelled,
+    };
+    let observed_at = ended_at
+        .or(started_at)
+        .unwrap_or(created_at)
+        .timestamp_millis();
+    OperationOwnerSnapshot::new(format!("task:{id}"), state, lifecycle_seq, observed_at)
+}
+
 /// Translate the replayed Fleet task ledger. Live worker enrichment never
 /// overrides this durable task projection.
 #[must_use]
@@ -123,4 +150,57 @@ pub fn lane_owner_snapshot(record: &LaneRecord, observed_at: Ts) -> OperationOwn
         record.lifecycle_seq.max(1),
         observed_at,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_owner_snapshot_exhaustively_maps_status_and_prefers_terminal_time() {
+        let created_at = DateTime::from_timestamp_millis(10).expect("created timestamp");
+        let started_at = DateTime::from_timestamp_millis(20).expect("started timestamp");
+        let ended_at = DateTime::from_timestamp_millis(30).expect("ended timestamp");
+        let cases = [
+            (TaskStatus::Queued, OwnerState::Initializing),
+            (TaskStatus::Running, OwnerState::Running),
+            (TaskStatus::Completed, OwnerState::Completed),
+            (TaskStatus::Failed, OwnerState::Failed),
+            (TaskStatus::Canceled, OwnerState::Cancelled),
+        ];
+
+        for (status, expected) in cases {
+            let snapshot = task_owner_snapshot(
+                "task-id",
+                status,
+                7,
+                created_at,
+                Some(started_at),
+                Some(ended_at),
+            );
+            assert_eq!(snapshot.external, "task:task-id");
+            assert_eq!(snapshot.state, expected);
+            assert_eq!(snapshot.seq, 7);
+            assert_eq!(snapshot.observed_at, 30);
+        }
+    }
+
+    #[test]
+    fn task_owner_snapshot_falls_back_from_started_to_created_time() {
+        let created_at = DateTime::from_timestamp_millis(10).expect("created timestamp");
+        let started_at = DateTime::from_timestamp_millis(20).expect("started timestamp");
+
+        let started = task_owner_snapshot(
+            "started",
+            TaskStatus::Running,
+            2,
+            created_at,
+            Some(started_at),
+            None,
+        );
+        let queued = task_owner_snapshot("queued", TaskStatus::Queued, 1, created_at, None, None);
+
+        assert_eq!(started.observed_at, 20);
+        assert_eq!(queued.observed_at, 10);
+    }
 }
