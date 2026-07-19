@@ -7406,6 +7406,88 @@ fn refresh_system_prompt_is_noop_when_unchanged() {
 }
 
 #[test]
+fn slop_gate_does_not_change_the_stable_system_prompt() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let marker = "SLOP_GATE_SYSTEM_FINGERPRINT_REGRESSION";
+    engine.slop_ledger_gate_cache = Some((
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        Some(marker.to_string()),
+    ));
+
+    engine.refresh_system_prompt();
+
+    let prompt = match engine.session.system_prompt.as_ref() {
+        Some(SystemPrompt::Text(text)) => text.clone(),
+        Some(SystemPrompt::Blocks(blocks)) => blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => panic!("expected system prompt"),
+    };
+    assert!(!prompt.contains(marker));
+    assert_eq!(
+        engine
+            .slop_ledger_gate_cache
+            .as_ref()
+            .and_then(|(_, block)| block.as_deref()),
+        Some(marker),
+        "system prompt refresh must not consult or rewrite the user-turn gate cache"
+    );
+}
+
+#[test]
+fn slop_gate_is_an_external_user_turn_tail_block() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let marker = "## debt gate test marker";
+
+    let message = engine.user_text_message_with_turn_metadata("finish the task".to_string());
+    let message = Engine::attach_slop_ledger_gate(message, Some(marker.to_string()));
+
+    assert_eq!(message.content.len(), 3);
+    assert!(matches!(
+        message.content.first(),
+        Some(ContentBlock::Text { text, .. }) if text == "finish the task"
+    ));
+    assert!(matches!(
+        message.content.get(1),
+        Some(ContentBlock::Text { text, .. }) if text == marker
+    ));
+    assert!(matches!(
+        message.content.last(),
+        Some(ContentBlock::Text { text, .. }) if text.starts_with("<turn_meta>\n")
+    ));
+
+    let runtime = engine.runtime_text_message_with_turn_metadata(
+        "runtime continuation".to_string(),
+        UserInputProvenance::Runtime,
+    );
+    engine.slop_ledger_gate_cache = Some((
+        Some(std::time::SystemTime::UNIX_EPOCH),
+        Some(marker.to_string()),
+    ));
+    let runtime =
+        engine.with_slop_ledger_gate_for_external_turn(runtime, UserInputProvenance::Runtime);
+    assert_eq!(runtime.content.len(), 2);
+    assert!(
+        !runtime
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == marker))
+    );
+}
+
+#[test]
 fn engine_prompt_respects_hidden_thinking_config() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
