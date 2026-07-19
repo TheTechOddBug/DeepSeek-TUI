@@ -11,7 +11,8 @@
 //! does not represent (and for unbundled gateways until the live catalog covers
 //! them).
 
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot, bundled_catalog_offerings};
 
@@ -26,6 +27,17 @@ static BUNDLED_SNAPSHOT: std::sync::OnceLock<CatalogSnapshot> = std::sync::OnceL
 /// Optional live Models.dev snapshot (#4187). When `None`, only the bundled
 /// offline/stale fallback rows are visible.
 static LIVE_SNAPSHOT: RwLock<Option<CatalogSnapshot>> = RwLock::new(None);
+
+/// Generation stamp for the live snapshot. Bumped (under the `LIVE_SNAPSHOT`
+/// write lock) by [`set_live_snapshot`] / [`clear_live_snapshot`] so the
+/// memoized merged snapshot below can detect staleness without re-merging.
+static LIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Memoized result of [`merged_snapshot`], tagged with the `LIVE_GENERATION`
+/// it was computed from. Re-merging ~5,700 offerings per call made every
+/// `/model` open pay a multi-second, UI-thread-blocking cost; the merge result
+/// only changes when the live snapshot changes, so cache it.
+static MERGED_CACHE: RwLock<Option<(u64, Arc<CatalogSnapshot>)>> = RwLock::new(None);
 
 fn bundled_snapshot() -> &'static CatalogSnapshot {
     BUNDLED_SNAPSHOT.get_or_init(|| CatalogSnapshot {
@@ -62,6 +74,10 @@ fn apply_provider_model_cutlines(mut snapshot: CatalogSnapshot) -> CatalogSnapsh
 pub fn set_live_snapshot(snapshot: CatalogSnapshot) {
     if let Ok(mut guard) = LIVE_SNAPSHOT.write() {
         *guard = Some(apply_provider_model_cutlines(snapshot));
+        // Invalidate the memoized merged snapshot while still holding the
+        // write lock so no reader can cache the old merge against the new
+        // generation.
+        LIVE_GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -69,13 +85,37 @@ pub fn set_live_snapshot(snapshot: CatalogSnapshot) {
 pub fn clear_live_snapshot() {
     if let Ok(mut guard) = LIVE_SNAPSHOT.write() {
         *guard = None;
+        LIVE_GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 }
 
 /// The merged catalog snapshot: live rows override bundled rows on
 /// `(provider, wire_model_id)` identity (#4188). When no live snapshot is
 /// present, this is just the offline bundled snapshot.
-fn merged_snapshot() -> CatalogSnapshot {
+///
+/// Memoized: the merge is recomputed only after [`set_live_snapshot`] /
+/// [`clear_live_snapshot`] bump `LIVE_GENERATION`; every other call returns
+/// the cached `Arc` (the picker calls this per row, so it must be cheap).
+fn merged_snapshot() -> Arc<CatalogSnapshot> {
+    let generation = LIVE_GENERATION.load(Ordering::SeqCst);
+    if let Ok(guard) = MERGED_CACHE.read()
+        && let Some((cached_generation, cached)) = guard.as_ref()
+        && *cached_generation == generation
+    {
+        return Arc::clone(cached);
+    }
+    let merged = Arc::new(compute_merged_snapshot());
+    if let Ok(mut guard) = MERGED_CACHE.write() {
+        // `generation` was sampled before the live snapshot was read, so a
+        // concurrent set/clear leaves this entry stale-tagged and the next
+        // reader recomputes; the merge itself is always internally consistent.
+        *guard = Some((generation, Arc::clone(&merged)));
+    }
+    merged
+}
+
+/// Uncached merge (see [`merged_snapshot`] for the caching seam).
+fn compute_merged_snapshot() -> CatalogSnapshot {
     let live = LIVE_SNAPSHOT.read().ok().and_then(|guard| guard.clone());
     let merged = match live {
         None => bundled_snapshot().clone(),
@@ -437,6 +477,64 @@ mod tests {
         clear_live_snapshot();
         let after_clear = all_catalog_models_for_provider(ApiProvider::Deepseek);
         assert_eq!(after_clear, bundled);
+    }
+
+    /// Memoization: repeated `merged_snapshot()` calls return the cached merge
+    /// (same `Arc` allocation), and publishing or clearing a live snapshot
+    /// invalidates the cache so new content becomes visible.
+    #[test]
+    fn merged_snapshot_cache_invalidates_on_live_snapshot_change() {
+        let _live = lock_live_snapshot();
+        clear_live_snapshot();
+
+        let bundled_only = merged_snapshot();
+        assert!(
+            Arc::ptr_eq(&bundled_only, &merged_snapshot()),
+            "repeated merged_snapshot() calls must return the cached Arc"
+        );
+        let probe = "deepseek-cache-probe-model";
+        assert!(
+            !bundled_only
+                .offerings
+                .iter()
+                .any(|row| row.wire_model_id == probe),
+            "probe model must not pre-exist in the bundled snapshot"
+        );
+
+        set_live_snapshot(CatalogSnapshot {
+            offerings: vec![CatalogOffering {
+                provider: "deepseek".to_string(),
+                wire_model_id: probe.to_string(),
+                endpoint_key: "chat".to_string(),
+                ..Default::default()
+            }],
+        });
+        let with_live = merged_snapshot();
+        assert!(
+            !Arc::ptr_eq(&bundled_only, &with_live),
+            "set_live_snapshot must invalidate the memoized merge"
+        );
+        assert!(
+            with_live
+                .offerings
+                .iter()
+                .any(|row| row.wire_model_id == probe),
+            "new live content must be visible after set_live_snapshot"
+        );
+
+        clear_live_snapshot();
+        let after_clear = merged_snapshot();
+        assert!(
+            !after_clear
+                .offerings
+                .iter()
+                .any(|row| row.wire_model_id == probe),
+            "clear_live_snapshot must invalidate the memoized merge"
+        );
+        assert_eq!(
+            after_clear.offerings, bundled_only.offerings,
+            "clearing live must restore the bundled-only merge content"
+        );
     }
 
     #[test]
