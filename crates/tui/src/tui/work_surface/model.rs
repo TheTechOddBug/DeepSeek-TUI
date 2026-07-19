@@ -254,9 +254,11 @@ fn graph_rows(
         || format!("graph revision {}", snapshot.revision),
         |state| format!("graph revision {} · {}", snapshot.revision, state.detail()),
     );
-    let waiting = (waiting > 0)
-        .then(|| format!(" · {waiting} waiting"))
-        .unwrap_or_default();
+    let waiting = if waiting > 0 {
+        format!(" · {waiting} waiting")
+    } else {
+        String::new()
+    };
     let mut rows = vec![heading(
         &format!("Work · {running} running{waiting} · {ready} ready · {blocked} blocked{status}"),
         &detail,
