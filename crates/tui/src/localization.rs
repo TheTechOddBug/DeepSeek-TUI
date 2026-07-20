@@ -1139,6 +1139,12 @@ pub enum MessageId {
     // Fuzzy file picker (@ attach overlay).
     FilePickerMatchSingular,
     FilePickerMatchesPlural,
+    // Quiet action-triggered product guidance.
+    BehavioralTipPlanning,
+    BehavioralTipBackgroundReceipt,
+    BehavioralTipClearedInput,
+    BehavioralTipMcpValidation,
+    BehavioralTipRepeatedCommand,
 }
 
 #[allow(dead_code)]
@@ -2144,6 +2150,11 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ApprovalRepoLawRuleLabel,
     MessageId::FilePickerMatchSingular,
     MessageId::FilePickerMatchesPlural,
+    MessageId::BehavioralTipPlanning,
+    MessageId::BehavioralTipBackgroundReceipt,
+    MessageId::BehavioralTipClearedInput,
+    MessageId::BehavioralTipMcpValidation,
+    MessageId::BehavioralTipRepeatedCommand,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {
