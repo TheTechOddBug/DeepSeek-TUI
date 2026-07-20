@@ -1785,6 +1785,15 @@ impl SetupWizardView {
         }
         let mut state = self.state.clone();
         state.set_step(spec.id(), entry);
+        if spec.id() == SetupStep::Constitution && status == StepStatus::Skipped {
+            // `S` is a durable response to the versioned checkpoint, just like
+            // choosing the explicit defer action. Without this completion
+            // marker startup opens the same checkpoint again on every launch.
+            state.complete_constitution_checkpoint(
+                CONSTITUTION_CHECKPOINT_VERSION,
+                ConstitutionChoice::Deferred,
+            );
+        }
         self.state = state.clone();
         if advance {
             self.move_next();
@@ -4106,8 +4115,15 @@ mod tests {
             panic!("expected skipped setup-state commit event");
         };
         assert_eq!(state.status(SetupStep::Constitution), StepStatus::Skipped);
+        assert_eq!(
+            state.constitution_checkpoint_completed_for.as_deref(),
+            Some(CONSTITUTION_CHECKPOINT_VERSION)
+        );
+        assert_eq!(state.constitution_choice, ConstitutionChoice::Deferred);
         assert!(message.contains("skipped"));
         assert_eq!(view.selected_step(), SetupStep::OperateFleet);
+        let restarted = SetupWizardView::new(state, Locale::En);
+        assert_eq!(restarted.selected_step(), SetupStep::Language);
 
         let action = view.handle_key(key(KeyCode::Char('r')));
 
