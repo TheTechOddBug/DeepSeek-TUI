@@ -2322,6 +2322,10 @@ pub struct TaskPanelEntry {
     pub elapsed_since_output_ms: Option<u64>,
     pub owner_agent_id: Option<String>,
     pub owner_agent_name: Option<String>,
+    /// #2889: structured current activity for the Work panel.
+    pub current_tool: Option<String>,
+    pub role: Option<String>,
+    pub files_touched: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

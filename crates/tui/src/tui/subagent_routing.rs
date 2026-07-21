@@ -448,6 +448,9 @@ pub(super) fn task_summary_to_panel_entry(summary: TaskSummary) -> TaskPanelEntr
         elapsed_since_output_ms: None,
         owner_agent_id: None,
         owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
     }
 }
 

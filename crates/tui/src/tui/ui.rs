@@ -1697,6 +1697,9 @@ async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManag
                     elapsed_since_output_ms: job.elapsed_since_output_ms,
                     owner_agent_id: job.owner_agent_id,
                     owner_agent_name: job.owner_agent_name,
+                    current_tool: None,
+                    role: None,
+                    files_touched: 0,
                 })
                 .collect(),
             // Contended: keep the last known snapshot rather than blocking.
@@ -1825,6 +1828,9 @@ fn active_reasoning_task_entries(app: &App) -> Vec<TaskPanelEntry> {
                 elapsed_since_output_ms: None,
                 owner_agent_id: None,
                 owner_agent_name: None,
+                current_tool: None,
+                role: None,
+                files_touched: 0,
             }),
             _ => None,
         })
@@ -1868,6 +1874,9 @@ fn active_rlm_task_entries(app: &App) -> Vec<TaskPanelEntry> {
                 elapsed_since_output_ms: None,
                 owner_agent_id: None,
                 owner_agent_name: None,
+                current_tool: None,
+                role: None,
+                files_touched: 0,
             })
         })
         .collect()
