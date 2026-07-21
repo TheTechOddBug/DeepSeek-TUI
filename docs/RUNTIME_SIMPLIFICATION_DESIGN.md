@@ -81,3 +81,20 @@ Default eager count target: **~10** (vs. ~18 today), with the durable families a
 - Regression: `cargo fmt`, `cargo clippy --workspace --all-targets --locked`,
   `cargo test -p codewhale-tui --bin codewhale-tui --locked`, and
   `cargo test --workspace`.
+
+### v0.9.1 receipt
+
+Measured with `python3 scripts/measure-runtime-contract.py` on 2026-07-21:
+
+| Contract | Before | After |
+|---|---:|---:|
+| Default active tools | 18 | 9 |
+| Active tool bytes | ~25,650 | 20,772 |
+| Agent-mode instruction bytes | 4,064 | 663 |
+| Full system-prompt bytes | 15,842 | 15,368 |
+
+The final active names are `Bash`, `File`, `Git`, `Run`, `agent`, `tasks`,
+`update_plan`, `work_update`, and `tool_search`. `File` advertises only read
+actions in Plan mode, and its `patch` action appears only when the existing
+apply-patch feature is enabled. Hidden aliases remain executable for transcript
+replay but are absent from the model catalog.
