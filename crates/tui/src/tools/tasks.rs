@@ -15,7 +15,7 @@ use crate::dependencies::ExternalTool;
 use crate::task_manager::{
     NewTaskRequest, TaskArtifactRef, TaskAttemptRecord, TaskGateRecord, TaskRecord,
 };
-use crate::tools::shell::{ExecShellTool, ShellWaitTool};
+use crate::tools::shell::BashTool;
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64, required_str,
@@ -450,7 +450,7 @@ impl ToolSpec for TaskShellStartTool {
         if optional_bool(&input, "tty", false) {
             shell_input["tty"] = json!(true);
         }
-        let mut result = ExecShellTool.execute(shell_input, context).await?;
+        let mut result = BashTool::new("Bash").execute(shell_input, context).await?;
         if let Some(metadata) = result.metadata.as_mut() {
             metadata["background"] = json!(true);
             metadata["task_shell"] = json!(true);
@@ -493,7 +493,7 @@ impl ToolSpec for TaskShellWaitTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let result = ShellWaitTool::new("exec_shell_wait")
+        let result = BashTool::alias("exec_shell_wait", "wait")
             .execute(input.clone(), context)
             .await?;
         let Some(gate) = optional_str(&input, "gate") else {

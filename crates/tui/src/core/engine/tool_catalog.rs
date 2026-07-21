@@ -40,14 +40,12 @@ pub(super) fn is_tool_search_tool(name: &str) -> bool {
 }
 
 pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
+    // #4625: the model-facing shell tool is `Bash`; legacy `exec_shell*`
+    // names are hidden compat aliases and must not be default-active.
+    "Bash",
     "agent",
     "apply_patch",
     "edit_file",
-    "exec_interact",
-    "exec_shell",
-    "exec_shell_interact",
-    "exec_shell_wait",
-    "exec_wait",
     "fetch_url",
     "file_search",
     "git_diff",
@@ -70,6 +68,11 @@ pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
 ];
 
 const CORE_ACTION_TOOL_FALLBACKS: &[CoreActionToolFallback] = &[
+    CoreActionToolFallback {
+        name: "Bash",
+        description: "Run shell commands in the workspace.",
+        unavailable_reason: "Not present in the current model-visible catalog. Interactive Agent sessions expose shell by default unless allow_shell = false; noninteractive and durable profiles require allow_shell = true. Plan mode hides shell, and command tool allow/deny gates can also block it.",
+    },
     CoreActionToolFallback {
         name: "exec_shell",
         description: "Run shell commands in the workspace.",

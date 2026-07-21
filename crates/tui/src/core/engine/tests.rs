@@ -1771,7 +1771,9 @@ fn approval_stamp_preserves_existing_metadata() {
 #[test]
 fn core_native_tools_stay_loaded_in_yolo_mode() {
     let always_load = HashSet::new();
-    assert!(!should_default_defer_tool("exec_shell", &always_load));
+    // #4625: `Bash` is the model-facing shell tool; legacy exec_shell names
+    // are hidden compat aliases whose defer state no longer matters.
+    assert!(!should_default_defer_tool("Bash", &always_load));
     // git_blame remains deferred (read-only git history beyond log/show/diff).
     assert!(should_default_defer_tool("git_blame", &always_load));
 }
@@ -1779,7 +1781,7 @@ fn core_native_tools_stay_loaded_in_yolo_mode() {
 #[test]
 fn non_yolo_mode_retains_default_defer_policy() {
     let always_load = HashSet::new();
-    assert!(!should_default_defer_tool("exec_shell", &always_load));
+    assert!(!should_default_defer_tool("Bash", &always_load));
     assert!(!should_default_defer_tool("edit_file", &always_load));
     assert!(!should_default_defer_tool("apply_patch", &always_load));
     assert!(!should_default_defer_tool("fetch_url", &always_load));
@@ -1848,7 +1850,7 @@ fn model_tool_catalog_applies_native_and_mcp_deferral() {
         vec![
             api_tool("read_file"),
             api_tool("write_file"),
-            api_tool("exec_shell"),
+            api_tool("Bash"),
             api_tool("edit_file"),
             api_tool("project_map"),
         ],
@@ -1866,7 +1868,7 @@ fn model_tool_catalog_applies_native_and_mcp_deferral() {
 
     assert_eq!(defer_loading("read_file"), Some(false));
     assert_eq!(defer_loading("write_file"), Some(false));
-    assert_eq!(defer_loading("exec_shell"), Some(false));
+    assert_eq!(defer_loading("Bash"), Some(false));
     assert_eq!(defer_loading("edit_file"), Some(false));
     assert_eq!(defer_loading("project_map"), Some(true));
     assert_eq!(defer_loading("list_mcp_resources"), Some(false));
@@ -2060,7 +2062,9 @@ fn agent_catalog_advertises_and_searches_core_action_tools() {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<HashSet<_>>();
-    for tool_name in ["exec_shell", "write_file", "edit_file", "apply_patch"] {
+    // #4625: the model-facing shell tool is `Bash`; `exec_shell` remains a
+    // hidden compat alias and must NOT appear in the advertised catalog.
+    for tool_name in ["Bash", "write_file", "edit_file", "apply_patch"] {
         assert!(
             names.contains(tool_name),
             "{tool_name} must be advertised in Agent mode"
@@ -2107,14 +2111,14 @@ fn catalog_consistency_self_check_flags_registered_core_tool_missing_from_catalo
         AppMode::Agent,
         &always_load,
     );
-    catalog.retain(|tool| tool.name != "exec_shell");
+    catalog.retain(|tool| tool.name != "Bash");
 
     let issues = tool_catalog_consistency_issues(&catalog, &registry);
     assert!(
         issues
             .iter()
-            .any(|issue| issue.contains("registered core tool 'exec_shell'")),
-        "missing registered exec_shell should be reported: {issues:?}"
+            .any(|issue| issue.contains("registered core tool 'Bash'")),
+        "missing registered Bash should be reported: {issues:?}"
     );
 }
 

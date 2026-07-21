@@ -563,16 +563,20 @@ impl ToolRegistryBuilder {
             ))
     }
 
-    /// Include shell execution tool.
+    /// Include shell execution tools.
+    ///
+    /// Model sees one tool: `Bash` (#4625). Legacy `exec_shell*` / `exec_*`
+    /// spellings remain registered as hidden compat aliases for transcript replay.
     #[must_use]
     pub fn with_shell_tools(self) -> Self {
-        use super::shell::{ExecShellTool, ShellCancelTool, ShellInteractTool, ShellWaitTool};
-        self.with_tool(Arc::new(ExecShellTool))
-            .with_tool(Arc::new(ShellWaitTool::new("exec_shell_wait")))
-            .with_tool(Arc::new(ShellInteractTool::new("exec_shell_interact")))
-            .with_tool(Arc::new(ShellCancelTool))
-            .with_tool(Arc::new(ShellWaitTool::new("exec_wait")))
-            .with_tool(Arc::new(ShellInteractTool::new("exec_interact")))
+        use super::shell::BashTool;
+        self.with_tool(Arc::new(BashTool::new("Bash")))
+            .with_tool(Arc::new(BashTool::alias("exec_shell", "run")))
+            .with_tool(Arc::new(BashTool::alias("exec_shell_wait", "wait")))
+            .with_tool(Arc::new(BashTool::alias("exec_wait", "wait")))
+            .with_tool(Arc::new(BashTool::alias("exec_shell_interact", "interact")))
+            .with_tool(Arc::new(BashTool::alias("exec_interact", "interact")))
+            .with_tool(Arc::new(BashTool::alias("exec_shell_cancel", "cancel")))
     }
 
     /// Include search tools (`grep_files`).
@@ -723,8 +727,8 @@ impl ToolRegistryBuilder {
     /// Include shell-related task tools (`task_shell_start`, `task_shell_wait`).
     ///
     /// These are gated behind `allow_shell` because `task_shell_start`
-    /// delegates directly to `ExecShellTool`, providing the same shell
-    /// execution capability as `exec_shell`.
+    /// delegates directly to `BashTool`, providing the same shell
+    /// execution capability as `Bash`.
     #[must_use]
     pub fn with_runtime_task_shell_tools(self) -> Self {
         use super::tasks::{TaskShellStartTool, TaskShellWaitTool};
@@ -1875,10 +1879,9 @@ mod tests {
         );
     }
 
-    /// #2683 — `exec_wait` and `exec_interact` are legacy aliases for
-    /// `exec_shell_wait` and `exec_shell_interact`. They must remain
+    /// #2683 / #4625 — Legacy `exec_shell*` / `exec_*` names remain
     /// callable (for saved transcript replay) but hidden from the
-    /// model-facing catalog.
+    /// model-facing catalog. Only `Bash` is model-visible.
     #[test]
     fn shell_alias_tools_hidden_from_model_catalog() {
         let tmp = tempdir().expect("tempdir");
@@ -1886,7 +1889,7 @@ mod tests {
         let registry = ToolRegistryBuilder::new().with_shell_tools().build(ctx);
 
         // Legacy aliases stay callable.
-        for alias in ["exec_wait", "exec_interact"] {
+        for alias in ["exec_shell", "exec_wait", "exec_interact", "exec_shell_wait", "exec_shell_interact", "exec_shell_cancel"] {
             assert!(registry.contains(alias), "{alias} should remain callable");
         }
 
@@ -1896,16 +1899,14 @@ mod tests {
             .map(|tool| tool.name)
             .collect();
 
-        // Canonical names are model-visible.
-        for canonical in ["exec_shell_wait", "exec_shell_interact"] {
-            assert!(
-                api_names.iter().any(|n| n == canonical),
-                "{canonical} should be model-visible"
-            );
-        }
+        // Only Bash is model-visible.
+        assert!(
+            api_names.iter().any(|n| n == "Bash"),
+            "Bash should be model-visible"
+        );
 
-        // Legacy aliases are hidden.
-        for alias in ["exec_wait", "exec_interact"] {
+        // All legacy aliases are hidden.
+        for alias in ["exec_shell", "exec_wait", "exec_interact", "exec_shell_wait", "exec_shell_interact", "exec_shell_cancel"] {
             assert!(
                 api_names.iter().all(|n| n != alias),
                 "{alias} should be hidden from the model catalog"
