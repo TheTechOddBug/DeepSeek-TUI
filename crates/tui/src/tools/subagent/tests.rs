@@ -3070,7 +3070,11 @@ fn test_invalid_role_error_lists_real_aliases() {
     // Well-formed fleet role tokens parse and then fail clearly at roster
     // resolution time with both real roster members and type aliases (#4177).
     let roster = FleetRoster::built_ins_only();
-    let input = json!({ "prompt": "do work", "role": "nonsense" });
+    let input = json!({
+        "prompt": "do work",
+        "role": "nonsense",
+        "write_roots": ["."]
+    });
     let mut request = parse_spawn_request(&input).expect("fleet role token should parse");
     let err = apply_spawn_profile(&mut request, &roster)
         .expect_err("unknown fleet role should fail at runtime resolution")
