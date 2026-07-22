@@ -1658,8 +1658,8 @@ fn compact_tool_result_for_wire(
     // Only medium, non-mutation results can point back to a full earlier
     // message in this one request. Oversized results are already excerpts, so
     // a back-reference would falsely imply the exact bytes remain available.
-    let dedup_eligible = original_chars >= TOOL_RESULT_DEDUP_MIN_CHARS
-        && original_chars <= TOOL_RESULT_SENT_CHAR_BUDGET
+    let dedup_eligible = (TOOL_RESULT_DEDUP_MIN_CHARS..=TOOL_RESULT_SENT_CHAR_BUDGET)
+        .contains(&original_chars)
         && !is_mutation_tool(tool_name);
 
     if dedup_eligible && let Some(previous) = seen_tool_results.get(&sha) {

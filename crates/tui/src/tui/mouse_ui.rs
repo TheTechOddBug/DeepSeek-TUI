@@ -828,9 +828,7 @@ fn resolve_agent_transcript_text(app: &App, agent_id: &str) -> Option<String> {
         }
     }
 
-    let Some(payload) = payload else {
-        return None;
-    };
+    let payload = payload?;
     let text = agent_transcript_text(&payload);
     if text.trim().is_empty() {
         return None;

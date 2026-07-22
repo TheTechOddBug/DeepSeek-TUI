@@ -8955,7 +8955,7 @@ async fn run_interactive(
     // own /v1/models endpoint and merges live rows into the provider lake
     // alongside the Models.dev snapshot. Currently active for TelecomJS, whose
     // model list is not covered by the Models.dev catalog.
-    crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(&config);
+    crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(config);
 
     // Boot janitors — snapshot prune (7-day default), spillover prune
     // (#422), and managed-session cleanup (v0.8.44) — are best-effort disk

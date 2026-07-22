@@ -586,7 +586,7 @@ pub(super) fn spillover_pager_section(app: &App, cell_index: usize) -> Option<St
         return None;
     }
     let body = session_artifact
-        .and_then(|artifact| read_owned_session_artifact(artifact))
+        .and_then(read_owned_session_artifact)
         .or_else(|| {
             legacy_path.as_deref().and_then(|path| {
                 current_session.and_then(|session_id| read_owned_legacy_spillover(path, session_id))
