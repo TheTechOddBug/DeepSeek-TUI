@@ -4,6 +4,7 @@ use std::path::{Component, Path};
 
 use ratatui::layout::Rect;
 
+use crate::tools::canonical_action::canonical_action_alias;
 use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus};
 use crate::tui::app::{AgentCurrentActivityStatus, App, SidebarRowAction};
 use crate::tui::history::{FileActivityKind, FileActivitySummary, HistoryCell};
@@ -624,14 +625,15 @@ fn settled_file_activity(app: &App) -> SettledFileActivity {
         let Some(detail) = app.tool_detail_record_for_cell(index) else {
             continue;
         };
-        let Some(kind) = FileActivitySummary::from_tool_name(&detail.tool_name) else {
+        let activity_tool_name = canonical_action_alias(&detail.tool_name, &detail.input);
+        let Some(kind) = FileActivitySummary::from_tool_name(activity_tool_name) else {
             continue;
         };
         if !seen.insert(detail.tool_id.as_str()) {
             continue;
         }
         activity.summary.record(kind);
-        let target = activity_target(&app.workspace, &detail.tool_name, &detail.input, kind);
+        let target = activity_target(&app.workspace, activity_tool_name, &detail.input, kind);
         let details = match kind {
             FileActivityKind::Read => &mut activity.read,
             FileActivityKind::List => &mut activity.list,
@@ -1206,7 +1208,38 @@ fn section_list(out: &mut String, title: &str, items: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::tools::spec::ToolResult;
+    use crate::tui::app::TuiOptions;
+    use crate::tui::tool_routing::{handle_tool_call_complete, handle_tool_call_started};
     use crate::work_graph::{CompatTodoBinding, OperationBinding, WorkNodeId};
+
+    fn test_app() -> App {
+        App::new(
+            TuiOptions {
+                model: "deepseek-v4-flash".to_string(),
+                workspace: std::path::PathBuf::from("/workspace/project"),
+                config_path: None,
+                config_profile: None,
+                allow_shell: false,
+                use_alt_screen: true,
+                use_mouse_capture: false,
+                use_bracketed_paste: true,
+                max_subagents: 1,
+                skills_dir: std::path::PathBuf::from("."),
+                memory_path: std::path::PathBuf::from("memory.md"),
+                notes_path: std::path::PathBuf::from("notes.txt"),
+                mcp_config_path: std::path::PathBuf::from("mcp.json"),
+                use_memory: false,
+                start_in_agent_mode: true,
+                skip_onboarding: true,
+                yolo: false,
+                resume_session_id: None,
+                initial_input: None,
+            },
+            &Config::default(),
+        )
+    }
 
     fn operation(state: NodeState, suffix: &str) -> WorkNode {
         WorkNode {
@@ -1379,5 +1412,64 @@ mod tests {
         );
         assert_eq!(privacy_safe_path(workspace, "../private.txt"), None);
         assert_eq!(safe_pattern("needle\nsecret"), "needle secret");
+    }
+
+    #[test]
+    fn settled_canonical_file_actions_keep_aggregates_and_safe_targets() {
+        let mut app = test_app();
+        let calls = [
+            ("read", serde_json::json!({"path": "src/read.rs"})),
+            ("list", serde_json::json!({"path": "src"})),
+            ("search_name", serde_json::json!({"query": "lib.rs"})),
+            (
+                "search_content",
+                serde_json::json!({"pattern": "needle\nprivate", "path": "src"}),
+            ),
+            (
+                "write",
+                serde_json::json!({"path": "src/new.rs", "content": "new\n"}),
+            ),
+            (
+                "edit",
+                serde_json::json!({
+                    "path": "src/edit.rs",
+                    "search": "old",
+                    "replace": "new"
+                }),
+            ),
+            (
+                "patch",
+                serde_json::json!({
+                    "patch": "diff --git a/src/patch.rs b/src/patch.rs\n--- a/src/patch.rs\n+++ b/src/patch.rs\n@@ -1 +1 @@\n-old\n+new\n"
+                }),
+            ),
+        ];
+
+        for (action, payload) in calls {
+            let id = format!("file-{action}");
+            let mut input = payload;
+            input["action"] = serde_json::json!(action);
+            handle_tool_call_started(&mut app, &id, "File", &input);
+            handle_tool_call_complete(&mut app, &id, "File", &Ok(ToolResult::success("ok")));
+            app.flush_active_cell();
+        }
+
+        let activity = settled_file_activity(&app);
+        assert_eq!(
+            activity.summary,
+            FileActivitySummary {
+                files_read: 1,
+                dirs_listed: 1,
+                patterns_searched: 2,
+                files_written: 3,
+            }
+        );
+        assert_eq!(activity.read, ["src/read.rs"]);
+        assert_eq!(activity.list, ["src"]);
+        assert_eq!(activity.search, ["lib.rs", "needle private"]);
+        assert_eq!(
+            activity.write,
+            ["src/new.rs", "src/edit.rs", "src/patch.rs"]
+        );
     }
 }
