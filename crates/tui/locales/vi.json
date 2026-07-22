@@ -200,7 +200,7 @@
     "CmdSidebarDescription": "Bật/tắt hoặc lấy nét thanh bên phải",
     "CmdSkillDescription": "Kích hoạt một kỹ năng, hoặc cài đặt/cập nhật/gỡ bỏ/tin cậy một kỹ năng cộng đồng",
     "CmdSkillsDescription": "Liệt kê các kỹ năng cục bộ (lọc bằng `/skills <tiền_tố>`; --remote để duyệt kho lưu trữ được kiểm duyệt)",
-    "CmdSlopDescription": "Kiểm tra hoặc xuất sổ nợ kỹ thuật",
+    "CmdDebtDescription": "Kiểm tra hoặc xuất sổ nợ kỹ thuật",
     "CmdStashDescription": "Tạm cất hoặc khôi phục bản nháp (Ctrl+S để cất, /stash list/pop để xem/lấy ra)",
     "CmdStatusDescription": "Hiển thị trạng thái thời gian chạy của phiên",
     "CmdStatuslineDescription": "Cấu hình các mục hiển thị ở thanh trạng thái dưới cùng",

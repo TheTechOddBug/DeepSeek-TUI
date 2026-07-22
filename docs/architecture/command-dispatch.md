@@ -22,8 +22,8 @@ intentional:
 |------|--------|----------|
 | 0 | `$skill` compatibility | `$name` is resolved as `/skill name` before slash parsing. |
 | 1 | User commands | `user_registry::try_dispatch()` checks workspace and global markdown commands first, so user commands can shadow built-ins. |
-| 2 | Permanent compatibility aliases | `/jihua` and `/zidong` route through config mode dispatch; `/slop` and `/canzha` dispatch directly to `/debt`. All predate the group-owned registry and bypass the built-in `CommandRegistry`. |
-| 3 | Built-in registry | `CommandRegistry` resolves group-owned built-in commands by canonical name or alias. |
+| 2 | Permanent mode compatibility aliases | `/jihua` and `/zidong` route through config mode dispatch so each selects its fixed legacy mode. They remain registered aliases for discovery, but bypass normal `/mode` execution. |
+| 3 | Built-in registry | `CommandRegistry` resolves group-owned built-in commands by canonical name or alias, including `/slop` and `/canzha` as aliases of `/debt`. |
 | 4 | Legacy migration hints | Retired commands such as `/set` and `/deepseek` return targeted replacement guidance. |
 | 5 | Skills fallback | If no command matches, a skill with the same name may run before unknown-command suggestions are shown. |
 
@@ -111,6 +111,11 @@ errors are isolated per file: valid siblings still load, appear, and dispatch.
 Hidden commands participate in shadowing and remain directly dispatchable, but
 are removed from palette and slash-completion discovery.
 
+Explicit `/help <name>` topics and unknown-command typo suggestions resolve
+through the same user-command precedence as execution. When a user command
+owns a built-in name or alias, help shows the user command's metadata and typo
+suggestions point to its canonical name rather than the shadowed built-in.
+
 Dispatch through `user_registry` resets stale command state before sending the
 new command body: hunt objective fields, token/time counters, continuation
 count, allowed tools, pause state, todos, and plan state.
@@ -119,7 +124,7 @@ count, allowed tools, pause state, todos, and plan state.
 
 | Exception | Rationale |
 |-----------|-----------|
-| `/jihua`, `/zidong`, `/slop`, `/canzha` | Backward-compatible dispatch aliases that predate the group-owned registry. `/jihua` and `/zidong` route through config mode dispatch; `/slop` and `/canzha` dispatch directly to `/debt`. |
+| `/jihua`, `/zidong` | Backward-compatible mode aliases that predate the group-owned registry. They route through config mode dispatch to preserve their fixed mode selection. |
 | `/set` and `/deepseek` migration hints | Retired commands kept only as direct typed guidance. They are excluded from registry and autocomplete. |
 | `#[allow(clippy::module_inception)]` in matching group modules | Group directories intentionally contain same-named child modules such as `core/core.rs`. |
 | `user_commands.rs` lower layer | The registry owns runtime behavior, while this module remains the shared filesystem and parser layer. |

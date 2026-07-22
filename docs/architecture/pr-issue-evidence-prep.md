@@ -41,7 +41,6 @@ tree by running the documented commands.
 | Config group-local metadata | Config `mod.rs` keeps 11 `CommandInfo` statics and dispatch — permanent structure, not cleanup scope |
 | Debug group-local metadata | Debug `mod.rs` keeps 11 `CommandInfo` statics and dispatch — permanent structure, not cleanup scope |
 | `/jihua`, `/zidong` | Chinese-language back-compat aliases for `/mode` — predate group-owned registry |
-| `/slop`, `/canzha` | Typed-only aliases for `/debt` — predate group-owned registry |
 | `/set`, `/deepseek` migration hints | Retired commands, direct typed guidance only, excluded from registry/completion |
 | `$skill` prefix | Non-slash compatibility syntax, predates EPIC-002 |
 | Skill-name fallback | Slash commands fall back to skill dispatch after built-ins and user commands |

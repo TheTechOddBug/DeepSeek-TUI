@@ -200,7 +200,7 @@
     "CmdSidebarDescription": "Alternar ou focar a barra lateral direita",
     "CmdSkillDescription": "Ativar uma skill, ou instalar/atualizar/desinstalar/confiar em uma skill da comunidade",
     "CmdSkillsDescription": "Listar skills locais (filtre com `/skills <prefixo>`; --remote navega pelo registro curado)",
-    "CmdSlopDescription": "Inspecionar ou exportar o livro de dívida técnica",
+    "CmdDebtDescription": "Inspecionar ou exportar o livro de dívida técnica",
     "CmdStashDescription": "Estacionar ou restaurar rascunho do compositor (Ctrl+S estaciona, /stash list|pop)",
     "CmdStatusDescription": "Exibir o status da sessão em execução",
     "CmdStatuslineDescription": "Configurar quais itens aparecem no rodapé",

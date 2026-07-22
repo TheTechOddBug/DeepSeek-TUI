@@ -200,7 +200,7 @@
     "CmdSidebarDescription": "切换或聚焦右侧边栏",
     "CmdSkillDescription": "激活技能，或安装/更新/卸载/信任社区技能",
     "CmdSkillsDescription": "列出本地技能（用 `/skills <prefix>` 按名称前缀过滤，--remote 浏览精选注册表）",
-    "CmdSlopDescription": "检查或导出债务账本",
+    "CmdDebtDescription": "检查或导出债务账本",
     "CmdStashDescription": "暂存或恢复输入草稿（Ctrl+S 暂存，/stash list|pop）",
     "CmdStatusDescription": "显示当前运行状态",
     "CmdStatuslineDescription": "配置底栏要显示哪些条目",

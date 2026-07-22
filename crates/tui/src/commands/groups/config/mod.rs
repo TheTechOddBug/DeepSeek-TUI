@@ -103,9 +103,9 @@ static LOGOUT_INFO: CommandInfo = CommandInfo {
 };
 static DEBT_INFO: CommandInfo = CommandInfo {
     name: "debt",
-    aliases: &["cleanup"],
+    aliases: &["cleanup", "slop", "canzha"],
     usage: "/debt [query|export]",
-    description_id: MessageId::CmdSlopDescription,
+    description_id: MessageId::CmdDebtDescription,
 };
 
 fn run_registered(app: &mut App, name: &str, arg: Option<&str>) -> CommandResult {
