@@ -61,7 +61,7 @@ pub fn ascii_fallback(symbol: &str) -> Option<&'static str> {
         "▞" => Some("/"),
         "░" | "▒" | "▓" => Some(":"),
         "▱" => Some("-"),
-        "▶" | "▸" | "›" | "❯" | "→" | "↗" | "↘" | "»" => Some(">"),
+        "▶" | "▷" | "▸" | "›" | "❯" | "→" | "↗" | "↘" | "»" => Some(">"),
         "◀" | "◂" | "‹" | "❮" | "←" | "↖" | "↙" | "«" => Some("<"),
         "▼" | "▾" | "▽" | "↓" => Some("v"),
         "▲" | "△" | "↑" => Some("^"),
@@ -102,6 +102,7 @@ mod tests {
     fn charter_has_narrow_semantic_fallbacks() {
         for (rich, safe) in [
             (SELECTION, ">"),
+            ("▷", ">"),
             (CURRENT, "."),
             (USER, "|"),
             (DONE, "Y"),

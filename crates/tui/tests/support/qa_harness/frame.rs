@@ -48,18 +48,23 @@ impl Frame {
 
     /// Single row of the screen, 0-indexed from the top, trimmed at the
     /// right edge. Returns the empty string for out-of-range rows.
+    ///
+    /// Use `Screen::rows` rather than concatenating `Cell::contents()`.
+    /// Untouched blank cells have no contents in `vt100`, but they still
+    /// occupy a real terminal column between painted cells. Concatenating
+    /// only cell contents therefore turns truthful PTY output such as
+    /// `read running` into the misleading debug string `readrunning`.
+    /// `Screen::rows` preserves those interior columns and skips the hidden
+    /// continuation cell of a wide glyph.
     pub fn row(&self, y: u16) -> String {
         if y >= self.rows() {
             return String::new();
         }
-        let cols = self.cols();
-        let mut out = String::with_capacity(cols as usize);
-        for x in 0..cols {
-            if let Some(cell) = self.parser.screen().cell(y, x) {
-                out.push_str(cell.contents());
-            }
-        }
-        out
+        self.parser
+            .screen()
+            .rows(0, self.cols())
+            .nth(usize::from(y))
+            .unwrap_or_default()
     }
 
     pub fn contains(&self, needle: &str) -> bool {
@@ -169,5 +174,26 @@ impl Frame {
             out.push_str(&format!("{y:>3} | {}\n", self.row(y).trim_end()));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Frame;
+
+    #[test]
+    fn row_preserves_unpainted_interior_terminal_columns() {
+        let mut frame = Frame::new(1, 12);
+        frame.feed(b"read\x1b[6Grunning");
+
+        assert_eq!(frame.row(0), "read running");
+    }
+
+    #[test]
+    fn row_does_not_expand_wide_glyph_continuation_cells() {
+        let mut frame = Frame::new(1, 12);
+        frame.feed("界 read".as_bytes());
+
+        assert_eq!(frame.row(0), "界 read");
     }
 }

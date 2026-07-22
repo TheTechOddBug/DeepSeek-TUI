@@ -951,6 +951,9 @@ pub enum MessageId {
     PhaseIdle,
     PhaseDraft,
     PhaseWorking,
+    PhaseReasoning,
+    PhaseReading,
+    PhaseUsingTool,
     /// Metered verification pass (tests/checks) — distinct from `working`
     /// so checking reads differently from searching (ocean state model).
     PhaseVerifying,
@@ -1992,6 +1995,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::PhaseIdle,
     MessageId::PhaseDraft,
     MessageId::PhaseWorking,
+    MessageId::PhaseReasoning,
+    MessageId::PhaseReading,
+    MessageId::PhaseUsingTool,
     MessageId::PhaseVerifying,
     MessageId::PhaseWaitingOnYou,
     MessageId::PhaseDone,

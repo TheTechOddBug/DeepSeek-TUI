@@ -2060,6 +2060,174 @@ fn spawn_tool_lifecycle_screen_fixture(
     Ok((format!("http://{address}"), handle))
 }
 
+/// Stream an explicit private reasoning delta, hold it until the PTY has
+/// captured the semantic `reasoning` phase, then issue a canonical File.read.
+/// Follow-up turns issue a real Bash wait and a final receipt. Every pause is
+/// controlled by a test-owned workspace primitive; no product frame is
+/// generated or reconstructed outside the real terminal parser.
+fn spawn_semantic_activity_motion_fixture(
+    reasoning_release: std::path::PathBuf,
+    fifo_name: &str,
+    bash_release_name: &str,
+) -> anyhow::Result<(String, std::thread::JoinHandle<anyhow::Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let reasoning_prefix = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chatcmpl-semantic-reasoning",
+            "object": "chat.completion.chunk",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_content": "PRIVATE-MOTION-TRACE-MUST-STAY-HIDDEN"
+                },
+                "finish_reason": null
+            }]
+        })
+    );
+    let read_tail = pty_tool_call_sse(
+        "call_read_motion",
+        "File",
+        serde_json::json!({"action": "read", "path": fifo_name}),
+    );
+    let shell_command = format!(
+        "printf 'MOTION-BASH-START\\n'; while [ ! -f {bash_release_name} ]; do sleep 0.05; done; printf 'MOTION-BASH-END\\n'"
+    );
+    let bash_reply = pty_tool_call_sse(
+        "call_bash_motion",
+        "Bash",
+        serde_json::json!({
+            "action": "run",
+            "command": shell_command,
+            "timeout_ms": 60_000
+        }),
+    );
+    let final_reply = pty_text_sse("SEMANTIC-MOTION-DONE");
+
+    let handle = std::thread::spawn(move || -> anyhow::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut chat_index = 0_usize;
+        while chat_index < 3 && Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            let request = read_http_request(&mut stream)?;
+            let request_line = request.lines().next().unwrap_or_default();
+            if request_line.starts_with("GET ") && request_line.contains("/models") {
+                let body = serde_json::json!({
+                    "object": "list",
+                    "data": [{"id": "deepseek-v4-pro", "object": "model"}]
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes())?;
+                stream.flush()?;
+                continue;
+            }
+            anyhow::ensure!(
+                request_line.starts_with("POST ") && request_line.contains("/chat/completions"),
+                "unexpected semantic activity fixture request: {request_line}"
+            );
+
+            let request_body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            let request_json: serde_json::Value = serde_json::from_str(request_body)?;
+            let request_contract = request_json.to_string();
+            match chat_index {
+                0 => anyhow::ensure!(
+                    request_contract.contains("show semantic activity with less chrome"),
+                    "initial request omitted semantic activity prompt"
+                ),
+                1 => anyhow::ensure!(
+                    request_contract.contains("call_read_motion")
+                        && request_contract.contains("MOTION-FIFO-CONTENT")
+                        && request_contract.contains("\"role\":\"tool\""),
+                    "Bash request omitted completed File.read evidence"
+                ),
+                2 => anyhow::ensure!(
+                    request_contract.contains("call_bash_motion")
+                        && request_contract.contains("MOTION-BASH-END"),
+                    "final request omitted completed Bash evidence"
+                ),
+                _ => unreachable!("bounded semantic activity fixture"),
+            }
+
+            if chat_index == 0 {
+                let body_len = reasoning_prefix.len() + read_tail.len();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(headers.as_bytes())?;
+                stream.write_all(reasoning_prefix.as_bytes())?;
+                stream.flush()?;
+
+                let release_deadline = Instant::now() + Duration::from_secs(30);
+                while !reasoning_release.exists() && Instant::now() < release_deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                anyhow::ensure!(
+                    reasoning_release.exists(),
+                    "reasoning phase was never released by the PTY test"
+                );
+                stream.write_all(read_tail.as_bytes())?;
+                stream.flush()?;
+            } else {
+                let body = if chat_index == 1 {
+                    &bash_reply
+                } else {
+                    &final_reply
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes())?;
+                stream.flush()?;
+            }
+            chat_index += 1;
+        }
+        anyhow::ensure!(
+            chat_index == 3,
+            "semantic activity fixture served {chat_index}/3 chat requests"
+        );
+        Ok(())
+    });
+    Ok((format!("http://{address}"), handle))
+}
+
+fn release_semantic_read_fifo(
+    path: std::path::PathBuf,
+) -> std::thread::JoinHandle<anyhow::Result<()>> {
+    std::thread::spawn(move || -> anyhow::Result<()> {
+        // ReadFileTool opens once to sniff PDF magic, once for metadata, and
+        // once for the actual UTF-8 read. Pair each real FIFO reader with a
+        // writer so the final pass receives the evidence payload.
+        {
+            let mut writer = std::fs::OpenOptions::new().write(true).open(&path)?;
+            writer.write_all(b"TEXT")?;
+            writer.flush()?;
+        }
+        {
+            let _metadata_handshake = std::fs::OpenOptions::new().write(true).open(&path)?;
+        }
+        {
+            let mut writer = std::fs::OpenOptions::new().write(true).open(&path)?;
+            writer.write_all(b"MOTION-FIFO-CONTENT\n")?;
+            writer.flush()?;
+        }
+        Ok(())
+    })
+}
+
 fn whale_ansi_signature(frame: &qa_harness::Frame) -> Vec<vt100::Color> {
     const WHALE_BACK: &str = "▗▄▄▄▄▄▄▄▄▄▄▄▖";
     let (row, mut col) = frame
@@ -2095,7 +2263,12 @@ fn colored_foreground(frame: &qa_harness::Frame, needle: &str) -> vt100::Color {
 }
 
 fn phase_marker_for_label(frame: &qa_harness::Frame, label: &str) -> char {
-    let row = visible_row_with_text(frame, label)
+    // Transcript cards may carry the same semantic word (for example the
+    // collapsed `reasoning hidden` receipt). The phase strip is the lowest
+    // matching row, immediately above the composer, so search bottom-up.
+    let row = (0..frame.rows())
+        .rev()
+        .find(|&row| frame.row(row).contains(label))
         .unwrap_or_else(|| panic!("phase {label:?} missing:\n{}", frame.debug_dump()));
     frame
         .row(row)
@@ -2106,7 +2279,8 @@ fn phase_marker_for_label(frame: &qa_harness::Frame, label: &str) -> char {
 
 fn horizontal_rule_fills(frame: &qa_harness::Frame, row: u16, cols: u16) -> bool {
     let text = frame.row(row);
-    UnicodeWidthStr::width(text.as_str()) == usize::from(cols) && text.chars().all(|ch| ch == '─')
+    UnicodeWidthStr::width(text.as_str()) == usize::from(cols)
+        && (text.chars().all(|ch| ch == '─') || text.chars().all(|ch| ch == '-'))
 }
 
 /// `Harness::resize` updates the parser dimensions immediately, before the
@@ -2643,5 +2817,319 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
     server
         .join()
         .expect("tool lifecycle fixture server thread")?;
+    Ok(())
+}
+
+/// The semantic phase strip is acceptance-tested against the shipped binary,
+/// not a synthetic widget. A sealed loopback stream holds explicit private
+/// reasoning, canonical File.read on a FIFO, and Bash on a sentinel long
+/// enough for the real PTY to capture each truthful one-row label.
+#[test]
+fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_unix_pty()
+-> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+
+    #[derive(Clone, Copy)]
+    struct Case {
+        name: &'static str,
+        theme: &'static str,
+        reduced_motion: bool,
+        ascii_safe: bool,
+        reasoning_size: (u16, u16),
+        reading_size: (u16, u16),
+        tool_size: (u16, u16),
+    }
+
+    let cases = [
+        Case {
+            name: "dark-motion",
+            theme: "dark",
+            reduced_motion: false,
+            ascii_safe: false,
+            reasoning_size: (100, 32),
+            reading_size: (50, 16),
+            tool_size: (140, 40),
+        },
+        Case {
+            name: "light-reduced",
+            theme: "light",
+            reduced_motion: true,
+            ascii_safe: false,
+            reasoning_size: (100, 32),
+            reading_size: (80, 24),
+            tool_size: (100, 32),
+        },
+        Case {
+            name: "dark-ascii",
+            theme: "dark",
+            reduced_motion: false,
+            ascii_safe: true,
+            reasoning_size: (80, 24),
+            reading_size: (80, 24),
+            tool_size: (80, 24),
+        },
+    ];
+
+    for case in cases {
+        const FIFO_NAME: &str = "semantic-motion-read.fifo";
+        const REASONING_RELEASE: &str = "semantic-motion-reasoning.release";
+        const BASH_RELEASE: &str = "semantic-motion-bash.release";
+
+        let ws = make_sealed_workspace()?;
+        let fifo_path = ws.workspace().join(FIFO_NAME);
+        let mkfifo = Command::new("mkfifo").arg(&fifo_path).status()?;
+        anyhow::ensure!(
+            mkfifo.success(),
+            "mkfifo failed for {}",
+            fifo_path.display()
+        );
+
+        let reasoning_release = ws.workspace().join(REASONING_RELEASE);
+        let (base_url, server) = spawn_semantic_activity_motion_fixture(
+            reasoning_release.clone(),
+            FIFO_NAME,
+            BASH_RELEASE,
+        )?;
+
+        let codewhale_home = ws.home().join(".codewhale");
+        let codex_home = ws.home().join(".codex");
+        std::fs::create_dir_all(&codex_home)?;
+        std::fs::write(
+            codewhale_home.join("config.toml"),
+            "allow_shell = true\nreasoning_effort = \"low\"\n\n[retry]\nenabled = false\n\n[update]\ncheck_for_updates = false\n",
+        )?;
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            format!(
+                "theme = \"{}\"\nlocale = \"en\"\ndefault_mode = \"agent\"\npermission_posture = \"full-access\"\nshow_thinking = false\nlow_motion = {}\nfancy_animations = {}\ncomposer_border = true\n",
+                case.theme, case.reduced_motion, !case.reduced_motion,
+            ),
+        )?;
+        std::fs::write(
+            codex_home.join("models_cache.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "fetched_at": chrono::Utc::now(),
+                "models": [{"slug": "deepseek-v4-pro", "priority": 1}]
+            }))?,
+        )?;
+
+        let mut builder = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+            .cwd(ws.workspace())
+            .clear_env()
+            .seal_home(ws.home())
+            .env("CODEWHALE_HOME", codewhale_home.to_string_lossy())
+            .env(
+                "DEEPSEEK_CONFIG_PATH",
+                codewhale_home.join("config.toml").to_string_lossy(),
+            )
+            .env("CODEX_HOME", codex_home.to_string_lossy())
+            .env("CODEWHALE_PROVIDER", "deepseek")
+            .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+            .env("DEEPSEEK_BASE_URL", &base_url)
+            .env("CODEWHALE_BASE_URL", &base_url)
+            .env("DEEPSEEK_MODEL", "deepseek-v4-pro")
+            .env("CODEWHALE_MODEL", "deepseek-v4-pro")
+            .env("RUST_LOG", "warn")
+            .args([
+                "--workspace",
+                ws.workspace().to_str().expect("utf-8 workspace path"),
+                "--no-project-config",
+                "--skip-onboarding",
+                "--mouse-capture",
+                "--yolo",
+            ])
+            .size(case.reasoning_size.1, case.reasoning_size.0);
+        if case.reduced_motion {
+            builder = builder.env("NO_ANIMATIONS", "1");
+        }
+        if case.ascii_safe {
+            builder = builder.env("CODEWHALE_ASCII_SAFE", "1");
+        }
+        let mut h = builder.spawn()?;
+        enter_launch_session(&mut h)?;
+
+        let prompt = "show semantic activity with less chrome";
+        h.paste(prompt)?;
+        h.wait_for_text(prompt, KEY_TIMEOUT)?;
+        h.send(keys::key::enter())?;
+        h.wait_for(|frame| frame.contains("reasoning"), Duration::from_secs(15))?;
+
+        let reasoning_marker = phase_marker_for_label(h.frame(), "reasoning");
+        if case.reduced_motion {
+            std::thread::sleep(Duration::from_millis(320));
+            h.pump();
+            assert_eq!(
+                phase_marker_for_label(h.frame(), "reasoning"),
+                reasoning_marker,
+                "reduced-motion reasoning marker moved in {}:\n{}",
+                case.name,
+                h.frame().debug_dump()
+            );
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut moved = false;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(80));
+                h.pump();
+                if phase_marker_for_label(h.frame(), "reasoning") != reasoning_marker {
+                    moved = true;
+                    break;
+                }
+            }
+            assert!(
+                moved,
+                "semantic reasoning marker never advanced in {}:\n{}",
+                case.name,
+                h.frame().debug_dump()
+            );
+        }
+        {
+            let frame = h.frame();
+            let dump = frame.debug_dump();
+            assert_real_pty_frame_geometry(frame, case.reasoning_size.0, case.reasoning_size.1);
+            assert!(
+                !frame.contains("PRIVATE-MOTION-TRACE-MUST-STAY-HIDDEN"),
+                "private reasoning leaked into the product UI:\n{dump}"
+            );
+            colored_foreground(frame, "reasoning");
+            if case.ascii_safe {
+                assert!(
+                    frame.text().is_ascii(),
+                    "ASCII-safe reasoning frame:\n{dump}"
+                );
+            }
+            write_real_pty_evidence(
+                &format!(
+                    "semantic-{}-reasoning-{}x{}",
+                    case.name, case.reasoning_size.0, case.reasoning_size.1
+                ),
+                &format!(
+                    "theme={}\nphase=reasoning\nreduced_motion={}\nascii_safe={}\nprivate_reasoning_visible=false",
+                    case.theme, case.reduced_motion, case.ascii_safe
+                ),
+                frame,
+            )?;
+        }
+
+        std::fs::write(&reasoning_release, "release\n")?;
+        h.wait_for(|frame| frame.contains("reading"), Duration::from_secs(15))?;
+        resize_and_wait_for_composition(
+            &mut h,
+            case.reading_size.1,
+            case.reading_size.0,
+            |frame| frame.contains("reading"),
+            KEY_TIMEOUT,
+        )?;
+        {
+            let frame = h.frame();
+            let dump = frame.debug_dump();
+            let row = visible_row_with_text(frame, "reading").expect("reading phase row");
+            let row_text = frame.row(row);
+            assert_real_pty_frame_geometry(frame, case.reading_size.0, case.reading_size.1);
+            assert!(
+                !frame.contains("PRIVATE-MOTION-TRACE-MUST-STAY-HIDDEN"),
+                "private reasoning leaked during File.read:\n{dump}"
+            );
+            assert!(
+                frame.contains("read running") && frame.contains("live: Reading"),
+                "File.read transcript spacing collapsed:\n{dump}"
+            );
+            if case.reading_size.0 < 60 {
+                assert!(
+                    !row_text.contains('×') && !row_text.contains('s'),
+                    "compact semantic row carried detail: {row_text:?}"
+                );
+            }
+            colored_foreground(frame, "reading");
+            if case.ascii_safe {
+                assert!(frame.text().is_ascii(), "ASCII-safe reading frame:\n{dump}");
+            }
+            write_real_pty_evidence(
+                &format!(
+                    "semantic-{}-reading-{}x{}",
+                    case.name, case.reading_size.0, case.reading_size.1
+                ),
+                &format!(
+                    "theme={}\nphase=reading\nreal_tool=File.read\nsize={}x{}\nreduced_motion={}\nascii_safe={}\nprivate_reasoning_visible=false",
+                    case.theme,
+                    case.reading_size.0,
+                    case.reading_size.1,
+                    case.reduced_motion,
+                    case.ascii_safe
+                ),
+                frame,
+            )?;
+        }
+
+        release_semantic_read_fifo(fifo_path)
+            .join()
+            .expect("FIFO release thread")?;
+        h.wait_for(
+            |frame| frame.contains("using tool") && frame.contains("run running"),
+            Duration::from_secs(15),
+        )?;
+        resize_and_wait_for_composition(
+            &mut h,
+            case.tool_size.1,
+            case.tool_size.0,
+            |frame| frame.contains("using tool") && frame.contains("run running"),
+            KEY_TIMEOUT,
+        )?;
+        {
+            let frame = h.frame();
+            let dump = frame.debug_dump();
+            let row = visible_row_with_text(frame, "using tool").expect("tool phase row");
+            let row_text = frame.row(row);
+            assert_real_pty_frame_geometry(frame, case.tool_size.0, case.tool_size.1);
+            assert!(
+                frame.contains("read done")
+                    && frame.contains("done: Reading")
+                    && frame.contains("run running"),
+                "completed/read and live/Bash transcript spacing collapsed:\n{dump}"
+            );
+            if case.tool_size.0 >= 60 {
+                let count = if case.ascii_safe { "X1" } else { "×1" };
+                assert!(
+                    row_text.contains(count),
+                    "bounded tool count missing: {row_text:?}"
+                );
+            }
+            assert!(
+                !row_text.contains("run ×1"),
+                "tool verb repeated: {row_text:?}"
+            );
+            colored_foreground(frame, "using tool");
+            if case.ascii_safe {
+                assert!(frame.text().is_ascii(), "ASCII-safe tool frame:\n{dump}");
+            }
+            write_real_pty_evidence(
+                &format!(
+                    "semantic-{}-using-tool-{}x{}",
+                    case.name, case.tool_size.0, case.tool_size.1
+                ),
+                &format!(
+                    "theme={}\nphase=using-tool\nreal_tool=Bash.run\nsize={}x{}\nreduced_motion={}\nascii_safe={}\nprivate_reasoning_visible=false",
+                    case.theme,
+                    case.tool_size.0,
+                    case.tool_size.1,
+                    case.reduced_motion,
+                    case.ascii_safe
+                ),
+                frame,
+            )?;
+        }
+
+        std::fs::write(ws.workspace().join(BASH_RELEASE), "release\n")?;
+        h.wait_for_text("SEMANTIC-MOTION-DONE", Duration::from_secs(20))?;
+        h.wait_for(
+            |frame| frame.contains("done") && !frame.contains("run running"),
+            Duration::from_secs(10),
+        )?;
+        let _ = h.shutdown();
+        server
+            .join()
+            .expect("semantic activity fixture server thread")?;
+    }
+
     Ok(())
 }

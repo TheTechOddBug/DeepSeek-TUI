@@ -177,6 +177,101 @@ pub enum ShellPhase {
     Failed,
 }
 
+/// The one truthful verb shown while a turn is live. This deliberately stays
+/// smaller than the tool taxonomy: the phase strip only needs to distinguish
+/// hidden reasoning, read-shaped exploration, other tool use, verification,
+/// and generic model work. It never exposes reasoning text or tool arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveActivityKind {
+    Working,
+    Reasoning,
+    Reading,
+    UsingTool,
+    Verifying,
+}
+
+/// Bounded projection of live turn activity. Completed entries are ignored,
+/// so an `ActiveCell` retained until `TurnComplete` cannot keep the shell in a
+/// false working state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LiveActivity {
+    kind: LiveActivityKind,
+    running_tools: usize,
+}
+
+impl LiveActivity {
+    #[must_use]
+    pub(crate) fn from_app(app: &App) -> Self {
+        let tools = running_tool_facts(app);
+        let kind = if tools.verifying {
+            LiveActivityKind::Verifying
+        } else if tools.count > 0 && tools.all_reading {
+            LiveActivityKind::Reading
+        } else if tools.count > 0 {
+            LiveActivityKind::UsingTool
+        } else if app.streaming_thinking_active_entry.is_some() {
+            LiveActivityKind::Reasoning
+        } else {
+            LiveActivityKind::Working
+        };
+        Self {
+            kind,
+            running_tools: tools.count,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn kind(self) -> LiveActivityKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub(crate) fn running_tool_count(self) -> usize {
+        self.running_tools
+    }
+
+    #[must_use]
+    fn is_explicit(self) -> bool {
+        !matches!(self.kind, LiveActivityKind::Working)
+    }
+
+    #[must_use]
+    fn label(self, locale: Locale) -> Cow<'static, str> {
+        match self.kind {
+            LiveActivityKind::Working => tr(locale, MessageId::PhaseWorking),
+            LiveActivityKind::Reasoning => tr(locale, MessageId::PhaseReasoning),
+            LiveActivityKind::Reading => tr(locale, MessageId::PhaseReading),
+            LiveActivityKind::UsingTool => tr(locale, MessageId::PhaseUsingTool),
+            LiveActivityKind::Verifying => tr(locale, MessageId::PhaseVerifying),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RunningToolFacts {
+    count: usize,
+    all_reading: bool,
+    verifying: bool,
+}
+
+impl Default for RunningToolFacts {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            all_reading: true,
+            verifying: false,
+        }
+    }
+}
+
+impl RunningToolFacts {
+    fn observe(&mut self, reading: bool, verifying: bool) {
+        self.count = self.count.saturating_add(1);
+        self.all_reading &= reading;
+        self.verifying |= verifying;
+    }
+}
+
 const WORKING_BUBBLE_FRAMES: [&str; 8] = ["⠀", "⢀", "⣀", "⣄", "⣤", "⣦", "⣶", "⣿"];
 const COMPLETION_BREATH_MS: u128 = 800;
 const COMPLETION_RELEASE_MS: u128 = 560;
@@ -194,6 +289,11 @@ const IDLE_SHIMMER_STRENGTH: f32 = 0.33;
 impl ShellPhase {
     #[must_use]
     pub fn from_app(app: &App) -> Self {
+        Self::from_app_with_activity(app, LiveActivity::from_app(app))
+    }
+
+    #[must_use]
+    pub(crate) fn from_app_with_activity(app: &App, activity: LiveActivity) -> Self {
         if matches!(
             app.view_stack.top_kind(),
             Some(
@@ -221,12 +321,9 @@ impl ShellPhase {
         }
         if app.is_loading
             || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
-            || app
-                .active_cell
-                .as_ref()
-                .is_some_and(|active| !active.is_empty())
+            || activity.is_explicit()
         {
-            if verification_run_active(app) {
+            if activity.kind() == LiveActivityKind::Verifying {
                 return Self::Verifying;
             }
             return Self::Working;
@@ -268,31 +365,50 @@ impl ShellPhase {
     }
 }
 
-/// True when the live active cell is running a verification-shaped tool:
-/// the verifier tool itself or an exec whose program is a known test/check
-/// runner. Conservative by design — misclassifying real work as `verifying`
-/// would lie; plain `working` never does.
-fn verification_run_active(app: &App) -> bool {
+/// Summarize only tools whose lifecycle is actually `Running`. A read label
+/// is earned only when every running entry is read/exploration-shaped; mixed
+/// work stays the neutral `using tool`. Verification wins because it is the
+/// existing stronger promise made by the phase strip.
+fn running_tool_facts(app: &App) -> RunningToolFacts {
     use crate::tui::history::{HistoryCell, ToolCell, ToolStatus};
+    use crate::tui::widgets::tool_card::{ToolFamily, tool_family_for_name};
+
+    let mut facts = RunningToolFacts::default();
     let Some(active) = app.active_cell.as_ref() else {
-        return false;
+        return facts;
     };
-    active.entries().iter().any(|cell| {
+    for cell in active.entries() {
         let HistoryCell::Tool(tool) = cell else {
-            return false;
+            continue;
         };
         match tool {
             ToolCell::Exec(exec) if exec.status == ToolStatus::Running => {
-                exec_is_verification(&exec.command)
+                facts.observe(false, exec_is_verification(&exec.command));
             }
             ToolCell::Generic(generic) if generic.status == ToolStatus::Running => {
-                crate::tui::widgets::tool_card::tool_family_for_name(&generic.name)
-                    == crate::tui::widgets::tool_card::ToolFamily::Verify
-                    || generic.name == "read_lints"
+                let family = tool_family_for_name(&generic.name);
+                facts.observe(
+                    matches!(family, ToolFamily::Read | ToolFamily::Find),
+                    family == ToolFamily::Verify || generic.name == "read_lints",
+                );
             }
-            _ => false,
+            ToolCell::Exploring(exploring) => {
+                for entry in &exploring.entries {
+                    if entry.status == ToolStatus::Running {
+                        facts.observe(true, false);
+                    }
+                }
+            }
+            ToolCell::WebSearch(search) if search.status == ToolStatus::Running => {
+                facts.observe(true, false);
+            }
+            other if other.status() == Some(ToolStatus::Running) => {
+                facts.observe(false, false);
+            }
+            _ => {}
         }
-    })
+    }
+    facts
 }
 
 fn exec_is_verification(command: &str) -> bool {
@@ -321,7 +437,16 @@ fn completion_elapsed_ms(app: &App) -> Option<u128> {
         .filter(|elapsed| *elapsed < COMPLETION_BREATH_MS)
 }
 
+#[cfg(test)]
 pub(crate) fn phase_marker(app: &App, phase: ShellPhase) -> (&'static str, Cow<'static, str>) {
+    phase_marker_with_activity(app, phase, LiveActivity::from_app(app))
+}
+
+pub(crate) fn phase_marker_with_activity(
+    app: &App,
+    phase: ShellPhase,
+    activity: LiveActivity,
+) -> (&'static str, Cow<'static, str>) {
     let locale = app.ui_locale;
     match phase {
         ShellPhase::Idle => ("·", phase.label(locale)),
@@ -335,7 +460,7 @@ pub(crate) fn phase_marker(app: &App, phase: ShellPhase) -> (&'static str, Cow<'
                 app.turn_started_at,
                 app.low_motion || !app.fancy_animations,
             );
-            (frame, phase.label(locale))
+            (frame, activity.label(locale))
         }
         ShellPhase::Verifying => {
             // Metered braille tick on the shared live clock — checking, not
@@ -1373,6 +1498,126 @@ mod tests {
         let (marker, label) = phase_marker(&app, ShellPhase::from_app(&app));
         assert_eq!(marker, "✕");
         assert_eq!(label, "failed");
+    }
+
+    #[test]
+    fn live_activity_is_truthful_prioritized_and_ignores_stale_tools() {
+        use crate::tui::active_cell::ActiveCell;
+        use crate::tui::history::{
+            ExploringCell, ExploringEntry, GenericToolCell, HistoryCell, ToolCell, ToolStatus,
+        };
+
+        let generic = |name: &str, status: ToolStatus| {
+            HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+                name: name.to_string(),
+                status,
+                input_summary: None,
+                output: None,
+                prompts: None,
+                spillover_path: None,
+                output_summary: None,
+                is_diff: false,
+            }))
+        };
+        let reading = || {
+            HistoryCell::Tool(ToolCell::Exploring(ExploringCell {
+                entries: vec![ExploringEntry {
+                    label: "Reading src/lib.rs".to_string(),
+                    status: ToolStatus::Running,
+                }],
+            }))
+        };
+
+        let mut app = test_app();
+
+        // A completed tool may remain in the active group until TurnComplete,
+        // but it cannot manufacture liveness on its own.
+        let mut stale = ActiveCell::new();
+        stale.push_tool("done", generic("write_file", ToolStatus::Success));
+        app.active_cell = Some(stale);
+        assert_eq!(
+            LiveActivity::from_app(&app).kind(),
+            LiveActivityKind::Working
+        );
+        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Idle);
+
+        // Only the explicit streaming pointer earns the reasoning label. No
+        // configured effort, elapsed clock, or generic loading inference is
+        // involved.
+        let mut active = ActiveCell::new();
+        let thinking = active.push_thinking(HistoryCell::Thinking {
+            content: "private reasoning must not reach the strip".to_string(),
+            streaming: true,
+            duration_secs: None,
+        });
+        app.active_cell = Some(active);
+        app.streaming_thinking_active_entry = Some(thinking);
+        assert_eq!(
+            LiveActivity::from_app(&app).kind(),
+            LiveActivityKind::Reasoning
+        );
+        let (_, label) = phase_marker(&app, ShellPhase::from_app(&app));
+        assert_eq!(label, "reasoning");
+        assert!(!label.contains("private"));
+
+        // A running read wins over a stale thinking pointer.
+        app.active_cell
+            .as_mut()
+            .expect("active cell")
+            .push_tool("read", reading());
+        let activity = LiveActivity::from_app(&app);
+        assert_eq!(activity.kind(), LiveActivityKind::Reading);
+        assert_eq!(activity.running_tool_count(), 1);
+        assert_eq!(phase_marker(&app, ShellPhase::Working).1, "reading");
+
+        // Mixed tool work is not mislabeled as a pure read pass.
+        app.active_cell
+            .as_mut()
+            .expect("active cell")
+            .push_tool("write", generic("write_file", ToolStatus::Running));
+        let activity = LiveActivity::from_app(&app);
+        assert_eq!(activity.kind(), LiveActivityKind::UsingTool);
+        assert_eq!(activity.running_tool_count(), 2);
+        assert_eq!(phase_marker(&app, ShellPhase::Working).1, "using tool");
+
+        // Verification remains the strongest live promise.
+        app.active_cell
+            .as_mut()
+            .expect("active cell")
+            .push_tool("verify", generic("run_verifiers", ToolStatus::Running));
+        assert_eq!(
+            LiveActivity::from_app(&app).kind(),
+            LiveActivityKind::Verifying
+        );
+        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Verifying);
+    }
+
+    #[test]
+    fn live_activity_marker_freezes_for_reduced_or_still_and_has_ascii_fallback() {
+        let mut app = test_app();
+        app.runtime_turn_status = Some("in_progress".to_string());
+        app.turn_started_at = Some(Instant::now() - Duration::from_secs(5));
+
+        app.low_motion = true;
+        let reduced = phase_marker(&app, ShellPhase::Working).0;
+        assert_eq!(reduced, crate::tui::spinner::BRAILLE_SPINNER_STILL_FRAME);
+
+        app.low_motion = false;
+        app.fancy_animations = false;
+        let fancy_off = phase_marker(&app, ShellPhase::Working).0;
+        assert_eq!(fancy_off, crate::tui::spinner::BRAILLE_SPINNER_STILL_FRAME);
+
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_symbol(fancy_off);
+        crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
+        assert_eq!(
+            cell.symbol(),
+            crate::tui::glyphs::braille_ascii_fallback(
+                fancy_off.chars().next().expect("one-cell marker")
+            )
+            .expect("product ASCII marker")
+        );
+        assert!(cell.symbol().is_ascii());
     }
 
     #[test]

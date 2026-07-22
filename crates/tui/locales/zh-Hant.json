@@ -473,5 +473,8 @@
     "LinksCommunity": "社群與貢獻：",
     "LinksGitHub": "GitHub：",
     "LinksManagedApp": "託管應用程式預覽：",
-    "LinksManagedAppNote": "託管應用程式使用獨立登入，不會連接目前的本機工作階段。"
+    "LinksManagedAppNote": "託管應用程式使用獨立登入，不會連接目前的本機工作階段。",
+    "PhaseReasoning": "推理中",
+    "PhaseReading": "讀取中",
+    "PhaseUsingTool": "使用工具中"
 }
