@@ -125,20 +125,35 @@ pub fn system_prompt(app: &mut App) -> CommandResult {
 /// Show context window usage.
 ///
 /// `/context` keeps opening the interactive inspector. `/context report`,
-/// `/context json`, and `/context summary` expose the diagnostic source map
+/// `/context json`, `/context prompt-json`, and `/context summary` expose the diagnostic source map
 /// from #3143 without replacing the inspector surface.
 pub fn context(app: &mut App, arg: Option<&str>) -> CommandResult {
     let Some(subcommand) = arg.map(str::trim).filter(|arg| !arg.is_empty()) else {
         return CommandResult::action(AppAction::OpenContextInspector);
     };
 
-    let report = crate::context_report::build_context_report(app);
     match subcommand {
-        "report" => CommandResult::message(crate::context_report::format_context_report(&report)),
-        "json" => CommandResult::message(crate::context_report::context_report_json(&report)),
-        "summary" => CommandResult::message(crate::context_report::format_context_summary(&report)),
+        "prompt-json" | "prompt_json" | "prompt" => {
+            let context = crate::context_report::build_prompt_context(app);
+            CommandResult::message(crate::context_report::prompt_context_json(&context))
+        }
+        "report" | "json" | "summary" => {
+            let report = crate::context_report::build_context_report(app);
+            match subcommand {
+                "report" => {
+                    CommandResult::message(crate::context_report::format_context_report(&report))
+                }
+                "json" => {
+                    CommandResult::message(crate::context_report::context_report_json(&report))
+                }
+                "summary" => {
+                    CommandResult::message(crate::context_report::format_context_summary(&report))
+                }
+                _ => unreachable!(),
+            }
+        }
         other => CommandResult::error(format!(
-            "Unknown /context subcommand: {other}. Use report, json, or summary."
+            "Unknown /context subcommand: {other}. Use report, json, prompt-json, or summary."
         )),
     }
 }

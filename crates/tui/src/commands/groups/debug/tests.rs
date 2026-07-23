@@ -710,6 +710,24 @@ fn test_context_report_subcommands_return_source_map() {
     let json = context(&mut app, Some("json")).message.expect("json text");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid context json");
     assert!(!parsed["entries"].as_array().unwrap().is_empty());
+
+    let prompt_json = context(&mut app, Some("prompt-json"))
+        .message
+        .expect("prompt context json");
+    let prompt: serde_json::Value =
+        serde_json::from_str(&prompt_json).expect("valid prompt context json");
+    assert_eq!(prompt["schema_version"], 1);
+    assert_eq!(prompt["model"], app.model);
+    assert_eq!(prompt["system_prompt_state"], "current_session");
+    assert_eq!(prompt["tool_catalog_state"], "last_sent");
+    assert_eq!(prompt["tools"][0]["name"], "read_file");
+    assert!(prompt["sections"].is_array());
+    assert!(
+        !prompt["source_map"]["entries"]
+            .as_array()
+            .expect("source entries")
+            .is_empty()
+    );
 }
 
 #[test]

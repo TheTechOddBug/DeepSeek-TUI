@@ -15,7 +15,7 @@ use codewhale_config::route::RouteLimits;
 use crate::compaction::{estimate_input_tokens_conservative, estimate_text_tokens_conservative};
 use crate::config::{ApiProvider, Config};
 use crate::context_budget::PressureLevel;
-use crate::models::{ContentBlock, Message};
+use crate::models::{CacheControl, ContentBlock, Message, SystemPrompt, Tool};
 use crate::prompts::{COMPACT_TEMPLATE, Personality};
 use crate::route_budget::route_context_window_tokens;
 use crate::tui::app::App;
@@ -31,6 +31,32 @@ pub struct PromptSourceMap {
     pub budget_used_percent: Option<f64>,
     pub generated_at: String,
     pub note: String,
+}
+
+/// Inspectable request-prefix context for the current session.
+///
+/// `PromptSourceMap` explains provenance and estimated pressure. This sibling
+/// type exposes the current assembled system-prompt sections and most recently
+/// sent model tool catalog so users can audit the prompt plumbing as JSON.
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptContext {
+    pub schema_version: u8,
+    pub provider: String,
+    pub model: String,
+    pub system_prompt_state: &'static str,
+    pub tool_catalog_state: &'static str,
+    pub sections: Vec<PromptContextSection>,
+    pub tools: Vec<Tool>,
+    pub source_map: PromptSourceMap,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptContextSection {
+    pub index: usize,
+    pub block_type: String,
+    pub cache_control: Option<CacheControl>,
+    pub estimated_tokens: usize,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -235,6 +261,46 @@ pub fn build_context_report(app: &App) -> PromptSourceMap {
         active_context_estimated_tokens,
         "Diagnostic source map. Token counts are conservative estimates and may differ from provider billing.",
     )
+}
+
+#[must_use]
+pub fn build_prompt_context(app: &App) -> PromptContext {
+    let tool_catalog_state = if app.session.last_tool_catalog.is_some() {
+        "last_sent"
+    } else {
+        "not_yet_sent"
+    };
+    let sections = match app.system_prompt.as_ref() {
+        Some(SystemPrompt::Text(text)) => vec![PromptContextSection {
+            index: 0,
+            block_type: "text".to_string(),
+            cache_control: None,
+            estimated_tokens: estimate_text_tokens_conservative(text),
+            text: text.clone(),
+        }],
+        Some(SystemPrompt::Blocks(blocks)) => blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| PromptContextSection {
+                index,
+                block_type: block.block_type.clone(),
+                cache_control: block.cache_control.clone(),
+                estimated_tokens: estimate_text_tokens_conservative(&block.text),
+                text: block.text.clone(),
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    PromptContext {
+        schema_version: 1,
+        provider: app.api_provider.as_str().to_string(),
+        model: app.model.clone(),
+        system_prompt_state: "current_session",
+        tool_catalog_state,
+        sections,
+        tools: app.session.last_tool_catalog.clone().unwrap_or_default(),
+        source_map: build_context_report(app),
+    }
 }
 
 pub fn build_headless_context_report(config: &Config, workspace: &Path) -> PromptSourceMap {
@@ -813,6 +879,13 @@ pub fn format_context_summary(report: &PromptSourceMap) -> String {
 pub fn context_report_json(report: &PromptSourceMap) -> String {
     serde_json::to_string_pretty(report).unwrap_or_else(|err| {
         format!("{{\"error\":\"failed to serialize context report: {err}\"}}")
+    })
+}
+
+#[must_use]
+pub fn prompt_context_json(context: &PromptContext) -> String {
+    serde_json::to_string_pretty(context).unwrap_or_else(|error| {
+        format!(r#"{{"error":"failed to serialize prompt context: {error}"}}"#)
     })
 }
 

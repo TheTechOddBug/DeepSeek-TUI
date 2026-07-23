@@ -9,7 +9,7 @@ use crate::commands::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "mcp",
     aliases: &[],
-    usage: "/mcp [init|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|validate|reload]",
+    usage: "/mcp [init|recommendations|add recommended <id>|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|doctor|validate|restart|reload]",
     description_id: MessageId::CmdMcpDescription,
 };
 
@@ -37,6 +37,9 @@ fn mcp(_app: &mut App, args: Option<&str>) -> CommandResult {
         "init" => CommandResult::action(AppAction::Mcp(McpUiAction::Init {
             force: parts.any(|part| part == "--force" || part == "-f"),
         })),
+        "recommend" | "recommended" | "recommendations" => {
+            CommandResult::message(recommended_mcp_text())
+        }
         "add" => parse_add(parts.collect()),
         "enable" => match parse_name(parts.next(), "Usage: /mcp enable <name>") {
             Ok(name) => CommandResult::action(AppAction::Mcp(McpUiAction::Enable { name })),
@@ -61,10 +64,12 @@ fn mcp(_app: &mut App, args: Option<&str>) -> CommandResult {
             Ok(name) => CommandResult::action(AppAction::Mcp(McpUiAction::Logout { name })),
             Err(msg) => CommandResult::error(msg),
         },
-        "validate" => CommandResult::action(AppAction::Mcp(McpUiAction::Validate)),
-        "reload" | "reconnect" => CommandResult::action(AppAction::Mcp(McpUiAction::Reload)),
+        "validate" | "doctor" => CommandResult::action(AppAction::Mcp(McpUiAction::Validate)),
+        "reload" | "reconnect" | "restart" => {
+            CommandResult::action(AppAction::Mcp(McpUiAction::Reload))
+        }
         _ => CommandResult::error(
-            "Usage: /mcp [init|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|login <name>|logout <name>|validate|reload]",
+            "Usage: /mcp [init|recommendations|add recommended <id>|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|login <name>|logout <name>|doctor|validate|restart|reload]",
         ),
     }
 }
@@ -77,6 +82,24 @@ fn parse_name(name: Option<&str>, usage: &str) -> Result<String, String> {
 }
 
 fn parse_add(parts: Vec<&str>) -> CommandResult {
+    if parts
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("recommended"))
+    {
+        return match parts.as_slice() {
+            [_, id] if id.eq_ignore_ascii_case("hugging-face") || id.eq_ignore_ascii_case("hf") => {
+                CommandResult::action(AppAction::Mcp(McpUiAction::AddHttp {
+                    name: "hugging-face".to_string(),
+                    url: "https://huggingface.co/mcp".to_string(),
+                    transport: None,
+                }))
+            }
+            [_, _] => CommandResult::error(
+                "Unknown recommended MCP id. Run /mcp recommendations to inspect the curated list.",
+            ),
+            _ => CommandResult::error("Usage: /mcp add recommended <id>"),
+        };
+    }
     if parts.len() < 3 {
         return CommandResult::error(
             "Usage: /mcp add stdio <name> <command> [args...] OR /mcp add http <name> <url>",
@@ -102,6 +125,17 @@ fn parse_add(parts: Vec<&str>) -> CommandResult {
             "Usage: /mcp add stdio <name> <command> [args...] OR /mcp add http <name> <url>",
         ),
     }
+}
+
+fn recommended_mcp_text() -> &'static str {
+    "Recommended MCP servers (suggestions only; nothing is installed automatically)\n\
+     \n\
+     • hugging-face — remote Hugging Face MCP endpoint\n\
+       provenance: bundled Codewhale recommendation\n\
+       add explicitly: /mcp add recommended hugging-face\n\
+       then inspect: /mcp doctor · reload all configured servers: /mcp restart\n\
+     \n\
+     External config files and marketplaces are never imported silently. Use /mcp add for an endpoint you have reviewed."
 }
 
 fn parse_scopes(parts: Vec<&str>) -> Vec<String> {
@@ -188,6 +222,30 @@ mod tests {
         assert!(matches!(
             validate.action,
             Some(AppAction::Mcp(McpUiAction::Validate))
+        ));
+
+        let doctor = mcp(&mut app, Some("doctor"));
+        assert!(matches!(
+            doctor.action,
+            Some(AppAction::Mcp(McpUiAction::Validate))
+        ));
+        let restart = mcp(&mut app, Some("restart"));
+        assert!(matches!(
+            restart.action,
+            Some(AppAction::Mcp(McpUiAction::Reload))
+        ));
+
+        let recommended = mcp(&mut app, Some("recommendations"))
+            .message
+            .expect("recommendations text");
+        assert!(recommended.contains("nothing is installed automatically"));
+        assert!(recommended.contains("provenance:"));
+
+        let add_recommended = mcp(&mut app, Some("add recommended hugging-face"));
+        assert!(matches!(
+            add_recommended.action,
+            Some(AppAction::Mcp(McpUiAction::AddHttp { name, url, transport: None }))
+                if name == "hugging-face" && url == "https://huggingface.co/mcp"
         ));
 
         let login = mcp(

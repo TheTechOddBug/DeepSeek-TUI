@@ -74,7 +74,7 @@ static SYSTEM_INFO: CommandInfo = CommandInfo {
 static CONTEXT_INFO: CommandInfo = CommandInfo {
     name: "context",
     aliases: &["ctx"],
-    usage: "/context [report|json|summary]",
+    usage: "/context [report|json|prompt-json|summary]",
     description_id: MessageId::CmdContextDescription,
 };
 static EDIT_INFO: CommandInfo = CommandInfo {
