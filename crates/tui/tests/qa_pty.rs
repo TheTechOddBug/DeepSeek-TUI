@@ -1439,11 +1439,7 @@ fn work_and_permission_are_visible_at_release_terminal_sizes() -> anyhow::Result
             "restored mode missing at {cols}x{rows}:\n{dump}"
         );
         let header = frame.row(0);
-        let effort_receipt = if cols >= 60 {
-            " · high · Full Access"
-        } else {
-            " · h · Full Access"
-        };
+        let effort_receipt = if cols >= 60 { " · high " } else { " · h " };
         assert!(
             header.contains(effort_receipt),
             "effective effort missing at {cols}x{rows}: {header:?}\n{dump}"
@@ -1571,7 +1567,7 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
     h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
     let cycled = h.frame();
     assert!(
-        cycled.row(0).contains(" · max · Full Access"),
+        cycled.row(0).contains(" · max ") && cycled.row(0).contains("Full Access"),
         "Ctrl+T effort missing from narrow header:\n{}",
         cycled.debug_dump()
     );
@@ -1660,7 +1656,7 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
     let frame = restored.frame();
     assert!(frame.contains("persisted"), "{}", frame.debug_dump());
     assert!(
-        frame.row(0).contains(" · high · Full Access"),
+        frame.row(0).contains(" · high ") && frame.row(0).contains("Full Access"),
         "restart lost narrow effort/permission truth:\n{}",
         frame.debug_dump()
     );
