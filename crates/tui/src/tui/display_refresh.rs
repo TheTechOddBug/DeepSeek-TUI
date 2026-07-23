@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 pub const MIN_HZ: u32 = 30;
 /// Inclusive upper bound for accepted refresh rates.
 pub const MAX_HZ: u32 = 240;
-/// Safe fallback when probing is skipped or fails (matches historical 12.5 fps
-/// underwater / status atmosphere — not the draw-rate cap).
-pub const FALLBACK_ANIMATION_HZ: u32 = 12;
+/// Safe fallback when probing is skipped or fails (historical ~12.5 fps /
+/// 80 ms underwater atmosphere — not the draw-rate cap).
+pub const FALLBACK_ANIMATION_MS: u64 = 80;
 /// Absolute floor for adaptive animation intervals (≈ 4 fps).
 pub const MIN_ANIMATION_HZ: u32 = 4;
 /// Absolute ceiling for adaptive animation intervals (≈ 30 fps).
@@ -157,14 +157,18 @@ pub fn animation_interval_for_hz(display_hz: Option<u32>, low_motion: bool) -> D
     if low_motion {
         return Duration::from_millis(2_400);
     }
-    let target = match display_hz {
-        // No measurement: keep the historical ~12.5 fps atmosphere cadence.
-        None => FALLBACK_ANIMATION_HZ,
-        // Measured panel: ~1/5 of refresh, bounded so we never thrash or stall.
-        Some(hz) => (hz / 5).clamp(MIN_ANIMATION_HZ, MAX_ANIMATION_HZ),
-    };
-    let ms = (1000u32 / target.max(1)).max(1);
-    Duration::from_millis(u64::from(ms))
+    match display_hz {
+        // No measurement, or a standard 60 Hz panel: keep the historical
+        // 80 ms atmosphere cadence so low-Hz hosts do not feel steppier.
+        None | Some(0..=60) => Duration::from_millis(FALLBACK_ANIMATION_MS),
+        // High-Hz panels: ~1/5 of refresh, bounded so we never thrash or stall.
+        Some(hz) => {
+            let target = (hz / 5).clamp(MIN_ANIMATION_HZ, MAX_ANIMATION_HZ);
+            let ms = (1000u32 / target.max(1)).max(1);
+            // Never slower than the historical fallback (only raise cadence).
+            Duration::from_millis(u64::from(ms).min(FALLBACK_ANIMATION_MS))
+        }
+    }
 }
 
 /// Convenience: probe once and return the animation interval for the current
@@ -200,11 +204,8 @@ mod tests {
     #[test]
     fn falls_back_to_default_when_probe_has_no_hz() {
         let interval = animation_interval_for_hz(None, false);
-        // 1000 / 12 ≈ 83 ms historical atmosphere cadence.
-        assert_eq!(
-            interval,
-            Duration::from_millis(1000 / u64::from(FALLBACK_ANIMATION_HZ))
-        );
+        assert_eq!(interval, Duration::from_millis(FALLBACK_ANIMATION_MS));
+        assert_eq!(FALLBACK_ANIMATION_MS, 80);
     }
 
     #[test]
@@ -222,10 +223,10 @@ mod tests {
     }
 
     #[test]
-    fn sixty_hz_targets_about_twelve_fps() {
+    fn sixty_hz_keeps_historical_atmosphere_cadence() {
         let interval = animation_interval_for_hz(Some(60), false);
-        // 60/5 = 12 → ~83ms
-        assert_eq!(interval, Duration::from_millis(1000 / 12));
+        // Standard panels stay on the 80 ms historical floor.
+        assert_eq!(interval, Duration::from_millis(FALLBACK_ANIMATION_MS));
     }
 
     #[test]
