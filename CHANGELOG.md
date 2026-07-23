@@ -47,8 +47,6 @@ surface.
   archives. Build and smoke them on GitHub's native Windows 11 ARM runner,
   and move Linux ARM64 release builds to the native Ubuntu ARM runner to
   remove the slower multi-arch cross-link setup (#4267 by @w1w218).
-- `PublicRole` enum (Planner/Worker/Reviewer/Verifier) — canonical public
-  role vocabulary with alias parser and `SubAgentType` mapping (#3934).
 - `load_skill` tool now supports listing: omit `name` or pass `"list"` to
   see all available skills without loading one (#4651).
 - Add a unified `/skills` manager with one precedence-aware root catalog,
