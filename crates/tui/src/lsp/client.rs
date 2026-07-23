@@ -56,6 +56,26 @@ pub trait LspTransport: Send + Sync {
         wait: Duration,
     ) -> Result<Vec<Diagnostic>>;
 
+    /// Send a JSON-RPC request and wait up to `wait` for the reply.
+    ///
+    /// Default returns "unsupported" so diagnostic-only fakes keep working.
+    /// Real transports implement this for go-to-definition, symbols, and
+    /// references without spawning a second server lifecycle.
+    async fn request(
+        &self,
+        _method: &str,
+        _params: Value,
+        _wait: Duration,
+    ) -> Result<Value> {
+        Err(anyhow!("LSP request not supported by this transport"))
+    }
+
+    /// Ensure `path` is open with `text` (didOpen/didChange) so position-based
+    /// requests can target it. Default is a no-op; real transports track opens.
+    async fn ensure_open(&self, _path: &Path, _text: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Best-effort shutdown. Called via `LspManager::shutdown_all`.
     #[allow(dead_code)]
     async fn shutdown(&self);
@@ -74,14 +94,10 @@ pub struct StdioLspTransport {
     /// Inbound diagnostics queue. We push every `publishDiagnostics`
     /// notification into here and the public API drains the relevant entries.
     diagnostics_rx: AsyncMutex<mpsc::Receiver<(PathBuf, Vec<Diagnostic>)>>,
-    /// Map of in-flight request id -> reply slot. We do not currently call
-    /// methods that need replies after `initialize`, but this is the hook
-    /// for it.
-    #[allow(dead_code)]
+    /// Map of in-flight request id -> reply slot for model-facing intelligence
+    /// requests (definition, references, symbols).
     pending: Arc<AsyncMutex<HashMap<i64, oneshot::Sender<Value>>>>,
-    /// Monotonic request id counter. Reserved for future LSP request/reply
-    /// methods (workspace symbol queries, etc.).
-    #[allow(dead_code)]
+    /// Monotonic request id counter for JSON-RPC request/reply methods.
     next_id: AsyncMutex<i64>,
     /// Language id passed in `textDocument/didOpen` (e.g. "rust").
     language_id: String,
@@ -191,22 +207,14 @@ impl StdioLspTransport {
     }
 }
 
-#[async_trait]
-impl LspTransport for StdioLspTransport {
-    async fn diagnostics_for(
-        &self,
-        path: &Path,
-        text: &str,
-        wait: Duration,
-    ) -> Result<Vec<Diagnostic>> {
+impl StdioLspTransport {
+    async fn open_or_change(&self, path: &Path, text: &str) -> Result<String> {
         let path_buf = path.to_path_buf();
         let uri = uri_from_path(&path_buf);
-
-        // Either send didOpen (first time) or didChange (subsequent edits).
         let mut opened = self.opened.lock().await;
         let is_new = !opened.contains_key(&path_buf);
         let new_version = opened.get(&path_buf).copied().unwrap_or(0) + 1;
-        opened.insert(path_buf.clone(), new_version);
+        opened.insert(path_buf, new_version);
         drop(opened);
 
         let payload = if is_new {
@@ -236,6 +244,20 @@ impl LspTransport for StdioLspTransport {
             })
         };
         send_message(&self.tx_outbound, &payload).await?;
+        Ok(uri)
+    }
+}
+
+#[async_trait]
+impl LspTransport for StdioLspTransport {
+    async fn diagnostics_for(
+        &self,
+        path: &Path,
+        text: &str,
+        wait: Duration,
+    ) -> Result<Vec<Diagnostic>> {
+        let path_buf = path.to_path_buf();
+        self.open_or_change(path, text).await?;
 
         // Drain matching `publishDiagnostics` notifications until `wait`
         // elapses. Servers typically publish within a few hundred ms; for
@@ -268,6 +290,54 @@ impl LspTransport for StdioLspTransport {
             // opened. Discard and continue waiting.
         }
         Ok(latest.unwrap_or_default())
+    }
+
+    async fn ensure_open(&self, path: &Path, text: &str) -> Result<()> {
+        self.open_or_change(path, text).await?;
+        Ok(())
+    }
+
+    async fn request(&self, method: &str, params: Value, wait: Duration) -> Result<Value> {
+        let id = {
+            let mut next = self.next_id.lock().await;
+            let id = *next;
+            *next = next.saturating_add(1);
+            id
+        };
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.pending.lock().await;
+            pending.insert(id, tx);
+        }
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        if let Err(err) = send_message(&self.tx_outbound, &payload).await {
+            let mut pending = self.pending.lock().await;
+            pending.remove(&id);
+            return Err(err);
+        }
+        match timeout(wait, rx).await {
+            Ok(Ok(reply)) => {
+                if let Some(error) = reply.get("error") {
+                    let message = error
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("LSP request failed");
+                    return Err(anyhow!("{message}"));
+                }
+                Ok(reply.get("result").cloned().unwrap_or(Value::Null))
+            }
+            Ok(Err(_)) => Err(anyhow!("LSP request channel closed")),
+            Err(_) => {
+                let mut pending = self.pending.lock().await;
+                pending.remove(&id);
+                Err(anyhow!("LSP request timed out for {method}"))
+            }
+        }
     }
 
     async fn shutdown(&self) {
@@ -413,7 +483,7 @@ fn parse_publish_diagnostics(value: &Value) -> Option<(PathBuf, Vec<Diagnostic>)
 /// support Windows drive letters perfectly, but the LSP servers in our
 /// registry accept percent-encoded paths well enough for the post-edit
 /// diagnostics use case.
-fn uri_from_path(path: &Path) -> String {
+pub(crate) fn uri_from_path(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let s = canonical.to_string_lossy();
     if s.starts_with('/') {

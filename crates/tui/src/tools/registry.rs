@@ -1096,6 +1096,15 @@ impl ToolRegistryBuilder {
         self.with_tool(Arc::new(RememberTool))
     }
 
+    /// Include the model-facing `lsp` intelligence tool. Reuses the session
+    /// [`crate::lsp::LspManager`] attached to `ToolContext` — never spawns a
+    /// second server lifecycle.
+    #[must_use]
+    pub fn with_lsp_tool(self) -> Self {
+        use super::lsp::LspTool;
+        self.with_tool(Arc::new(LspTool))
+    }
+
     /// Include the slop ledger tools (#2127) — durable tracking of
     /// unresolved architectural residue: append, query, update, export.
     /// Registered unconditionally; the ledger JSON file is auto-created
@@ -1201,6 +1210,7 @@ impl ToolRegistryBuilder {
             .with_git_tools()
             .with_git_history_tools()
             .with_diagnostics_tool()
+            .with_lsp_tool()
             .with_project_tools()
             .with_skill_tools()
             .with_test_runner_tool()

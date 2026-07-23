@@ -361,6 +361,146 @@ impl LspManager {
         }
     }
 
+    /// Resolve a transport for `file` without creating a second server
+    /// lifecycle. Reuses the same lazy map as post-edit diagnostics.
+    async fn transport_for_path(&self, file: &Path) -> Option<Arc<dyn LspTransport>> {
+        if !self.config.enabled {
+            return None;
+        }
+        let lang = registry::detect_language(file);
+        if lang != Language::Other {
+            return self.transport_for(lang).await;
+        }
+        if let Some(custom) = self.config.custom_for_extension(file) {
+            let ext = file.extension()?.to_str()?.to_ascii_lowercase();
+            return self.transport_for_custom(&ext, custom).await;
+        }
+        None
+    }
+
+    /// Model-facing intelligence query. Shares the existing transport pool.
+    /// `operation` is one of: `diagnostics`, `symbols`, `definition`, `references`.
+    pub async fn intelligence(
+        &self,
+        operation: &str,
+        file: &Path,
+        line: Option<u32>,
+        character: Option<u32>,
+        query: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        if !self.config.enabled {
+            return Err("LSP is disabled ([lsp] enabled = false)".to_string());
+        }
+        let wait = Duration::from_millis(self.config.poll_after_edit_ms);
+        match operation {
+            "diagnostics" => {
+                let block = self
+                    .diagnostics_for(file, 0)
+                    .await
+                    .map(|b| {
+                        serde_json::json!({
+                            "file": b.file.display().to_string(),
+                            "items": b.items.iter().map(|d| serde_json::json!({
+                                "line": d.line,
+                                "column": d.column,
+                                "severity": format!("{:?}", d.severity).to_ascii_lowercase(),
+                                "message": d.message,
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "file": relative_to_workspace(&self.workspace, file).display().to_string(),
+                            "items": [],
+                        })
+                    });
+                Ok(block)
+            }
+            "symbols" | "definition" | "references" => {
+                let transport = self
+                    .transport_for_path(file)
+                    .await
+                    .ok_or_else(|| format!("no LSP server for {}", file.display()))?;
+                let text = tokio::fs::read_to_string(file)
+                    .await
+                    .map_err(|err| format!("read {}: {err}", file.display()))?;
+                transport
+                    .ensure_open(file, &text)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let uri = client::uri_from_path(file);
+                let result = match operation {
+                    "symbols" => {
+                        if let Some(q) = query.filter(|s| !s.trim().is_empty()) {
+                            transport
+                                .request(
+                                    "workspace/symbol",
+                                    serde_json::json!({ "query": q }),
+                                    wait,
+                                )
+                                .await
+                        } else {
+                            transport
+                                .request(
+                                    "textDocument/documentSymbol",
+                                    serde_json::json!({
+                                        "textDocument": { "uri": uri }
+                                    }),
+                                    wait,
+                                )
+                                .await
+                        }
+                    }
+                    "definition" => {
+                        let line = line.ok_or("definition requires line (1-based)")?;
+                        let character = character.unwrap_or(1);
+                        transport
+                            .request(
+                                "textDocument/definition",
+                                serde_json::json!({
+                                    "textDocument": { "uri": uri },
+                                    "position": {
+                                        "line": line.saturating_sub(1),
+                                        "character": character.saturating_sub(1),
+                                    }
+                                }),
+                                wait,
+                            )
+                            .await
+                    }
+                    "references" => {
+                        let line = line.ok_or("references requires line (1-based)")?;
+                        let character = character.unwrap_or(1);
+                        transport
+                            .request(
+                                "textDocument/references",
+                                serde_json::json!({
+                                    "textDocument": { "uri": uri },
+                                    "position": {
+                                        "line": line.saturating_sub(1),
+                                        "character": character.saturating_sub(1),
+                                    },
+                                    "context": { "includeDeclaration": true }
+                                }),
+                                wait,
+                            )
+                            .await
+                    }
+                    _ => unreachable!(),
+                }
+                .map_err(|err| err.to_string())?;
+                Ok(serde_json::json!({
+                    "operation": operation,
+                    "file": relative_to_workspace(&self.workspace, file).display().to_string(),
+                    "result": truncate_intelligence_result(result),
+                }))
+            }
+            other => Err(format!(
+                "unknown LSP operation '{other}'; use diagnostics, symbols, definition, or references"
+            )),
+        }
+    }
+
     /// Best-effort shutdown of every spawned transport. Called when the
     /// session ends.
     #[allow(dead_code)]
@@ -390,6 +530,40 @@ impl LspConfig {
     fn custom_for_extension(&self, file: &Path) -> Option<&CustomLspDef> {
         let ext = file.extension()?.to_str()?;
         self.custom.get(&ext.to_ascii_lowercase())
+    }
+}
+
+/// Cap intelligence payloads so a chatty language server cannot flood the
+/// model context. Arrays keep the first `MAX` entries and set `truncated`.
+fn truncate_intelligence_result(value: serde_json::Value) -> serde_json::Value {
+    const MAX_ITEMS: usize = 40;
+    const MAX_CHARS: usize = 12_000;
+    match value {
+        serde_json::Value::Array(mut items) => {
+            let total = items.len();
+            if total > MAX_ITEMS {
+                items.truncate(MAX_ITEMS);
+                serde_json::json!({
+                    "items": items,
+                    "truncated": true,
+                    "total": total,
+                })
+            } else {
+                serde_json::Value::Array(items)
+            }
+        }
+        other => {
+            let rendered = other.to_string();
+            if rendered.len() > MAX_CHARS {
+                serde_json::json!({
+                    "truncated": true,
+                    "preview": &rendered[..MAX_CHARS],
+                    "total_chars": rendered.len(),
+                })
+            } else {
+                other
+            }
+        }
     }
 }
 
