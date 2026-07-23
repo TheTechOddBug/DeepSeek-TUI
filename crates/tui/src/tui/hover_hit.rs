@@ -15,7 +15,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::ocean;
 
 /// Kind of interactive surface under the pointer.
+///
+/// Surfaces adopt kinds incrementally (link regions first; menu/code/diff as
+/// they land). Variants stay exhaustive for cursor + aura match arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reserved kinds emit as more surfaces register hits
 pub enum HoverTargetKind {
     Plain,
     Link,

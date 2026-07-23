@@ -809,28 +809,19 @@ impl ChatWidget {
             && let Some(inks) = self.ambient_inks
         {
             let cursor = crate::tui::ambient_life::AmbientCursor {
+                // Pointer column is refined by hover_layer when available; row
+                // participates in vertical flee proximity.
                 column: 0,
-                row: 0,
+                row: area.y.saturating_add(area.height / 2),
                 flee_elapsed_ms: self.fish_flee_elapsed_ms,
             };
+            // Whale cameo rides the completion breath clock when present.
             let whale = crate::tui::ambient_life::WhaleCameo {
-                elapsed_ms: self.fish_flee_elapsed_ms.and_then(|_| None).or(
-                    // Whale cameo rides the completion breath clock when present.
-                    None,
-                ),
+                elapsed_ms: self
+                    .ocean_column
+                    .and_then(|c| c.completion_elapsed_ms()),
                 anchor_x: area.x.saturating_add(area.width / 2),
                 anchor_y: area.y.saturating_add(area.height.saturating_mul(2) / 3),
-            };
-            // Prefer completion-timed cameo when the ocean column carries one.
-            let whale = if let Some(completion_ms) =
-                self.ocean_column.and_then(|c| c.completion_elapsed_ms())
-            {
-                crate::tui::ambient_life::WhaleCameo {
-                    elapsed_ms: Some(completion_ms),
-                    ..whale
-                }
-            } else {
-                whale
             };
             crate::tui::ambient_life::render_ambient_life(
                 area,

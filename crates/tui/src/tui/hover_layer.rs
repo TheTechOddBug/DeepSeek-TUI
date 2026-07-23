@@ -18,7 +18,7 @@ use ratatui::{
 
 use crate::palette;
 use crate::tui::hover_hit::{
-    self, HoverHit, HoverTargetKind, copy_affordance, cursor_shape_for, hit_test, hover_aura_style,
+    HoverHit, HoverTargetKind, copy_affordance, cursor_shape_for, hit_test, hover_aura_style,
     link_hover_style, tooltip_line,
 };
 

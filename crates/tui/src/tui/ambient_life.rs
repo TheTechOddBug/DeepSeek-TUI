@@ -65,27 +65,40 @@ impl LifeDensity {
 
     #[must_use]
     fn school_count(self) -> usize {
+        // One cohesive school reads better than many lone arrows.
         match self {
             Self::Sparse => 1,
-            Self::Normal => 2,
-            Self::Rich => 3,
+            Self::Normal => 1,
+            Self::Rich => 2,
+        }
+    }
+
+    #[must_use]
+    fn school_size(self) -> usize {
+        match self {
+            Self::Sparse => 2,
+            Self::Normal => 3,
+            Self::Rich => 4,
         }
     }
 
     #[must_use]
     fn jellyfish_count(self) -> usize {
+        // Jellies are easy to misread as noise — keep them rare and soft.
         match self {
-            Self::Sparse => 1,
-            Self::Normal | Self::Rich => 2,
+            Self::Sparse => 0,
+            Self::Normal => 1,
+            Self::Rich => 1,
         }
     }
 
     #[must_use]
     fn kelp_count(self) -> usize {
+        // Fewer denser fronds beat a forest of antenna stalks.
         match self {
             Self::Sparse => 2,
             Self::Normal => 3,
-            Self::Rich => 5,
+            Self::Rich => 4,
         }
     }
 
@@ -94,16 +107,16 @@ impl LifeDensity {
         match self {
             Self::Sparse => 1,
             Self::Normal => 2,
-            Self::Rich => 3,
+            Self::Rich => 2,
         }
     }
 
     #[must_use]
     fn bio_particles(self) -> usize {
         match self {
-            Self::Sparse => 2,
-            Self::Normal => 4,
-            Self::Rich => 6,
+            Self::Sparse => 1,
+            Self::Normal => 2,
+            Self::Rich => 3,
         }
     }
 }
@@ -186,121 +199,136 @@ fn build_frame_marks(
     cursor: AmbientCursor,
     whale: WhaleCameo,
 ) -> FrameMarks {
-    let mut marks = Vec::with_capacity(32);
+    let mut marks = Vec::with_capacity(48);
     let t = if animated { elapsed_ms } else { 0 };
 
-    // --- Schools of small fish (foreground / mid) ---
+    // Leave the empty-state brand band (center third) mostly clear so life
+    // frames the room instead of littering the hero whale + status lines.
+    let quiet_top = (area.height / 5).max(2);
+    let quiet_mid_lo = area.height.saturating_mul(2) / 5;
+    let quiet_mid_hi = area.height.saturating_mul(3) / 5;
+
+    // --- Cohesive fish schools (not lone arrows) ---
+    // Leader + trailers share one path; every body uses the same fish glyph
+    // family so it reads as a school, not random `>` punctuation.
     let school_n = density.school_count();
+    let school_size = density.school_size();
     for i in 0..school_n {
         let depth = if i == 0 {
             Depth::Foreground
-        } else if i == 1 {
-            Depth::Midground
         } else {
-            Depth::Background
+            Depth::Midground
         };
-        let span = ((area.width as f64 / (5.0 + f64::from(i as u16))) as u16).clamp(6, 22);
-        let phase = (i as u128).saturating_mul(2_100);
-        let step = (420.0 / depth.speed_scale()) as u128;
+        let span = ((area.width as f64 / (4.5 + f64::from(i as u16))) as u16).clamp(8, 28);
+        let phase = (i as u128).saturating_mul(2_400);
+        let step = (480.0 / depth.speed_scale()) as u128;
         let (drift, forward) = if animated {
-            eased_drift(t, step.max(200), span, phase)
+            eased_drift(t, step.max(220), span, phase)
         } else {
             ((span / 3).max(1), i % 2 == 0)
         };
         let bob = if animated {
-            sine_bob(t, 1_800 + phase, 1 + (i as u16 % 2))
+            sine_bob(t, 2_200 + phase, 1)
         } else {
             0
         };
-        let base_y = match i {
+        // Prefer lower / upper thirds — avoid the empty-state copy band.
+        let mut base_y = match i {
             0 => area.height.saturating_mul(3) / 4,
-            1 => area.height * 3 / 8,
-            _ => area.height / 6,
+            _ => (area.height / 5).max(1),
         }
         .saturating_add(bob)
         .min(area.height.saturating_sub(1));
+        if base_y > quiet_mid_lo && base_y < quiet_mid_hi {
+            base_y = if i == 0 {
+                quiet_mid_hi
+                    .saturating_add(1)
+                    .min(area.height.saturating_sub(1))
+            } else {
+                quiet_mid_lo.saturating_sub(1)
+            };
+        }
         let base_x = match i {
-            0 => area.width / 12,
-            1 => area.width.saturating_mul(5) / 6,
-            _ => area.width / 3,
+            0 => area.width / 10,
+            _ => area.width.saturating_mul(3) / 4,
         };
-        let mut x = if i == 1 {
-            base_x.saturating_sub(drift)
-        } else {
+        let faces_right = if i == 0 { forward } else { !forward };
+        let mut lead_x = if faces_right {
             base_x.saturating_add(drift)
+        } else {
+            base_x.saturating_add(span).saturating_sub(drift)
         };
-        // Cursor / flee reaction
         if let Some(flee_ms) = cursor.flee_elapsed_ms {
             let flee = fish_flee_offset(flee_ms);
             let ptr = cursor.column.saturating_sub(area.x);
-            if x.abs_diff(ptr) < 14 {
-                if x >= ptr {
-                    x = x.saturating_add(flee);
+            if lead_x.abs_diff(ptr) < 16 {
+                if lead_x >= ptr {
+                    lead_x = lead_x.saturating_add(flee);
                 } else {
-                    x = x.saturating_sub(flee);
+                    lead_x = lead_x.saturating_sub(flee);
                 }
             }
         }
-        let max_x = area.width.saturating_sub(3);
-        x = x.min(max_x);
-        let faces_right = if i == 1 { !forward } else { forward };
-        marks.push(AmbientMark {
-            x,
-            y: base_y,
-            glyph: fish_mark(faces_right, depth),
-            depth,
-            style_mod: None,
-        });
-        // School mates (small trailing fish)
-        if density != LifeDensity::Sparse {
-            let mate_x = if faces_right {
-                x.saturating_sub(4 + (i as u16))
+        let body = fish_body(faces_right, depth);
+        let body_w = UnicodeWidthStr::width(body) as u16;
+        let max_x = area.width.saturating_sub(body_w.max(1));
+        lead_x = lead_x.min(max_x);
+
+        // Spacing along the swim direction: tight school, slight vertical stagger.
+        for m in 0..school_size {
+            let gap = 3u16.saturating_add((m as u16) % 2); // 3–4 cols between bodies
+            let ox = if faces_right {
+                lead_x.saturating_sub(gap.saturating_mul(m as u16))
             } else {
-                x.saturating_add(4 + (i as u16)).min(max_x)
+                lead_x
+                    .saturating_add(gap.saturating_mul(m as u16))
+                    .min(max_x)
             };
-            let mate_y = base_y
-                .saturating_add(if i % 2 == 0 { 1 } else { 0 })
+            let oy = base_y
+                .saturating_add(if m % 2 == 0 { 0 } else { 1 })
                 .min(area.height.saturating_sub(1));
+            let member_depth = if m == 0 { depth } else { Depth::Midground };
             marks.push(AmbientMark {
-                x: mate_x,
-                y: mate_y,
-                glyph: if faces_right { "›" } else { "‹" },
-                depth: Depth::Background,
-                style_mod: None,
+                x: ox,
+                y: oy,
+                glyph: fish_body(faces_right, member_depth),
+                depth: member_depth,
+                style_mod: if m == 0 { None } else { Some(Modifier::DIM) },
             });
         }
     }
 
-    // --- Jellyfish (midground, restrained tentacle sway) ---
+    // --- Soft jellyfish (bell + thin trail — no hard │/⎞ junk) ---
     for j in 0..density.jellyfish_count() {
-        let phase = 3_400u128.saturating_add((j as u128) * 2_700);
-        let span = (area.width / 10).clamp(4, 14);
+        let phase = 3_800u128.saturating_add((j as u128) * 2_900);
+        let span = (area.width / 12).clamp(3, 10);
         let (drift, _) = if animated {
-            eased_drift(t, 900, span, phase)
+            eased_drift(t, 1_100, span, phase)
         } else {
             (span / 2, true)
         };
         let bob = if animated {
-            sine_bob(t, 2_400 + phase, 1)
+            sine_bob(t, 2_800 + phase, 1)
         } else {
             0
         };
-        let x = (area.width / 5 + (j as u16) * (area.width / 3) + drift)
-            .min(area.width.saturating_sub(2));
-        let y = (area.height / 5 + (j as u16) + bob).min(area.height.saturating_sub(2));
-        let tentacle = if animated {
-            match (t.saturating_add(phase) / 500) % 3 {
-                0 => "⎞",
-                1 => "│",
-                _ => "⎠",
+        // Park jellies off to a side, above the quiet mid band.
+        let x = (area.width.saturating_mul(4) / 5 + drift).min(area.width.saturating_sub(1));
+        let y = quiet_top
+            .saturating_add(bob)
+            .min(quiet_mid_lo.saturating_sub(2));
+        let bell = if animated {
+            match (t.saturating_add(phase) / 700) % 2 {
+                0 => "°",
+                _ => "˚",
             }
         } else {
-            "│"
+            "°"
         };
         marks.push(AmbientMark {
             x,
             y,
-            glyph: "◉",
+            glyph: bell,
             depth: Depth::Midground,
             style_mod: Some(Modifier::DIM),
         });
@@ -308,55 +336,70 @@ fn build_frame_marks(
             marks.push(AmbientMark {
                 x,
                 y: y + 1,
-                glyph: tentacle,
-                depth: Depth::Midground,
-                style_mod: Some(Modifier::DIM),
-            });
-        }
-    }
-
-    // --- Bottom-anchored kelp ---
-    for k in 0..density.kelp_count() {
-        let phase = (k as u128).saturating_mul(1_100);
-        let sway = if animated {
-            sine_bob(t.saturating_add(phase), 2_200, 1) as i16 - 0
-        } else {
-            0
-        };
-        let base_x = (area.width / (density.kelp_count() as u16 + 1)).saturating_mul(k as u16 + 1);
-        let x = if sway > 0 {
-            base_x.saturating_add(sway as u16)
-        } else {
-            base_x.saturating_sub((-sway) as u16)
-        }
-        .min(area.width.saturating_sub(1));
-        let height = 2 + (k % 2) as u16;
-        for h in 0..height {
-            let y = area.height.saturating_sub(1 + h);
-            let glyph = if h + 1 == height { "⌃" } else { "│" };
-            marks.push(AmbientMark {
-                x,
-                y,
-                glyph,
+                glyph: "·",
                 depth: Depth::Background,
                 style_mod: Some(Modifier::DIM),
             });
         }
     }
 
-    // --- Rising bubble streams ---
+    // --- Bottom-anchored seaweed (wavy fronds, not radio antennas) ---
+    // Each frond is a short stack of soft wave glyphs that lean with sway.
+    for k in 0..density.kelp_count() {
+        let phase = (k as u128).saturating_mul(1_300);
+        let sway_phase = if animated {
+            ((t.saturating_add(phase) % 2_600) as f64 / 2_600.0) * std::f64::consts::TAU
+        } else {
+            0.0
+        };
+        // Keep fronds near the edges so the center brand stays clean.
+        let edge_bias = if k % 2 == 0 {
+            area.width / (density.kelp_count() as u16 * 2 + 2)
+        } else {
+            area.width
+                .saturating_sub(area.width / (density.kelp_count() as u16 * 2 + 2))
+        };
+        let base_x = edge_bias
+            .saturating_add((k as u16) * 2)
+            .min(area.width.saturating_sub(2));
+        let frond_h = 3u16.saturating_add((k % 2) as u16); // 3–4 cells tall
+        for h in 0..frond_h {
+            // Higher segments lean more with the current.
+            let lean = (sway_phase.sin() * (0.4 + 0.35 * f64::from(h))).round() as i16;
+            let x = if lean >= 0 {
+                base_x.saturating_add(lean as u16)
+            } else {
+                base_x.saturating_sub((-lean) as u16)
+            }
+            .min(area.width.saturating_sub(1));
+            let y = area.height.saturating_sub(1 + h);
+            marks.push(AmbientMark {
+                x,
+                y,
+                glyph: seaweed_glyph(h, frond_h, lean),
+                depth: Depth::Background,
+                style_mod: Some(Modifier::DIM),
+            });
+        }
+    }
+
+    // --- Rising bubble streams (quiet ·/˚ only) ---
     for b in 0..density.bubble_streams() {
-        let phase = (b as u128).saturating_mul(1_700);
-        let column = area.width / 4 + (b as u16) * (area.width / 5);
-        let rise_period = 2_800u128.saturating_add(phase % 900);
+        let phase = (b as u128).saturating_mul(1_900);
+        // Edge columns — avoid center brand.
+        let column = if b % 2 == 0 {
+            area.width / 8
+        } else {
+            area.width.saturating_mul(7) / 8
+        };
+        let rise_period = 3_200u128.saturating_add(phase % 900);
         let rise = if animated {
             let cycle = (t.saturating_add(phase) % rise_period) as f64 / rise_period as f64;
-            let max_rise = area.height.saturating_sub(2) as f64;
+            let max_rise = area.height.saturating_sub(3) as f64;
             (cycle * max_rise) as u16
         } else {
-            area.height / 3
+            area.height / 4
         };
-        // Bubbles rise faster near cursor activity
         let boost = if cursor.flee_elapsed_ms.is_some()
             && column.abs_diff(cursor.column.saturating_sub(area.x)) < 10
         {
@@ -366,33 +409,50 @@ fn build_frame_marks(
         };
         let y = area
             .height
-            .saturating_sub(1)
-            .saturating_sub(rise.saturating_add(boost));
+            .saturating_sub(2)
+            .saturating_sub(rise.saturating_add(boost))
+            .max(quiet_top);
+        // Skip the empty-state text band.
+        if y > quiet_mid_lo && y < quiet_mid_hi {
+            continue;
+        }
         let glyph = if animated {
-            ["·", "˚", "°", "˚"][((t.saturating_add(phase)) / 280) as usize % 4]
+            ["·", "˚", "·", "°"][((t.saturating_add(phase)) / 320) as usize % 4]
         } else {
-            "°"
+            "·"
         };
         marks.push(AmbientMark {
             x: column.min(area.width.saturating_sub(1)),
             y,
             glyph,
             depth: Depth::Foreground,
-            style_mod: None,
+            style_mod: Some(Modifier::DIM),
         });
     }
 
-    // --- Sparse bioluminescent particles ---
+    // --- Very sparse bioluminescent dust (edges only) ---
     for p in 0..density.bio_particles() {
         let seed = (p as u128).saturating_mul(9973).saturating_add(13);
-        let x = ((seed.wrapping_mul(17).wrapping_add(t / 4_000)) % u128::from(area.width.max(1)))
-            as u16;
-        let y = ((seed.wrapping_mul(31).wrapping_add(t / 5_500)) % u128::from(area.height.max(1)))
-            as u16;
-        let twinkle = if animated {
-            ((t.saturating_add(seed) / 600) % 4) < 2
+        let x = if p % 2 == 0 {
+            ((seed.wrapping_mul(17).wrapping_add(t / 5_000)) % u128::from((area.width / 4).max(1)))
+                as u16
         } else {
-            true
+            area.width.saturating_sub(
+                1 + ((seed.wrapping_mul(19).wrapping_add(t / 5_000))
+                    % u128::from((area.width / 4).max(1))) as u16,
+            )
+        };
+        let y = quiet_top.saturating_add(
+            ((seed.wrapping_mul(31).wrapping_add(t / 6_000))
+                % u128::from(area.height.saturating_sub(quiet_top + 2).max(1))) as u16,
+        );
+        if y > quiet_mid_lo && y < quiet_mid_hi {
+            continue;
+        }
+        let twinkle = if animated {
+            ((t.saturating_add(seed) / 800) % 5) < 2
+        } else {
+            p == 0
         };
         if !twinkle {
             continue;
@@ -406,7 +466,7 @@ fn build_frame_marks(
         });
     }
 
-    // --- Rare whale cameo ---
+    // --- Rare whale cameo (completion only) ---
     if let Some(cameo_ms) = whale.elapsed_ms.filter(|ms| *ms < WHALE_CAMEO_MS) {
         let phase = whale_cameo_phase(cameo_ms);
         if phase != WhaleCameoPhase::Hidden {
@@ -419,8 +479,8 @@ fn build_frame_marks(
                 .saturating_sub(area.y)
                 .min(area.height.saturating_sub(2));
             let (glyph, y_off) = match phase {
-                WhaleCameoPhase::Breach => ("🐋", 0u16),
-                WhaleCameoPhase::Spout => ("🐳", 0),
+                WhaleCameoPhase::Breach => ("≈≈>", 0u16),
+                WhaleCameoPhase::Spout => ("≈≈>", 0),
                 WhaleCameoPhase::Fluke => ("～", 1),
                 WhaleCameoPhase::Submerge => ("·", 1),
                 WhaleCameoPhase::Hidden => ("", 0),
@@ -439,7 +499,7 @@ fn build_frame_marks(
                         y: ay.saturating_sub(1),
                         glyph: "˚",
                         depth: Depth::Foreground,
-                        style_mod: None,
+                        style_mod: Some(Modifier::DIM),
                     });
                 }
             }
@@ -447,6 +507,26 @@ fn build_frame_marks(
     }
 
     FrameMarks { marks }
+}
+
+/// Soft seaweed frond segment. Stacked parentheses/curves lean with current —
+/// classic terminal kelp, not `|` poles topped with carets.
+fn seaweed_glyph(segment_from_bottom: u16, frond_h: u16, lean: i16) -> &'static str {
+    let is_tip = segment_from_bottom + 1 == frond_h;
+    let is_base = segment_from_bottom == 0;
+    // Tip feathers; base roots; mid is a soft S-curve of `)` / `(`.
+    if is_tip {
+        return if lean >= 0 { ")" } else { "(" };
+    }
+    if is_base {
+        return "~";
+    }
+    match (lean.signum(), segment_from_bottom % 2) {
+        (1 | 0, 0) => ")",
+        (1 | 0, _) => ")",
+        (-1, 0) => "(",
+        _ => "(",
+    }
 }
 
 fn paint_marks(
@@ -557,14 +637,11 @@ pub fn fish_flee_offset(elapsed_ms: u128) -> u16 {
     excursion.round().clamp(0.0, 9.0) as u16
 }
 
+/// One fish silhouette family for the whole school. Depth is color/dim only —
+/// never mix lone `>` with `><>` (that read as broken punctuation).
 #[must_use]
-fn fish_mark(facing_right: bool, depth: Depth) -> &'static str {
-    match (facing_right, depth) {
-        (true, Depth::Foreground) => "><>",
-        (false, Depth::Foreground) => "<><",
-        (true, _) => ">",
-        (false, _) => "<",
-    }
+fn fish_body(facing_right: bool, _depth: Depth) -> &'static str {
+    if facing_right { "><>" } else { "<><" }
 }
 
 #[must_use]
@@ -762,5 +839,27 @@ mod tests {
             LifeDensity::from_area(Rect::new(0, 0, 100, 30)),
             LifeDensity::Rich
         );
+    }
+
+    #[test]
+    fn fish_school_uses_one_silhouette_family() {
+        // Never mix lone `>` with full fish bodies.
+        for depth in [Depth::Foreground, Depth::Midground, Depth::Background] {
+            assert_eq!(fish_body(true, depth), "><>");
+            assert_eq!(fish_body(false, depth), "<><");
+        }
+    }
+
+    #[test]
+    fn seaweed_is_not_antenna_poles() {
+        // Old execution used `│` + `⌃` and read as radio masts.
+        for h in 0..4 {
+            let g = seaweed_glyph(h, 4, 1);
+            assert_ne!(g, "│", "segment {h}");
+            assert_ne!(g, "⌃", "segment {h}");
+            assert_ne!(g, "|", "segment {h}");
+        }
+        assert_eq!(seaweed_glyph(0, 4, 0), "~");
+        assert!(matches!(seaweed_glyph(3, 4, 1), ")" | "("));
     }
 }

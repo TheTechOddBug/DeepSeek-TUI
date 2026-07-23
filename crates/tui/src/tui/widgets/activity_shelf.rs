@@ -306,7 +306,7 @@ mod tests {
         })];
         let shelf = ActivityShelf::new(agents, false);
         let lines = shelf.render_lines(80);
-        assert!(lines.len() >= 1);
+        assert!(!lines.is_empty());
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))

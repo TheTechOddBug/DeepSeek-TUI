@@ -464,9 +464,35 @@ impl DeepSeekClient {
             self.path_suffix.as_deref(),
             &body,
         );
+        // Shared open-path seam (policy + idle envelope + H1 twin selection).
         let open_timeout = stream_open_timeout();
-        let response = match tokio_timeout(open_timeout, self.send_json_with_retry(&url, &body))
-            .await
+        let open_req = super::stream_entry::StreamOpenRequest::new(
+            open_timeout,
+            self.stream_idle_timeout,
+        );
+        let open_client = super::stream_entry::client_for_policy(
+            &self.http_client,
+            self.http1_fallback_client(),
+            open_req.policy,
+        );
+        let response = match tokio_timeout(
+            open_req.open_timeout,
+            // When policy is already Http1Only the twin is the open client;
+            // Dual still uses the primary path (retry-capable) via send_json.
+            if matches!(
+                open_req.policy,
+                super::stream_entry::StreamHttpPolicy::Http1Only
+            ) {
+                open_client
+                    .post(&url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .json(&body)
+                    .send()
+            } else {
+                self.send_json_with_retry(&url, &body)
+            },
+        )
+        .await
         {
             Ok(result) => result?,
             Err(_elapsed) => {
@@ -474,13 +500,23 @@ impl DeepSeekClient {
                 // headers within the open timeout. The HTTP/1.1 twin is built
                 // at client construction so Chat Completions, Anthropic, and
                 // Responses can share the same recovery path.
-                if !crate::client::force_http1_from_env() {
+                // Treat header stall as a transport failure eligible for H1 retry.
+                if super::stream_entry::should_retry_with_h1(
+                    open_req.policy,
+                    "http2 stream closed",
+                ) {
+                    let h1_req = open_req.with_h1_only();
+                    let h1_client = super::stream_entry::client_for_policy(
+                        &self.http_client,
+                        self.http1_fallback_client(),
+                        h1_req.policy,
+                    );
                     crate::logging::warn(
                         "SSE stream headers timed out over HTTP/2; retrying once with HTTP/1.1",
                     );
                     let retry = tokio_timeout(
-                        open_timeout,
-                        self.http1_fallback_client()
+                        h1_req.open_timeout,
+                        h1_client
                             .post(&url)
                             .header(reqwest::header::CONTENT_TYPE, "application/json")
                             .json(&body)

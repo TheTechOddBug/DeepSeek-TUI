@@ -95,67 +95,6 @@ impl ShellPolicy {
     }
 }
 
-/// The four public-facing roles (#3934). These are the canonical vocabulary
-/// exposed in the UI, docs, and fleet dashboards. Internally they map to
-/// `SubAgentType` variants which carry the full tool/permission posture.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PublicRole {
-    Planner,
-    Worker,
-    Reviewer,
-    Verifier,
-}
-
-impl PublicRole {
-    /// Parse a public role from user/model input. Accepts common aliases.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "planner" | "plan" | "planning" | "awaiter" => Some(Self::Planner),
-            "worker" | "general" | "general-purpose" | "implementer" | "builder" => {
-                Some(Self::Worker)
-            }
-            "reviewer" | "review" | "code-review" | "code_review" => Some(Self::Reviewer),
-            "verifier" | "verify" | "verification" | "validator" | "tester" => Some(Self::Verifier),
-            _ => None,
-        }
-    }
-
-    /// Map to the internal sub-agent type that carries the full posture.
-    #[must_use]
-    pub const fn to_sub_agent_type(self) -> SubAgentType {
-        match self {
-            Self::Planner => SubAgentType::Plan,
-            Self::Worker => SubAgentType::General,
-            Self::Reviewer => SubAgentType::Review,
-            Self::Verifier => SubAgentType::Verifier,
-        }
-    }
-
-    /// Derive the public role from an internal sub-agent type.
-    #[must_use]
-    pub const fn from_sub_agent_type(t: &SubAgentType) -> Self {
-        match t {
-            SubAgentType::Plan => Self::Planner,
-            SubAgentType::Review => Self::Reviewer,
-            SubAgentType::Verifier => Self::Verifier,
-            _ => Self::Worker,
-        }
-    }
-
-    /// Display name for UI surfaces.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Planner => "Planner",
-            Self::Worker => "Worker",
-            Self::Reviewer => "Reviewer",
-            Self::Verifier => "Verifier",
-        }
-    }
-}
-
 /// Which tools a worker may call. Mirrors the existing `AgentWorkerToolProfile`
 /// (`Inherited` / `Explicit`) so the two can be reconciled when this is wired in.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
