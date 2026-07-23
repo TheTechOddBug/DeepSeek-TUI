@@ -5502,6 +5502,7 @@ impl App {
             low_motion: self.effective_low_motion_for_status(),
             motion_mode: self.motion_policy().mode(),
             spacing: self.transcript_spacing,
+            palette_mode: self.ui_theme.mode,
         }
     }
 

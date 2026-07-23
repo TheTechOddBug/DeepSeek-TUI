@@ -26,9 +26,13 @@
 
 #[cfg(test)]
 use std::cell::Cell;
+use std::sync::OnceLock;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -72,8 +76,13 @@ pub enum Block {
     HorizontalRule,
     /// A bullet (`-`/`*`) or ordered (`1.`) list item with its prefix and body.
     ListItem { bullet: String, text: String },
-    /// A line inside a fenced code block. Fences themselves are dropped.
-    Code { line: String },
+    /// A line inside a fenced code block. Fences themselves are dropped, but
+    /// their language token and block identity stay available to syntect.
+    Code {
+        line: String,
+        language: Option<String>,
+        block_id: usize,
+    },
     /// A table row: cells split on `|`.
     TableRow(Vec<String>),
     /// A table separator row (`|---|---|`). Kept so the renderer can draw
@@ -110,6 +119,27 @@ pub struct RenderedMarkdownLine {
     pub copy_separator_after: CopyLineSeparator,
 }
 
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+static COLOR_DEPTH: OnceLock<palette::ColorDepth> = OnceLock::new();
+static PALETTE_MODE: OnceLock<palette::PaletteMode> = OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_nonewlines)
+}
+
+fn theme_set() -> &'static ThemeSet {
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
+fn syntax_color_depth() -> palette::ColorDepth {
+    *COLOR_DEPTH.get_or_init(palette::ColorDepth::detect)
+}
+
+pub(crate) fn detected_palette_mode() -> palette::PaletteMode {
+    *PALETTE_MODE.get_or_init(palette::PaletteMode::detect)
+}
+
 /// Parse markdown source into a width-independent block AST.
 ///
 /// This is a small line-oriented parser tuned for the patterns we render:
@@ -124,17 +154,28 @@ pub fn parse(content: &str) -> ParsedMarkdown {
 
     let mut blocks = Vec::new();
     let mut in_code_block = false;
+    let mut code_language: Option<String> = None;
+    let mut code_block_id = 0usize;
 
     for raw_line in content.lines() {
         let trimmed = raw_line.trim_start();
         if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
+            if in_code_block {
+                in_code_block = false;
+                code_language = None;
+            } else {
+                in_code_block = true;
+                code_block_id = code_block_id.saturating_add(1);
+                code_language = normalized_fence_language(trimmed.trim_start_matches('`'));
+            }
             continue;
         }
 
         if in_code_block {
             blocks.push(Block::Code {
                 line: raw_line.to_string(),
+                language: code_language.clone(),
+                block_id: code_block_id,
             });
             continue;
         }
@@ -197,18 +238,33 @@ pub fn parse(content: &str) -> ParsedMarkdown {
 /// skip the parse step entirely.
 #[must_use]
 pub fn render_parsed(parsed: &ParsedMarkdown, width: u16, base_style: Style) -> Vec<Line<'static>> {
-    render_parsed_tagged(parsed, width, base_style)
+    render_parsed_tagged_with_palette(parsed, width, base_style, detected_palette_mode())
         .into_iter()
         .map(|line| line.line)
         .collect()
 }
 
 /// Render a parsed-markdown AST and preserve per-line source metadata.
+#[cfg(test)]
 #[must_use]
 pub fn render_parsed_tagged(
     parsed: &ParsedMarkdown,
     width: u16,
     base_style: Style,
+) -> Vec<RenderedMarkdownLine> {
+    render_parsed_tagged_with_palette(parsed, width, base_style, detected_palette_mode())
+}
+
+/// Render parsed markdown using the caller's resolved UI palette mode.
+///
+/// The live transcript uses this entry point so an explicit theme selection
+/// wins over terminal/OS auto-detection and participates in cache invalidation.
+#[must_use]
+pub(crate) fn render_parsed_tagged_with_palette(
+    parsed: &ParsedMarkdown,
+    width: u16,
+    base_style: Style,
+    palette_mode: palette::PaletteMode,
 ) -> Vec<RenderedMarkdownLine> {
     let width = width.max(1) as usize;
     let mut out: Vec<RenderedMarkdownLine> = Vec::with_capacity(parsed.blocks.len());
@@ -239,6 +295,37 @@ pub fn render_parsed_tagged(
                         copy_separator_after: CopyLineSeparator::Newline,
                     }),
             );
+            continue;
+        }
+
+        if let Block::Code {
+            language, block_id, ..
+        } = &parsed.blocks[i]
+        {
+            let start = i;
+            while i < parsed.blocks.len()
+                && matches!(
+                    &parsed.blocks[i],
+                    Block::Code {
+                        block_id: candidate,
+                        ..
+                    } if candidate == block_id
+                )
+            {
+                i += 1;
+            }
+            let source_lines = parsed.blocks[start..i]
+                .iter()
+                .filter_map(|block| match block {
+                    Block::Code { line, .. } => Some(line.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let highlighted =
+                highlight_code_block(language.as_deref(), &source_lines, base_style, palette_mode);
+            for spans in highlighted {
+                out.extend(render_wrapped_code_spans_tagged(spans, width));
+            }
             continue;
         }
 
@@ -283,14 +370,7 @@ pub fn render_parsed_tagged(
                     base_style,
                 ));
             }
-            Block::Code { line } => {
-                let code_style = Style::default()
-                    .fg(palette::WHALE_INFO)
-                    .add_modifier(Modifier::ITALIC);
-                out.extend(render_wrapped_line_tagged(
-                    line, width, code_style, true, true,
-                ));
-            }
+            Block::Code { .. } => unreachable!(),
             Block::Paragraph { text } => {
                 let link_style = Style::default()
                     .fg(palette::WHALE_ACTION)
@@ -338,6 +418,7 @@ pub fn render_markdown(content: &str, width: u16, base_style: Style) -> Vec<Line
 }
 
 /// Convenience wrapper: parse + render while keeping per-line source metadata.
+#[cfg(test)]
 #[must_use]
 pub fn render_markdown_tagged(
     content: &str,
@@ -346,6 +427,18 @@ pub fn render_markdown_tagged(
 ) -> Vec<RenderedMarkdownLine> {
     let parsed = parse(content);
     render_parsed_tagged(&parsed, width, base_style)
+}
+
+/// Parse and render markdown using an already-resolved UI palette mode.
+#[must_use]
+pub(crate) fn render_markdown_tagged_with_palette(
+    content: &str,
+    width: u16,
+    base_style: Style,
+    palette_mode: palette::PaletteMode,
+) -> Vec<RenderedMarkdownLine> {
+    let parsed = parse(content);
+    render_parsed_tagged_with_palette(&parsed, width, base_style, palette_mode)
 }
 
 /// Render plain text: split on newlines, word-wrap each line independently,
@@ -479,6 +572,232 @@ fn parse_list_item(line: &str) -> Option<(String, &str)> {
         return None;
     }
     Some((format!("{}.", &trimmed[..idx]), rest.trim_start()))
+}
+
+fn normalized_fence_language(info: &str) -> Option<String> {
+    let token = info
+        .trim()
+        .split(|ch: char| ch.is_whitespace() || ch == ',')
+        .next()
+        .unwrap_or("")
+        .trim_matches(['{', '}', '.'])
+        .to_ascii_lowercase();
+    if token.is_empty() || matches!(token.as_str(), "text" | "txt" | "plain" | "plaintext") {
+        return None;
+    }
+    let normalized = match token.as_str() {
+        "rs" => "rust",
+        "js" | "jsx" | "node" => "javascript",
+        "ts" | "tsx" => "typescript",
+        "py" => "python",
+        "rb" => "ruby",
+        "sh" | "shell" | "zsh" => "bash",
+        "yml" => "yaml",
+        "md" => "markdown",
+        other => other,
+    };
+    Some(normalized.to_string())
+}
+
+fn selected_syntax_theme(mode: palette::PaletteMode) -> &'static Theme {
+    let themes = theme_set();
+    let preferred = match mode {
+        palette::PaletteMode::Dark | palette::PaletteMode::Grayscale => "base16-ocean.dark",
+        palette::PaletteMode::Light => "InspiredGitHub",
+        palette::PaletteMode::SolarizedLight => "Solarized (light)",
+    };
+    themes
+        .themes
+        .get(preferred)
+        .or_else(|| themes.themes.values().next())
+        .expect("syntect ships at least one default theme")
+}
+
+fn syntax_style_to_ratatui(
+    style: syntect::highlighting::Style,
+    base_style: Style,
+    palette_mode: palette::PaletteMode,
+) -> Style {
+    let fg = syntax_rgb_to_terminal_color(
+        style.foreground.r,
+        style.foreground.g,
+        style.foreground.b,
+        palette_mode,
+        syntax_color_depth(),
+    );
+    let mut modifiers = Modifier::empty();
+    if style.font_style.contains(FontStyle::BOLD) {
+        modifiers |= Modifier::BOLD;
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        modifiers |= Modifier::ITALIC;
+    }
+    if style.font_style.contains(FontStyle::UNDERLINE) {
+        modifiers |= Modifier::UNDERLINED;
+    }
+    base_style.fg(fg).add_modifier(modifiers)
+}
+
+fn syntax_rgb_to_terminal_color(
+    r: u8,
+    g: u8,
+    b: u8,
+    mode: palette::PaletteMode,
+    depth: palette::ColorDepth,
+) -> Color {
+    let (r, g, b) = if mode == palette::PaletteMode::Grayscale {
+        let luma =
+            ((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 + 500) / 1000) as u8;
+        let readable = luma.clamp(96, 232);
+        (readable, readable, readable)
+    } else {
+        (r, g, b)
+    };
+    let mut color = Color::Rgb(r, g, b);
+    if matches!(
+        color,
+        reserved if reserved == palette::WHALE_HUMAN
+            || reserved == palette::WHALE_LIVE
+            || reserved == palette::WHALE_ACTION
+            || reserved == palette::WHALE_ERROR
+    ) {
+        // Syntax colors are content, not brand/attention/work/danger state.
+        // Shift exact collisions before terminal-depth reduction so the cell
+        // cannot acquire a reserved semantic role in the color backend.
+        color = Color::Rgb(r, g, b.saturating_add(1));
+    }
+    let color = palette::adapt_color(color, depth);
+    let reserved = [
+        palette::WHALE_HUMAN,
+        palette::WHALE_LIVE,
+        palette::WHALE_ACTION,
+        palette::WHALE_ERROR,
+    ]
+    .map(|semantic| palette::adapt_color(semantic, depth));
+    if !reserved.contains(&color) {
+        return color;
+    }
+
+    // Quantization can make distinct RGB values collide again. Walk a small,
+    // deterministic neutral ramp until the terminal-level color no longer
+    // impersonates one of the four reserved semantic lanes.
+    for delta in [17_u8, 34, 51, 68, 85, 102, 119, 136] {
+        let candidate = palette::adapt_color(
+            Color::Rgb(
+                r.wrapping_add(delta),
+                g.wrapping_add(delta / 2),
+                b.wrapping_add(delta / 3),
+            ),
+            depth,
+        );
+        if !reserved.contains(&candidate) {
+            return candidate;
+        }
+    }
+    // All supported depths have more than four colors, so this is only a
+    // defensive fallback for a future adapter with a narrower gamut.
+    Color::Reset
+}
+
+fn highlight_code_block(
+    language: Option<&str>,
+    lines: &[&str],
+    base_style: Style,
+    palette_mode: palette::PaletteMode,
+) -> Vec<Vec<Span<'static>>> {
+    let plain_style = base_style.fg(palette::TEXT_TOOL_OUTPUT);
+    let Some(language) = language else {
+        return lines
+            .iter()
+            .map(|line| vec![Span::styled((*line).to_string(), plain_style)])
+            .collect();
+    };
+    let syntaxes = syntax_set();
+    let Some(syntax) = syntaxes
+        .find_syntax_by_token(language)
+        .or_else(|| syntaxes.find_syntax_by_extension(language))
+        .or_else(|| {
+            syntaxes
+                .syntaxes()
+                .iter()
+                .find(|syntax| syntax.name.eq_ignore_ascii_case(language))
+        })
+    else {
+        return lines
+            .iter()
+            .map(|line| vec![Span::styled((*line).to_string(), plain_style)])
+            .collect();
+    };
+
+    let mut highlighter = HighlightLines::new(syntax, selected_syntax_theme(palette_mode));
+    lines
+        .iter()
+        .map(|line| match highlighter.highlight_line(line, syntaxes) {
+            Ok(ranges) if !ranges.is_empty() => ranges
+                .into_iter()
+                .map(|(style, text)| {
+                    Span::styled(
+                        text.to_string(),
+                        syntax_style_to_ratatui(style, base_style, palette_mode),
+                    )
+                })
+                .collect(),
+            _ => vec![Span::styled((*line).to_string(), plain_style)],
+        })
+        .collect()
+}
+
+fn render_wrapped_code_spans_tagged(
+    spans: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<RenderedMarkdownLine> {
+    let prefix = "  ";
+    let prefix_width = prefix.width();
+    let available = width.saturating_sub(prefix_width).max(1);
+    let mut rows: Vec<Vec<(String, Style)>> = vec![Vec::new()];
+    let mut current_width = 0usize;
+
+    for span in spans {
+        for grapheme in span.content.graphemes(true) {
+            let grapheme_width = markdown_grapheme_width(grapheme, current_width);
+            if current_width + grapheme_width > available && current_width > 0 {
+                rows.push(Vec::new());
+                current_width = 0;
+            }
+            let row = rows.last_mut().expect("code rows are never empty");
+            if let Some((text, style)) = row.last_mut()
+                && *style == span.style
+            {
+                text.push_str(grapheme);
+            } else {
+                row.push((grapheme.to_string(), span.style));
+            }
+            current_width += markdown_grapheme_width(grapheme, current_width);
+        }
+    }
+
+    let last_index = rows.len().saturating_sub(1);
+    rows.into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let mut rendered = vec![Span::raw(prefix)];
+            rendered.extend(
+                row.into_iter()
+                    .map(|(text, style)| Span::styled(text, style)),
+            );
+            RenderedMarkdownLine {
+                line: Line::from(rendered),
+                links: Vec::new(),
+                is_code: true,
+                copy_prefix_width: prefix_width,
+                copy_separator_after: if idx == last_index {
+                    CopyLineSeparator::Newline
+                } else {
+                    CopyLineSeparator::None
+                },
+            }
+        })
+        .collect()
 }
 
 fn render_wrapped_line_tagged(
@@ -1532,17 +1851,147 @@ mod tests {
 
     #[test]
     fn fenced_code_block_collected_in_parse() {
-        let parsed = parse("text\n```\ncode line one\ncode line two\n```\nmore\n");
+        let parsed = parse("text\n```rust\ncode line one\ncode line two\n```\nmore\n");
         let blocks = &parsed.blocks;
         // text paragraph, two code lines, more paragraph (fences are dropped)
         let code_lines: Vec<_> = blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Code { line } => Some(line.as_str()),
+                Block::Code {
+                    line,
+                    language,
+                    block_id,
+                } => Some((line.as_str(), language.as_deref(), *block_id)),
                 _ => None,
             })
             .collect();
-        assert_eq!(code_lines, vec!["code line one", "code line two"]);
+        assert_eq!(
+            code_lines,
+            vec![
+                ("code line one", Some("rust"), 1),
+                ("code line two", Some("rust"), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_code_fences_keep_distinct_highlighter_state() {
+        let parsed = parse("```rust\n/* open\n```\n```rust\nlet x = 1;\n```\n");
+        let ids = parsed
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Code { block_id, .. } => Some(*block_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn rust_fence_renders_multiple_syntax_foregrounds_without_reserved_rgb() {
+        let rendered = render_markdown_tagged(
+            "```rust\nfn main() {\n    let answer: u32 = 42; // comment\n}\n```",
+            100,
+            Style::default(),
+        );
+        let colors = rendered
+            .iter()
+            .flat_map(|line| line.line.spans.iter())
+            .filter_map(|span| span.style.fg)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(colors.len() > 1, "expected syntax colors, got: {colors:?}");
+        for color in colors {
+            assert_ne!(color, palette::WHALE_HUMAN);
+            assert_ne!(color, palette::WHALE_LIVE);
+            assert_ne!(color, palette::WHALE_ACTION);
+            assert_ne!(color, palette::WHALE_ERROR);
+        }
+    }
+
+    #[test]
+    fn syntax_colors_use_existing_depth_quantizer_and_grayscale_path() {
+        assert!(matches!(
+            syntax_rgb_to_terminal_color(
+                120,
+                80,
+                200,
+                palette::PaletteMode::Dark,
+                palette::ColorDepth::Ansi256,
+            ),
+            Color::Indexed(_)
+        ));
+        assert!(matches!(
+            syntax_rgb_to_terminal_color(
+                120,
+                80,
+                200,
+                palette::PaletteMode::Dark,
+                palette::ColorDepth::Ansi16,
+            ),
+            Color::Black
+                | Color::Red
+                | Color::Green
+                | Color::Yellow
+                | Color::Blue
+                | Color::Magenta
+                | Color::Cyan
+                | Color::Gray
+                | Color::DarkGray
+                | Color::LightRed
+                | Color::LightGreen
+                | Color::LightYellow
+                | Color::LightBlue
+                | Color::LightMagenta
+                | Color::LightCyan
+                | Color::White
+        ));
+        let gray = syntax_rgb_to_terminal_color(
+            120,
+            80,
+            200,
+            palette::PaletteMode::Grayscale,
+            palette::ColorDepth::TrueColor,
+        );
+        assert!(matches!(gray, Color::Rgb(r, g, b) if r == g && g == b));
+    }
+
+    #[test]
+    fn syntax_assets_are_lazy_singletons_and_explicit_modes_select_themes() {
+        assert!(std::ptr::eq(syntax_set(), syntax_set()));
+        assert!(std::ptr::eq(theme_set(), theme_set()));
+        assert!(!std::ptr::eq(
+            selected_syntax_theme(palette::PaletteMode::Dark),
+            selected_syntax_theme(palette::PaletteMode::Light),
+        ));
+    }
+
+    #[test]
+    fn depth_quantization_cannot_reintroduce_reserved_semantic_colors() {
+        let reserved = [
+            palette::WHALE_HUMAN,
+            palette::WHALE_LIVE,
+            palette::WHALE_ACTION,
+            palette::WHALE_ERROR,
+        ];
+        for depth in [
+            palette::ColorDepth::TrueColor,
+            palette::ColorDepth::Ansi256,
+            palette::ColorDepth::Ansi16,
+        ] {
+            let reserved_at_depth = reserved.map(|color| palette::adapt_color(color, depth));
+            for semantic in reserved {
+                let Color::Rgb(r, g, b) = semantic else {
+                    panic!("reserved syntax guard expects RGB semantic colors");
+                };
+                let syntax =
+                    syntax_rgb_to_terminal_color(r, g, b, palette::PaletteMode::Dark, depth);
+                assert!(
+                    !reserved_at_depth.contains(&syntax),
+                    "{syntax:?} reintroduced a reserved color at {depth:?}"
+                );
+            }
+        }
     }
 
     #[test]

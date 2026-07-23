@@ -37,6 +37,24 @@ pub(super) fn render_message_with_copy_metadata(
     content: &str,
     width: u16,
 ) -> Vec<RenderedTranscriptLine> {
+    render_message_with_copy_metadata_for_palette(
+        prefix,
+        label_style,
+        body_style,
+        content,
+        width,
+        markdown_render::detected_palette_mode(),
+    )
+}
+
+pub(super) fn render_message_with_copy_metadata_for_palette(
+    prefix: &str,
+    label_style: Style,
+    body_style: Style,
+    content: &str,
+    width: u16,
+    palette_mode: palette::PaletteMode,
+) -> Vec<RenderedTranscriptLine> {
     // An assistant cell whose content is entirely whitespace (e.g. a stray
     // newline streamed between reasoning and a tool call) would otherwise
     // render as a bare, orphaned role glyph floating on its own line — the
@@ -50,8 +68,12 @@ pub(super) fn render_message_with_copy_metadata(
     let prefix_width_u16 = u16::try_from(prefix_width.saturating_add(2)).unwrap_or(u16::MAX);
     let content_width = usize::from(width.saturating_sub(prefix_width_u16).max(1));
     let mut lines = Vec::new();
-    let rendered =
-        markdown_render::render_markdown_tagged(content, content_width as u16, body_style);
+    let rendered = markdown_render::render_markdown_tagged_with_palette(
+        content,
+        content_width as u16,
+        body_style,
+        palette_mode,
+    );
     for (idx, rendered_line) in rendered.into_iter().enumerate() {
         let display_prefix_width = if prefix.is_empty() {
             0

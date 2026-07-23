@@ -45,8 +45,8 @@ use constants::{
 use constants::{TOOL_RUNNING_SYMBOLS, TOOL_STATUS_SYMBOL_MS};
 use message::{
     RenderedTranscriptLine, assistant_label_style_for, hard_break_copy_lines, message_body_style,
-    render_message, render_message_with_copy_metadata, render_plain_message, render_user_message,
-    system_body_style, system_label_style, user_body_style, user_label_style,
+    render_message, render_message_with_copy_metadata_for_palette, render_plain_message,
+    render_user_message, system_body_style, system_label_style, user_body_style, user_label_style,
 };
 use thinking::{render_hidden_thinking_activity, render_thinking};
 use tool_output::{render_exec_output_mode, render_tool_output_mode, wrap_plain_line, wrap_text};
@@ -165,6 +165,9 @@ pub struct TranscriptRenderOptions {
     pub low_motion: bool,
     pub motion_mode: MotionMode,
     pub spacing: TranscriptSpacing,
+    /// Resolved application theme mode. This keeps cached markdown syntax
+    /// colors aligned with an explicit theme selection.
+    pub palette_mode: palette::PaletteMode,
 }
 
 impl Default for TranscriptRenderOptions {
@@ -178,6 +181,7 @@ impl Default for TranscriptRenderOptions {
             low_motion: false,
             motion_mode: MotionMode::Full,
             spacing: TranscriptSpacing::Comfortable,
+            palette_mode: palette::PaletteMode::detect(),
         }
     }
 }
@@ -343,13 +347,19 @@ impl HistoryCell {
             }
             HistoryCell::Tool(cell) => cell.lines_with_motion(width, options.low_motion),
             HistoryCell::User { content } => render_user_message(content, width),
-            HistoryCell::Assistant { content, streaming } => render_message(
-                ASSISTANT_GLYPH,
-                assistant_label_style_for(*streaming, options.low_motion),
-                message_body_style(),
-                content,
-                width,
-            ),
+            HistoryCell::Assistant { content, streaming } => {
+                render_message_with_copy_metadata_for_palette(
+                    ASSISTANT_GLYPH,
+                    assistant_label_style_for(*streaming, options.low_motion),
+                    message_body_style(),
+                    content,
+                    width,
+                    options.palette_mode,
+                )
+                .into_iter()
+                .map(|rendered| rendered.line)
+                .collect()
+            }
             HistoryCell::System { .. } | HistoryCell::Error { .. } => self.lines(width),
             HistoryCell::SubAgent(cell) => cell.lines(width),
             HistoryCell::ArchivedContext { .. } => {
@@ -390,20 +400,24 @@ impl HistoryCell {
             HistoryCell::User { content } => {
                 hard_break_copy_lines(render_user_message(content, width))
             }
-            HistoryCell::Assistant { content, streaming } => render_message_with_copy_metadata(
-                ASSISTANT_GLYPH,
-                assistant_label_style_for(*streaming, options.low_motion),
-                message_body_style(),
-                content,
-                width,
-            ),
+            HistoryCell::Assistant { content, streaming } => {
+                render_message_with_copy_metadata_for_palette(
+                    ASSISTANT_GLYPH,
+                    assistant_label_style_for(*streaming, options.low_motion),
+                    message_body_style(),
+                    content,
+                    width,
+                    options.palette_mode,
+                )
+            }
             HistoryCell::System { content } if !is_cycle_boundary(content) => {
-                render_message_with_copy_metadata(
+                render_message_with_copy_metadata_for_palette(
                     "Note",
                     system_label_style(),
                     system_body_style(),
                     content,
                     width,
+                    options.palette_mode,
                 )
             }
             HistoryCell::Tool(_) => self

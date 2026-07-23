@@ -1584,6 +1584,38 @@ mod tests {
     }
 
     #[test]
+    fn palette_mode_change_invalidates_cached_syntax_rendering() {
+        let cells = vec![assistant_cell(
+            "```rust\nfn main() { let answer = 42; }\n```",
+            false,
+        )];
+        let revisions = [1u64];
+        let mut cache = TranscriptViewCache::new();
+        let dark = TranscriptRenderOptions {
+            palette_mode: palette::PaletteMode::Dark,
+            ..TranscriptRenderOptions::default()
+        };
+
+        cache.ensure(&cells, &revisions, 80, dark);
+        let dark_lines = Arc::clone(&cache.per_cell[0].lines);
+
+        cache.ensure(
+            &cells,
+            &revisions,
+            80,
+            TranscriptRenderOptions {
+                palette_mode: palette::PaletteMode::Light,
+                ..dark
+            },
+        );
+
+        assert!(
+            !Arc::ptr_eq(&dark_lines, &cache.per_cell[0].lines),
+            "palette mode is part of TranscriptRenderOptions and must bust cached cells"
+        );
+    }
+
+    #[test]
     fn tool_rails_preserve_rendered_width_budget() {
         let cells = vec![exec_tool_cell(
             "printf 'this is a command with enough text to wrap in narrow terminals'",
