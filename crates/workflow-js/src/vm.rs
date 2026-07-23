@@ -929,10 +929,10 @@ enum TaskRoleKind {
 
 fn task_role_kind(value: &str) -> Option<TaskRoleKind> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "explore" | "explorer" | "plan" | "planner" | "review" | "reviewer" | "verify"
-        | "verifier" => Some(TaskRoleKind::ReadOnly),
+        "explore" | "explorer" | "scout" | "plan" | "planner" | "review" | "reviewer"
+        | "verify" | "verifier" => Some(TaskRoleKind::ReadOnly),
         "general" | "worker" => Some(TaskRoleKind::General),
-        "implement" | "implementer" => Some(TaskRoleKind::Implementer),
+        "implement" | "implementer" | "builder" => Some(TaskRoleKind::Implementer),
         _ => None,
     }
 }

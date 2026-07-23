@@ -527,7 +527,9 @@ fn collect_children(
             .get("type")
             .or_else(|| child.get("agent_type"))
             .and_then(Value::as_str)
-            .unwrap_or("general");
+            .unwrap_or("general")
+            .trim()
+            .to_ascii_lowercase();
         let effective_read_write = match mode.as_str() {
             "read_only" | "readonly" => false,
             "read_write" | "readwrite" | "writes" | "write" => true,
@@ -536,8 +538,12 @@ fn collect_children(
         };
         if effective_read_write {
             *writes = true;
-            // Write-capable implementers may run shell beyond read-only.
-            if agent_type == "implementer" || agent_type == "builder" || agent_type == "general" {
+            // Write-capable builders/workers may run shell beyond read-only.
+            // Keep the legacy runtime names for stored Workflow plans.
+            if matches!(
+                agent_type.as_str(),
+                "builder" | "implement" | "implementer" | "worker" | "general"
+            ) {
                 *shell = true;
             }
         }
@@ -813,6 +819,25 @@ mod tests {
         assert_eq!(receipt.goal, "land the fix");
         assert!(receipt.elevated);
         assert!(receipt.writes);
+    }
+
+    #[test]
+    fn canonical_worker_role_flags_shell_for_write_plan() {
+        let input = json!({
+            "action": "start",
+            "plan": {
+                "goal": "land the fix",
+                "children": [{
+                    "prompt": "patch it",
+                    "type": "worker",
+                    "mode": "read_write"
+                }]
+            }
+        });
+
+        let summary = analyze_workflow_plan_approval(&input);
+        assert!(summary.writes);
+        assert!(summary.shell);
     }
 
     #[test]

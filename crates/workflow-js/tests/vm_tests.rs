@@ -210,9 +210,11 @@ async fn task_write_paths_normalize_and_reject_escape_spellings() {
 async fn task_explicit_write_roles_fail_closed_without_scope_and_reject_write_escalation() {
     for source in [
         r#"return await task({prompt: "no scope", type: "implementer"});"#,
+        r#"return await task({prompt: "no scope", type: "builder"});"#,
         r#"return await task({prompt: "no scope", type: "general"});"#,
         r#"return await task({prompt: "no scope", profile: "release-lead"});"#,
         r#"return await task({prompt: "wrong authority", type: "reviewer", writeAuthority: "workspace_write", writeRoots: ["src"]});"#,
+        r#"return await task({prompt: "wrong authority", type: "scout", writeAuthority: "workspace_write", writeRoots: ["src"]});"#,
         r#"return await task({prompt: "role conflict", type: "implementer", role: "reviewer", writeRoots: ["src"]});"#,
     ] {
         let driver = Arc::new(FakeDriver::new());
