@@ -280,9 +280,11 @@ pub enum WorkSurfacePlacementValue {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[schemars(description = "Startup mode: Act (agent wire), Plan, or Operate")]
 pub enum DefaultModeValue {
     Agent,
     Plan,
+    Operate,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1094,6 +1096,25 @@ impl DefaultModeValue {
         match self {
             Self::Agent => "agent",
             Self::Plan => "plan",
+            Self::Operate => "operate",
+        }
+    }
+
+    /// User-facing label in config UI (wire values stay agent/plan/operate).
+    fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "Act",
+            Self::Plan => "Plan",
+            Self::Operate => "Operate",
+        }
+    }
+
+    #[allow(dead_code)]
+    fn description(self) -> &'static str {
+        match self {
+            Self::Agent => "Do the work in this session.",
+            Self::Plan => "Design first; implement after you approve.",
+            Self::Operate => "Dispatch workers; keep the parent free for steers.",
         }
     }
 }
@@ -1202,10 +1223,15 @@ impl From<&str> for TranscriptSpacingValue {
 
 impl From<&str> for DefaultModeValue {
     fn from(value: &str) -> Self {
-        match AppMode::from_setting(value) {
-            AppMode::Agent | AppMode::Operate | AppMode::Yolo => Self::Agent,
-            AppMode::Plan => Self::Plan,
-            AppMode::Auto => Self::Agent,
+        match value.trim().to_ascii_lowercase().as_str() {
+            "operate" | "operation" | "ops" => Self::Operate,
+            // yolo was a mode+permission bundle; startup mode becomes Act and
+            // permission posture is migrated separately on load.
+            other => match AppMode::from_setting(other) {
+                AppMode::Plan => Self::Plan,
+                AppMode::Operate => Self::Operate,
+                AppMode::Agent | AppMode::Yolo | AppMode::Auto => Self::Agent,
+            },
         }
     }
 }
@@ -1382,11 +1408,14 @@ mod tests {
     #[test]
     fn legacy_startup_mode_values_project_to_agent_in_config_ui() {
         assert_eq!(DefaultModeValue::from("agent"), DefaultModeValue::Agent);
-        assert_eq!(DefaultModeValue::from("operate"), DefaultModeValue::Agent);
+        assert_eq!(DefaultModeValue::from("operate"), DefaultModeValue::Operate);
         assert_eq!(DefaultModeValue::from("yolo"), DefaultModeValue::Agent);
         assert_eq!(DefaultModeValue::from("plan"), DefaultModeValue::Plan);
         assert_eq!(DefaultModeValue::Agent.as_setting(), "agent");
         assert_eq!(DefaultModeValue::Plan.as_setting(), "plan");
+        assert_eq!(DefaultModeValue::Operate.as_setting(), "operate");
+        assert_eq!(DefaultModeValue::Agent.label(), "Act");
+        assert_eq!(DefaultModeValue::Operate.label(), "Operate");
     }
 
     #[test]
@@ -1531,8 +1560,29 @@ background_color = "#1A1B26"
             approval_mode,
             &serde_json::json!(["auto", "bypass", "suggest", "never"])
         );
-        let default_mode = &schema["$defs"]["DefaultModeValue"]["enum"];
-        assert_eq!(default_mode, &serde_json::json!(["agent", "plan"]));
+        let default_mode_def = &schema["$defs"]["DefaultModeValue"];
+        let default_mode = default_mode_def
+            .get("enum")
+            .cloned()
+            .or_else(|| {
+                default_mode_def.get("oneOf").and_then(|ones| {
+                    let mut vals = Vec::new();
+                    for item in ones.as_array()? {
+                        if let Some(v) = item.get("const") {
+                            vals.push(v.clone());
+                        } else if let Some(arr) = item.get("enum").and_then(|e| e.as_array()) {
+                            vals.extend(arr.iter().cloned());
+                        }
+                    }
+                    Some(serde_json::Value::Array(vals))
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            default_mode,
+            serde_json::json!(["agent", "plan", "operate"]),
+            "DefaultModeValue schema: {default_mode_def}"
+        );
         let inline_diffs = &schema["$defs"]["InlineDiffValue"]["enum"];
         assert_eq!(inline_diffs, &serde_json::json!(["full", "summary", "off"]));
         let locale = &schema["$defs"]["UiLocale"]["enum"];

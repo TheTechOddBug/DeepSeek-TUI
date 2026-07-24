@@ -1015,14 +1015,14 @@ impl Settings {
                 self.workspace_follow_symlinks = parse_bool(value)?;
             }
             "default_mode" | "mode" => {
-                // Loading remains deliberately liberal so old `operate` and
-                // `yolo` files migrate safely. New writes are strict: these
-                // are session actions/permission aliases, not startup modes.
+                // Act (wire: agent), Plan, and Operate are valid startup modes.
+                // yolo remains a permission-migration alias, not a mode write.
                 self.default_mode = match value.trim().to_ascii_lowercase().as_str() {
-                    "agent" | "normal" => "agent".to_string(),
+                    "agent" | "normal" | "act" | "edit" => "agent".to_string(),
                     "plan" => "plan".to_string(),
+                    "operate" | "operation" | "ops" => "operate".to_string(),
                     _ => anyhow::bail!(
-                        "Failed to update setting: invalid mode '{value}'. Expected: agent or plan."
+                        "Failed to update setting: invalid mode '{value}'. Expected: act (agent), plan, or operate."
                     ),
                 };
             }
@@ -1388,7 +1388,10 @@ impl Settings {
                 "workspace_follow_symlinks",
                 "Follow symbolic links during workspace file discovery walks: on/off (default off). Enable for symlink-based multi-project workspaces. Has built-in cycle detection but may increase latency on large symlinked trees.",
             ),
-            ("default_mode", "Default mode: agent or plan"),
+            (
+                "default_mode",
+                "Default mode: act (agent), plan, or operate",
+            ),
             ("sidebar_width", "Sidebar width percentage: 10-50"),
             (
                 "sidebar_focus",
@@ -1729,13 +1732,11 @@ fn normalize_mode(value: &str) -> &str {
     match value.trim().to_ascii_lowercase().as_str() {
         "edit" => "agent",
         "normal" => "agent",
-        "agent" => "agent",
+        "agent" | "act" => "agent",
         "plan" => "plan",
-        // Operate is a session action, not a startup personality. Old saved
-        // values fall back to the safe general-purpose Agent startup mode.
-        "operate" | "operation" | "ops" => "agent",
-        // Kept as a migration input in `load_persisted`; new settings never
-        // advertise it as a mode because permission posture is separate.
+        // Operate is a first-class startup mode (Hunter 2026-07-24).
+        "operate" | "operation" | "ops" => "operate",
+        // yolo was mode+permission; keep mode as Act and migrate posture on load.
         "yolo" => "agent",
         _ => value,
     }
@@ -3328,7 +3329,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_mode_writes_only_accept_agent_or_plan() {
+    fn startup_mode_writes_accept_act_plan_operate() {
         let mut settings = Settings::default();
 
         settings.set("default_mode", "plan").expect("plan mode");
@@ -3337,13 +3338,22 @@ mod tests {
             .set("default_mode", "normal")
             .expect("legacy normal alias remains harmless");
         assert_eq!(settings.default_mode, "agent");
+        settings
+            .set("default_mode", "operate")
+            .expect("operate is a valid startup mode");
+        assert_eq!(settings.default_mode, "operate");
+        settings
+            .set("default_mode", "act")
+            .expect("act alias maps to agent wire value");
+        assert_eq!(settings.default_mode, "agent");
 
-        for removed in ["operate", "ops", "yolo"] {
-            let err = settings
-                .set("default_mode", removed)
-                .expect_err("session actions must not become saved startup modes");
-            assert!(err.to_string().contains("agent or plan"), "{err}");
-        }
+        let err = settings
+            .set("default_mode", "yolo")
+            .expect_err("yolo remains a permission migration alias, not a mode write");
+        assert!(
+            err.to_string().contains("act (agent), plan, or operate"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3370,9 +3380,9 @@ mod tests {
             codewhale_home.join("settings.toml"),
             "default_mode = \"operate\"\n",
         )
-        .expect("legacy operate settings");
-        let loaded = Settings::load_persisted().expect("load legacy operate settings");
-        assert_eq!(loaded.default_mode, "agent");
+        .expect("operate startup settings");
+        let loaded = Settings::load_persisted().expect("load operate settings");
+        assert_eq!(loaded.default_mode, "operate");
         assert_eq!(loaded.permission_posture, None);
     }
 
