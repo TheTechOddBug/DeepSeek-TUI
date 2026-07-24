@@ -3340,11 +3340,16 @@ start it",
         for phrase in [
             "ordinary messages",
             "small or tightly coupled tasks directly",
-            "dispatch workers",
-            "queued user messages",
+            "Dispatching background workers is the default",
+            "queued user message as a new task",
             "approval, sandbox, and repository policies",
-            "lifecycle claims exact",
+            "lifecycle claims stay exact",
             "internal control-plane mechanics",
+            "Goal first",
+            "Dispatch is not completion",
+            "verification evidence",
+            "best-of-n",
+            "parent stays free",
         ] {
             assert!(
                 OPERATE_MODE.contains(phrase),
@@ -3355,6 +3360,7 @@ start it",
             "risk` is exactly",
             "parallel([() =>",
             "terminal Workflow receipt",
+            "/multitask",
         ] {
             assert!(
                 !OPERATE_MODE.contains(implementation_detail),

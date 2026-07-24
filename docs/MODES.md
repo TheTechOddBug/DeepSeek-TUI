@@ -30,7 +30,7 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 
 - **Plan**: design-first prompting. Read-only investigation tools stay available; shell and patch execution stay off. Use this when you want to think out loud and produce a plan to hand to a human (yourself later, or a reviewer).
 - **Act** (Agent): multi-step tool use. In interactive TUI sessions, the canonical `Bash` tool is available by default and approval prompts gate each call. Set top-level `allow_shell = false` to hide it for a workspace/profile. The canonical `File`, `Git`, and `Run` action tools cover structured workspace work.
-- **Operate**: multitask conductor posture. Send ordinary messages and use the same direct tools, shell configuration, sandbox, permission posture, ask-rules, and repository protections as Act. Codewhale prefers Fleet workers for independent, parallel, background, or long-running work, but delegation is not mandatory. New messages can start additional lanes while workers continue. Workflow is optional and reserved for work that needs ordered phases, gates, shared budgets, or deterministic fan-in.
+- **Operate**: multitask conductor posture. Send ordinary messages and use the same direct tools, shell configuration, sandbox, permission posture, ask-rules, and repository protections as Act. The parent session is the **operator**: dispatching background workers is the **default** way real multi-step or independent work happens (no special multitask command). Handle small or tightly coupled tasks in the parent; for everything else, set a goal when work spans streams, start background `agent` workers early, treat queued follow-ups as new tasks, and keep the parent free for steers and synthesis. **Dispatch is not completion** — every write-capable child must return verification evidence (verifier child, `run_verifiers`, or structured PASS/FAIL with real commands). Prefer direct workers for independent streams; use Workflow when order, phases, gates, shared budgets, or deterministic fan-in matter (starter recipes under `workflows/operate_*.workflow.js`: staged-fix, read-audit, parallel-scout, best-of-n). Best-of-N (skill + starter workflow) runs N worktree implementers then a reviewer; apply the winner only after PASS.
 
 **Act** is accepted as an alias for Agent mode. Saved settings still normalize to `agent` for backward compatibility.
 
@@ -48,6 +48,20 @@ Operate changes scheduling emphasis, not authority. It neither adds a
 mode-specific tool denial nor bypasses the active approval, sandbox, shell,
 ask-rule, repository-law, or managed-policy boundary. Plan remains the
 mode-specific read-only boundary for shell and write-capable tools.
+
+### Operate loop (one screen)
+
+```text
+User message
+  → small / chat / one-file?  → parent does it (Act-equivalent tools)
+  → real / multi-stream work? → goal (if needed) → dispatch background workers
+       → each write child: implement → VERDICT PASS/FAIL with evidence
+       → ordered / gated fan-in? → Workflow (operate_* starters)
+       → high-stakes ambiguous? → best-of-n (N worktrees + reviewer; apply on PASS)
+  → parent synthesizes receipts; stays free for the next ask
+```
+
+Lifecycle claims stay exact: dispatched ≠ settled ≠ verified.
 
 If a shell tool is missing from the model-visible catalog in Act or Operate, check
 for an explicit `allow_shell = false` in the active config/profile or runtime

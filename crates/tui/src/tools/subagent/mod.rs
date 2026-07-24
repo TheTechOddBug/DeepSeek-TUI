@@ -6322,9 +6322,11 @@ impl ToolSpec for AgentTool {
     fn description(&self) -> &'static str {
         concat!(
             "Start one focused background worker and return immediately with its agent_id; a prompt is enough for a read-only role. ",
-            "Use multiple starts for independent parallel tasks. Add a Fleet profile, role, worktree, or explicit limits only when they improve the task. ",
+            "Use multiple starts for independent parallel tasks. Prefer type=implementer for write work and type=verifier (or run_verifiers) after writes settle — dispatch is not completion. ",
+            "For parallel write work use worktree=true so children do not collide in the parent checkout. ",
+            "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
             "Coordinate later with agents/list, agents/message, agents/followup, agents/interrupt, or agents/wait instead of polling. ",
-            "In Operate, a write-capable root start also declares bounded write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
+            "In Operate, background workers are the default for independent or long work; a write-capable root start also declares bounded write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
             "Legacy action=status|peek|wait|cancel remain for compatibility."
         )
     }
@@ -7403,7 +7405,25 @@ fn build_subagent_system_prompt(agent_type: &FleetRole, assignment: &SubAgentAss
     prompt.push_str(
         "\n\nYou are a background sub-agent: every instruction comes from the orchestrating agent, not a human. Never address the end user or ask them questions — do the assigned work and report results back to the orchestrator.",
     );
+    // C1: write-capable children must return PASS/FAIL evidence, not only a diff.
+    if write_capable_child_needs_verify_contract(agent_type) {
+        prompt.push_str(WRITE_CHILD_VERIFY_CONTRACT);
+    }
     prompt
+}
+
+/// True when the child role is expected to mutate the workspace and therefore
+/// must end with structured verify evidence (Operate Phase 1 / C1).
+///
+/// Scout/planner/reviewer/verifier stay read-oriented; builder/custom/worker
+/// are write-capable defaults. Explicit read-only spawn authority is enforced
+/// separately in the tool registry — the prompt still asks write-role children
+/// for evidence when they did edit.
+fn write_capable_child_needs_verify_contract(agent_type: &FleetRole) -> bool {
+    matches!(
+        agent_type,
+        FleetRole::Builder | FleetRole::Custom | FleetRole::Worker
+    )
 }
 
 fn build_subagent_system_prompt_with_skills(
@@ -11882,7 +11902,22 @@ const IMPLEMENTER_AGENT_INTRO: &str = concat!(
     "Read target files with `File` action `read` before editing; prefer action `edit` for narrow changes and action `patch` for hunks.\n",
     "Run relevant verification after edit batches; write needed tests with the implementation.\n",
     "You are not limited to a scout-style 3-5 tool-call cap. Checkpoint before expanding scope or after repeated failures, then continue only inside the assigned brief.\n",
-    "CHANGES is load-bearing: list every modified file with a one-line why.\n\n"
+    "CHANGES is load-bearing: list every modified file with a one-line why.\n",
+    "Before finishing, end with a VERDICT block: PASS or FAIL, the exact commands you ran (or why verification was impossible), and brief evidence. A diff alone is not completion.\n\n"
+);
+
+/// Spawn-time contract for write-capable children: they must return PASS/FAIL
+/// evidence, not just a patch. Injected into the child system prompt for
+/// implementer/builder and other write-authority roles (Operate C1).
+const WRITE_CHILD_VERIFY_CONTRACT: &str = concat!(
+    "\n\n## Verify-before-return (write child)\n",
+    "You are a write-capable worker. Completing file edits is not enough.\n",
+    "1. Run the repository's relevant checks for the change you made (tests, lint, typecheck, or the acceptance criteria in your brief).\n",
+    "2. End your final message with a structured evidence block:\n",
+    "   VERDICT: PASS | FAIL\n",
+    "   COMMANDS: <exact commands run, one per line, or NONE with reason>\n",
+    "   EVIDENCE: <exit codes, failing assertion, or concise proof of PASS>\n",
+    "3. Do not claim PASS without command or inspection evidence. If you cannot run checks, report FAIL or BLOCKED with the blocker — never invent success.\n",
 );
 
 const VERIFIER_AGENT_INTRO: &str = concat!(

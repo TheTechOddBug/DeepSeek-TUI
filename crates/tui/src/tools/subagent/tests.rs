@@ -1823,6 +1823,32 @@ fn fleet_role_deserialize_rejects_unknown_values_with_canonical_hint() {
 }
 
 #[test]
+fn write_capable_children_get_verify_contract_in_system_prompt() {
+    let implementer = build_subagent_system_prompt(
+        &FleetRole::Builder,
+        &SubAgentAssignment::new("land the fix".into(), None),
+    );
+    assert!(
+        implementer.contains("Verify-before-return")
+            || implementer.contains("VERDICT: PASS | FAIL"),
+        "implementer spawn prompt must require PASS/FAIL evidence: {implementer}"
+    );
+    assert!(
+        implementer.contains("COMMANDS:") || implementer.contains("command evidence"),
+        "implementer spawn prompt must ask for commands: {implementer}"
+    );
+
+    let scout = build_subagent_system_prompt(
+        &FleetRole::Scout,
+        &SubAgentAssignment::new("map the tree".into(), None),
+    );
+    assert!(
+        !scout.contains("Verify-before-return"),
+        "read-only scout must not get write verify contract"
+    );
+}
+
+#[test]
 fn test_implementer_and_verifier_have_distinct_prompts() {
     // The whole point of adding the types is that they carry distinct
     // posture. Defensive guard: catch the easy bug where copy-paste
