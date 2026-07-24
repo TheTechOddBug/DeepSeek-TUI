@@ -22,6 +22,9 @@ pub const MAX_ANIMATION_HZ: u32 = 30;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayRefreshSource {
     None,
+    // Only constructed inside `#[cfg(target_os = "macos")]` in `probe_inner`
+    // below; non-macOS builds never build a value of this variant.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     MacosCoreGraphics,
     EnvOverride,
 }
