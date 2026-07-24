@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/compact [focus]`: the manual compaction command now accepts an
+  optional focus argument that is injected into the summary prompt, and
+  the compaction summary itself becomes a structured nine-section
+  successor briefing (primary intent, key concepts, files and code,
+  errors and fixes, problem solving, user messages, pending tasks,
+  current work, next step) that carries earlier compaction summaries
+  forward and explicitly forbids tool use — replacing the free-form
+  "under N words" instruction. Codewhale's pin/working-set and
+  V4 prefix-cache-aligned machinery are unchanged.
+
+- Saved workflows become slash commands: `*.workflow.js` files under
+  `<workspace>/.codewhale/workflows/` and `~/.codewhale/workflows/` are
+  discovered as `/name` commands that accept custom arguments (forwarded
+  to the run's `args`), launch through the `workflow` tool in the
+  background, and report their run id. Hand-written `.md` commands with
+  the same name always win. The workflow tool's `source_path` now also
+  accepts the user-global `~/.codewhale/workflows/` store, and every
+  settled run leaves a durable synthesized report under
+  `.codewhale/reports/<run_id>.md` (status, goal, gates, progress,
+  result, verification).
+
+### Fixed
+
+- Disambiguate the two Kimi K3 model-picker rows, which read as an
+  unexplained duplicate: bare `k3` is now labeled "Kimi Code plan route"
+  with its default 262K window annotated as the plan-tier floor (raisable
+  via the provider `context_window` setting for plans that include 1M),
+  and `kimi-k3` is labeled "Moonshot direct route" with its 1M window.
+  Both remain distinct, valid routes for the same underlying model.
+- Close the model-facing `agent` tool role schema: the `type` property now
+  publishes the canonical JSON Schema enum `["worker", "scout", "planner",
+  "reviewer", "builder", "verifier", "custom"]` instead of describing the
+  accepted values in prose. Legacy aliases are no longer advertised to
+  models; they remain accepted only at replay/deserialization boundaries.
+  Provider schema sanitizers (Chat Completions, strict mode, Anthropic
+  Messages / OpenAI Responses, Moonshot/Kimi) are pinned by test to
+  preserve the closed enum.
+
+### Changed
+
+- Rework the ambient idle ocean: the water now holds exactly one loose
+  wedge school of fish, jellyfish, bubbles, and the rare whale cameo —
+  seaweed and bio-dust are removed. Fish swim on a wrap-around path and
+  always face the way they move (direction can only change while the
+  school is off-screen); the lead fish carries an eye (`><o>`).
+  Jellyfish become a pulsing bell with a lagging swaying tentacle. All
+  ambient marks now glow via background→ink color lerp: a travelling
+  sin² wave through the school, a floor-bounded pulse for jellyfish,
+  and occasional raised-cosine glints on bubbles, with deliberately
+  non-matching periods so nothing strobes in sync.
+
+- Consolidate Anthropic Messages and OpenAI Responses stream opening
+  through the shared `client/stream_entry.rs` transport seam already used
+  by Chat Completions: one bounded response-header wait, shared
+  dual/HTTP-1.1 client policy selection, at most one HTTP/1.1 fallback
+  retry on a classified HTTP/2 header stall (never after a stream body
+  has begun), and the shared idle-timeout diagnostics format. Both
+  adapters gain the bounded open wait and `CODEWHALE_FORCE_HTTP1`
+  H1 pinning; wire-specific headers, authentication, endpoints, and
+  stream decoding stay at the adapter edge, and the Responses provider
+  retry loop for rate limits / transient upstream errors is preserved.
+- Rename the internal delegated-worker role type from `SubAgentType` to
+  `FleetRole` with canonical variants (`Worker`, `Scout`, `Planner`,
+  `Reviewer`, `Builder`, `Verifier`, `Custom`) matching the public Fleet
+  vocabulary one-to-one. Wire behavior is unchanged: serialization emits
+  canonical Fleet values only, and persisted `agent_type` fields plus
+  documented legacy spellings (`general`, `explore`, `plan`, `review`,
+  `implementer`, …) continue to load at deserialization/parse boundaries;
+  unknown role tokens still fail closed with the canonical vocabulary in
+  the error.
+
 ## [0.9.1] - 2026-07-22
 
 The Codewhale v0.9.1 source candidate includes a first-class local web client over the Runtime API,
