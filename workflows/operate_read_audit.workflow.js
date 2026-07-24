@@ -35,10 +35,12 @@ export default async function (args) {
   ]);
 
   phase("Synthesize");
+  // Synthesizer must stay read-only: type "general" is write-capable and
+  // requires writeRoots/exactFiles/coordinationContracts (dogfood 2026-07-24).
   const summary = await task({
     description: "Synthesize audit findings for the operator.",
     label: "audit summary",
-    type: "general",
+    type: "review",
     prompt: [
       "Synthesize a concise security/reliability audit from these scout results.",
       "Filter null/failed scouts. Group by severity. No file edits.",

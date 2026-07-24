@@ -41,7 +41,9 @@ export default async function () {
   const summary = await task({
     description: "Synthesize from surviving parallel slots",
     label: "synthesizer",
-    type: "general",
+    // Read-only synthesizer — "general" is write-capable and fails closed without
+    // write scope (same class as operate_read_audit; dogfood 2026-07-24).
+    type: "review",
     prompt: [
       "Build one operator-facing summary from the surviving scout results.",
       "Explicitly note which parallel slot failed or returned null.",
