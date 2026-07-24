@@ -55,10 +55,22 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, classic_shell: bo
     if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
         return 0;
     }
+    // The strip auto-fits its content: the literal selectable list plus the
+    // pinned progress receipt and the divider row. `top_height` (drag-resize
+    // / settings) and half the terminal act as caps, so a two-step plan
+    // takes two rows while an eight-step plan grows to show all eight —
+    // never a fixed-height band of blank water.
     let terminal_cap = terminal_height
         .saturating_div(2)
         .clamp(super::model::TOP_HEIGHT_MIN, super::model::TOP_HEIGHT_MAX);
-    app.work_surface.top_height.min(terminal_cap)
+    let cap = app.work_surface.top_height.min(terminal_cap);
+    let selectable = rows.iter().filter(|row| row.selectable).count();
+    let progress = u16::from(top_todo_progress(app, &rows).is_some());
+    let desired = u16::try_from(selectable)
+        .unwrap_or(u16::MAX)
+        .saturating_add(progress)
+        .saturating_add(1);
+    desired.clamp(super::model::TOP_HEIGHT_MIN, cap)
 }
 
 /// Split the transcript slot for a side rail. Top placement consumes its own

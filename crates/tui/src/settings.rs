@@ -448,7 +448,9 @@ impl Default for Settings {
             fancy_animations: true,
             ocean_treatment: "ombre".to_string(),
             work_surface_placement: "top".to_string(),
-            work_surface_top_height: 3,
+            // Cap, not fixed height: the top strip auto-fits its rows and
+            // only grows to this many lines (user request, 2026-07-23).
+            work_surface_top_height: 8,
             work_surface_side_width: 30,
             constrained_frame_rate: false,
             bracketed_paste: true,

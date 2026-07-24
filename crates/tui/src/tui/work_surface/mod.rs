@@ -494,6 +494,34 @@ mod tests {
     }
 
     #[test]
+    fn top_strip_auto_fits_step_count_up_to_caps() {
+        // Two steps: divider + progress receipt + 2 rows = 4 lines, not a
+        // fixed-height band of blank water.
+        let mut two_steps = app();
+        two_steps.work_surface.top_height = 8;
+        add_todos(&mut two_steps, 2);
+        assert_eq!(super::height(&mut two_steps, 100, 40, false), 4);
+
+        // Ten steps: content wants 12 lines, the default 8-line cap wins.
+        let mut ten_steps = app();
+        ten_steps.work_surface.top_height = 8;
+        add_todos(&mut ten_steps, 10);
+        assert_eq!(super::height(&mut ten_steps, 100, 40, false), 8);
+
+        // Short terminal: the half-terminal cap beats both content and the
+        // configured cap.
+        let mut short_terminal = app();
+        short_terminal.work_surface.top_height = 8;
+        add_todos(&mut short_terminal, 10);
+        assert_eq!(super::height(&mut short_terminal, 100, 12, false), 6);
+
+        // Nothing to show: no strip at all.
+        let mut empty = app();
+        empty.work_surface.top_height = 8;
+        assert_eq!(super::height(&mut empty, 100, 40, false), 0);
+    }
+
+    #[test]
     fn minimum_top_surface_keeps_a_numbered_todo_selectable() {
         let mut app = app();
         add_todos(&mut app, 2);
