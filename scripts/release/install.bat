@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 :: CodeWhale Windows installer
-:: Copies codewhale.exe, codew.exe, and codewhale-tui.exe to %USERPROFILE%\bin
+:: Copies codewhale.exe and codew.exe to %USERPROFILE%\bin (single binary, no codewhale-tui.exe)
 
 set "BIN_DIR=%USERPROFILE%\bin"
 set "SCRIPT_DIR=%~dp0"
@@ -19,12 +19,6 @@ if %ERRORLEVEL% neq 0 (
 copy /Y "%SCRIPT_DIR%codew.exe" "%BIN_DIR%\codew.exe" >nul
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Failed to copy codew.exe
-    exit /b 1
-)
-
-copy /Y "%SCRIPT_DIR%codewhale-tui.exe" "%BIN_DIR%\codewhale-tui.exe" >nul
-if %ERRORLEVEL% neq 0 (
-    echo ERROR: Failed to copy codewhale-tui.exe
     exit /b 1
 )
 

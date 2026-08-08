@@ -12,6 +12,8 @@ const {
   BUNDLE_CHECKSUM_MANIFEST,
   CHECKSUM_MANIFEST,
   checksummedReleaseAssetNames,
+  detectBinaryNames,
+  LEGACY_TUI_BRIDGE_ASSET_NAMES,
 } = require("../scripts/artifacts");
 const {
   assertChecksumManifestIncludes,
@@ -154,12 +156,10 @@ test("full local release fixture satisfies the public asset inventory", () => {
 
   try {
     fs.mkdirSync(buildDir, { recursive: true });
-    for (const binary of ["codewhale", "codew", "codewhale-tui"]) {
-      fs.writeFileSync(
-        path.join(buildDir, `${binary}${executableSuffix}`),
-        `fixture:${binary}\n`,
-      );
-    }
+    fs.writeFileSync(
+      path.join(buildDir, `codewhale${executableSuffix}`),
+      "fixture:codewhale\n",
+    );
 
     execFileSync(
       process.execPath,
@@ -179,6 +179,21 @@ test("full local release fixture satisfies the public asset inventory", () => {
         fs.existsSync(path.join(outputDir, assetName)),
         true,
         `missing fixture asset ${assetName}`,
+      );
+    }
+
+    const { codewhale, codew } = detectBinaryNames();
+    assert.deepEqual(
+      fs.readFileSync(path.join(outputDir, codew)),
+      fs.readFileSync(path.join(outputDir, codewhale)),
+      "codew must contain the exact same runtime bytes as codewhale",
+    );
+    for (const legacyAsset of LEGACY_TUI_BRIDGE_ASSET_NAMES) {
+      const primaryAsset = legacyAsset.replace("codewhale-tui-", "codewhale-");
+      assert.deepEqual(
+        fs.readFileSync(path.join(outputDir, legacyAsset)),
+        fs.readFileSync(path.join(outputDir, primaryAsset)),
+        `${legacyAsset} must be a byte-identical compatibility copy`,
       );
     }
 

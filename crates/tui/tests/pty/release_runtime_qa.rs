@@ -7,16 +7,13 @@
 
 #![cfg(unix)]
 
-#[path = "support/qa_harness/mod.rs"]
-mod qa_harness;
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
+use crate::qa_harness::keys;
 use anyhow::{Result, anyhow};
-use qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
-use qa_harness::keys;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -226,7 +223,7 @@ async fn mount_text_model(server: &MockServer, model: &str, answer: &str) {
         .await;
 }
 
-fn common_tui_builder(ws: &SealedWorkspace) -> qa_harness::harness::HarnessBuilder {
+fn common_tui_builder(ws: &SealedWorkspace) -> crate::qa_harness::harness::HarnessBuilder {
     Harness::builder(Harness::cargo_bin("codewhale-tui"))
         .cwd(ws.workspace())
         .clear_env()

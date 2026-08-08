@@ -3680,7 +3680,7 @@ fn builtin_visible_for_completion_match(
         return false;
     }
 
-    if user_command_shadows_builtin_canonical(builtin, user_commands) {
+    if commands::discovery::user_command_shadows_builtin_canonical(builtin, user_commands) {
         return false;
     }
 
@@ -3697,25 +3697,8 @@ fn builtin_visible_for_completion_match(
     // complete to the user command, not built-in `/attach` via its `/image`
     // alias.
     builtin.aliases.iter().any(|alias| {
-        alias_matches(alias) && !user_command_shadows_builtin_alias(alias, user_commands)
-    })
-}
-
-fn user_command_shadows_builtin_canonical(
-    builtin: &commands::CommandInfo,
-    user_commands: &[&commands::user_registry::UserCommandMetadata],
-) -> bool {
-    user_commands.iter().any(|user| {
-        user.name == builtin.name || user.aliases.iter().any(|alias| alias == builtin.name)
-    })
-}
-
-fn user_command_shadows_builtin_alias(
-    builtin_alias: &str,
-    user_commands: &[&commands::user_registry::UserCommandMetadata],
-) -> bool {
-    user_commands.iter().any(|user| {
-        user.name == builtin_alias || user.aliases.iter().any(|alias| alias == builtin_alias)
+        alias_matches(alias)
+            && !commands::discovery::user_command_shadows_builtin_alias(alias, user_commands)
     })
 }
 
@@ -3762,7 +3745,9 @@ fn push_command_entry(
             .aliases
             .iter()
             .copied()
-            .filter(|alias| !user_command_shadows_builtin_alias(alias, user_commands))
+            .filter(|alias| {
+                !commands::discovery::user_command_shadows_builtin_alias(alias, user_commands)
+            })
             .collect::<Vec<_>>();
         let hint = if !command_key.to_ascii_lowercase().starts_with(prefix_lower) {
             unshadowed_aliases
@@ -5187,6 +5172,39 @@ mod tests {
         assert!(
             !alias_hints.iter().any(|hint| hint.name == "/attach"),
             "built-in /attach should not complete through shadowed /image alias"
+        );
+    }
+
+    #[test]
+    fn slash_completion_accepted_user_alias_claims_builtin_canonical_token() {
+        // A visible user command whose accepted alias equals a built-in
+        // canonical token must own that token in completion: the built-in
+        // suggestion is absent and the user command appears for the alias.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let commands_dir = tmp.path().join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("assistant.md"),
+            "---\ndescription: My assistant\nalias: help\n---\nassistant",
+        )
+        .unwrap();
+
+        let hints = slash_completion_hints(
+            "/help",
+            128,
+            &[],
+            Locale::En,
+            Some(tmp.path()),
+            ApiProvider::Deepseek,
+        );
+
+        assert!(
+            !hints.iter().any(|hint| hint.name == "/help"),
+            "built-in /help must be absent when a user alias claims the token"
+        );
+        assert!(
+            hints.iter().any(|hint| hint.name == "/assistant"),
+            "the user command must appear for the claimed token"
         );
     }
 

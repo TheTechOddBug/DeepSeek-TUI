@@ -337,20 +337,12 @@ fn exec_shell_parallel_flags_are_input_aware() {
         ApprovalRequirement::Auto
     );
 
-    let bash_readonly = json!({"command": "bash -lc 'rg TODO crates/tui/src/tools'"});
-    assert!(tool.supports_parallel_for(&bash_readonly));
-    assert!(tool.is_read_only_for(&bash_readonly));
-    assert_eq!(
-        tool.approval_requirement_for(&bash_readonly),
-        ApprovalRequirement::Auto
-    );
-
     for input in [
         json!({"command": "fd -e rs ."}),
         json!({"command": "fd -H --type f src"}),
         json!({"command": "git grep TODO crates/tui/src/tools"}),
-        json!({"command": "bash -lc 'fd -e toml .'"}),
-        json!({"command": "bash -lc 'git grep TODO crates/tui/src/tools'"}),
+        json!({"action": "run", "command": "gh issue list --limit 10"}),
+        json!({"action": "run", "command": "gh issue view 5287"}),
     ] {
         assert!(tool.supports_parallel_for(&input), "{input:?}");
         assert!(tool.is_read_only_for(&input), "{input:?}");
@@ -363,15 +355,42 @@ fn exec_shell_parallel_flags_are_input_aware() {
 
     for input in [
         json!({"command": "git status -s", "background": true}),
+        json!({"command": "git status -s", "background": "false"}),
         json!({"command": "git status -s", "stdin": ""}),
+        json!({"action": "wait", "command": "pwd", "task_id": "shell_1"}),
+        json!({"action": "interact", "command": "pwd", "task_id": "shell_1"}),
+        json!({"action": "cancel", "command": "pwd", "task_id": "shell_1"}),
+        json!({"action": 3, "command": "pwd"}),
+        json!({"command": "pwd", "unexpected": true}),
         json!({"command": "cargo build"}),
+        json!({"command": "bash -lc 'git status'"}),
+        json!({"command": "sh -c 'rg TODO crates'"}),
+        json!({"command": "PAGER=./pwn.sh git log"}),
+        json!({"command": "GH_PAGER=./pwn.sh gh issue view 5287"}),
+        json!({"command": "rg ${9:---pre=./repo-script} needle ."}),
+        json!({"command": "rg ${9:---hostname-bin=./repo-script} needle ."}),
+        json!({"command": "fd ${9:---exec} ./repo-script"}),
+        json!({"command": "rg $PATTERN ."}),
+        json!({"command": "rg *.rs ."}),
         json!({"command": "bash -lc 'rg TODO crates | head'"}),
         json!({"command": "fd -x ./pwn.sh"}),
         json!({"command": "fd --exec ./pwn.sh"}),
         json!({"command": "fd -uHtx ./pwn.sh"}),
         json!({"command": "rg --pre /tmp/evil.sh needle ."}),
+        json!({"command": "rg --hostname-bin ./repo-script --hyperlink-format=file://{host}{path} needle ."}),
+        json!({"command": "rg --search-zip needle ."}),
+        json!({"command": "rg -z needle ."}),
         json!({"command": "git grep -O needle"}),
         json!({"command": "git grep -nO needle"}),
+        json!({"command": "git grep --textconv needle"}),
+        json!({"command": "git diff --ext-diff HEAD"}),
+        json!({"command": "git diff --textconv HEAD"}),
+        json!({"command": "git log --show-signature -1"}),
+        json!({"command": "git show --format=%GS HEAD"}),
+        json!({"command": "gh issue close 5287"}),
+        json!({"command": "gh issue view 5287 > issue.txt"}),
+        json!({"command": "gh pr checks 42 --watch"}),
+        json!({"command": "gh issue view 5287 -R git.example.com/o/r"}),
     ] {
         assert!(!tool.supports_parallel_for(&input), "{input:?}");
         assert!(!tool.is_read_only_for(&input), "{input:?}");
@@ -398,6 +417,209 @@ fn exec_shell_parallel_flags_are_input_aware() {
         "background": true,
         "interactive": true
     })));
+}
+
+#[tokio::test]
+async fn readonly_shell_refuses_raw_string_external_backend() {
+    struct Backend(std::sync::atomic::AtomicBool);
+    #[async_trait::async_trait]
+    impl crate::sandbox::backend::SandboxBackend for Backend {
+        async fn exec(
+            &self,
+            _cmd: &str,
+            _env: &std::collections::HashMap<String, String>,
+        ) -> anyhow::Result<crate::sandbox::backend::SandboxOutput> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::sandbox::backend::SandboxOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            })
+        }
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let backend = std::sync::Arc::new(Backend(std::sync::atomic::AtomicBool::new(false)));
+    let mut context = ToolContext::new(tmp.path().to_path_buf())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    context.sandbox_backend = Some(backend.clone());
+    let error = BashTool::read_only("Bash")
+        .execute(json!({"action": "run", "command": "pwd"}), &context)
+        .await
+        .expect_err("raw-string backend must not receive a classifier-approved argv")
+        .to_string();
+    assert!(error.contains("raw command string"), "{error}");
+    assert!(!backend.0.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn readonly_argv_is_shell_free_and_disables_git_helpers() {
+    let (program, args) = hardened_readonly_argv("git show HEAD").expect("argv");
+    assert_eq!(program, "git");
+    assert_eq!(
+        &args[..4],
+        [
+            "show",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-show-signature"
+        ]
+    );
+    assert_eq!(args.last().map(String::as_str), Some("HEAD"));
+
+    let (program, args) = hardened_readonly_argv("rg $PATTERN .").expect("literal argv");
+    assert_eq!(program, "rg");
+    assert_eq!(args, ["$PATTERN", "."]);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn readonly_program_resolution_ignores_workspace_shadow_executables() {
+    let workspace = tempdir().expect("workspace");
+    let trusted = tempdir().expect("trusted bin");
+    let path = std::env::join_paths([workspace.path(), trusted.path()]).expect("test PATH");
+
+    for program in ["git", "gh", "rg"] {
+        let file = if cfg!(windows) {
+            format!("{program}.exe")
+        } else {
+            program.to_string()
+        };
+        for directory in [workspace.path(), trusted.path()] {
+            let executable = directory.join(&file);
+            std::fs::write(&executable, b"fixture").expect("fixture executable");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mut permissions = executable.metadata().unwrap().permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&executable, permissions).unwrap();
+            }
+        }
+        let resolved =
+            resolve_readonly_program_from_path(program, workspace.path(), &path).expect("resolved");
+        assert_eq!(resolved, trusted.path().join(file).canonicalize().unwrap());
+        assert!(resolved.is_absolute() && !resolved.starts_with(workspace.path()));
+    }
+}
+
+#[test]
+fn readonly_child_env_removes_git_and_github_redirects() {
+    let mut command = std::process::Command::new("unused");
+    let redirects = [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_EXEC_PATH",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SSH_COMMAND",
+        "GH_CONFIG_DIR",
+        "GH_OTHER_PATH",
+    ];
+    for key in redirects {
+        command.env(key, "outside");
+    }
+    command.env(READONLY_ENV_MARKER, "1");
+    let env = HashMap::from([(READONLY_ENV_MARKER.to_string(), "1".to_string())]);
+    remove_readonly_redirect_env(&mut command, &env);
+    for key in redirects {
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == std::ffi::OsStr::new(key) && value.is_none()),
+            "{key} must be removed from the child environment"
+        );
+    }
+    assert!(
+        command
+            .get_envs()
+            .any(|(name, value)| name == READONLY_ENV_MARKER && value.is_none())
+    );
+}
+
+#[test]
+fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(workspace.path().join("inside.txt"), "inside").expect("inside file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+
+    enforce_readonly_workspace_operands("cat inside.txt", workspace.path(), workspace.path())
+        .expect("in-workspace operand");
+    for command in [
+        "cat ../secret.txt",
+        "cat ~/.ssh/id_rsa",
+        "cat /rooted-current-drive.txt",
+        "cat C:secret",
+        r"cat C:\secret",
+        r"cat \\server\share\secret",
+    ] {
+        let error =
+            enforce_readonly_workspace_operands(command, workspace.path(), workspace.path())
+                .expect_err("out-of-workspace operand must fail")
+                .to_string();
+        assert!(error.contains("inside the workspace"), "{command}: {error}");
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            workspace.path().join("secret-link"),
+        )
+        .expect("outside symlink");
+        let error = enforce_readonly_workspace_operands(
+            "cat secret-link",
+            workspace.path(),
+            workspace.path(),
+        )
+        .expect_err("symlink escape must fail")
+        .to_string();
+        assert!(error.contains("resolves outside"), "{error}");
+
+        let subdir = workspace.path().join("subdir");
+        std::fs::create_dir(&subdir).expect("subdir");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            subdir.join("secret-link"),
+        )
+        .expect("cwd-relative outside symlink");
+        enforce_readonly_workspace_operands("cat secret-link", workspace.path(), &subdir)
+            .expect_err("operands must resolve relative to the effective cwd");
+    }
+}
+
+#[test]
+fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
+    let tmp = tempdir().expect("tempdir");
+    let context = |default| {
+        ToolContext::new(tmp.path()).with_network_policy(
+            crate::network_policy::NetworkPolicyDecider::new(
+                crate::network_policy::NetworkPolicy {
+                    default,
+                    ..crate::network_policy::NetworkPolicy::default()
+                },
+                None,
+            ),
+        )
+    };
+
+    let allow = context(crate::network_policy::DecisionToml::Allow);
+    enforce_readonly_github_network_policy("gh issue view 5287", &allow)
+        .expect("allowed github.com policy");
+
+    let deny = context(crate::network_policy::DecisionToml::Deny);
+    let denied = enforce_readonly_github_network_policy("gh issue list", &deny)
+        .expect_err("deny must stop before spawning gh")
+        .to_string();
+    assert!(denied.contains("blocked by the active network policy"));
+    enforce_readonly_github_network_policy("git status", &deny)
+        .expect("local reads do not consult the network policy");
+
+    let prompt = context(crate::network_policy::DecisionToml::Prompt);
+    let prompted = enforce_readonly_github_network_policy("gh issue view 5287", &prompt)
+        .expect_err("headless Scout cannot prompt interactively")
+        .to_string();
+    assert!(prompted.contains("requires network approval"));
 }
 
 #[test]
@@ -433,6 +655,74 @@ async fn read_only_shell_policy_blocks_non_readonly_commands() {
         .expect("execute");
     assert!(!result.success);
     assert!(result.content.contains("read-only shell policy"));
+
+    for command in [
+        "git --config-env=core.fsmonitor=SHELL status",
+        "git -cdiff.foo.textconv=./repo-script diff HEAD",
+        "rg -f/etc/passwd needle .",
+    ] {
+        let result = tool
+            .execute(json!({"command": command}), &ctx)
+            .await
+            .expect("classifier refusal");
+        assert!(!result.success, "{command}: {}", result.content);
+        assert!(
+            result.content.contains("read-only shell policy"),
+            "{command}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_shell_resolves_operands_from_the_effective_cwd() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let subdir = workspace.path().join("subdir");
+    std::fs::create_dir(&subdir).expect("subdir");
+    std::fs::write(outside.path().join("secret"), "secret").expect("outside secret");
+    std::os::unix::fs::symlink(outside.path().join("secret"), subdir.join("secret-link"))
+        .expect("symlink");
+    let ctx = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({"action": "run", "command": "cat secret-link", "cwd": "subdir"}),
+            &ctx,
+        )
+        .await
+        .expect_err("cwd-relative symlink escape must fail before spawn")
+        .to_string();
+    assert!(error.contains("resolves outside"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_shell_skips_shell_env_hooks() {
+    let tmp = tempdir().expect("tempdir");
+    let marker = tmp.path().join("hook-ran");
+    let hook = crate::hooks::Hook::new(
+        crate::hooks::HookEvent::ShellEnv,
+        &format!("printf hit > '{}'", marker.display()),
+    );
+    let executor = crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![hook],
+            ..crate::hooks::HooksConfig::default()
+        },
+        tmp.path().to_path_buf(),
+    );
+    let mut context = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    context.runtime.hook_executor = Some(std::sync::Arc::new(executor));
+
+    let result = BashTool::read_only("Bash")
+        .execute(json!({"command": "pwd"}), &context)
+        .await
+        .expect("read-only inspection");
+    assert!(result.success, "{}", result.content);
+    assert!(!marker.exists(), "shell_env hook must not run for ReadOnly");
 }
 
 #[tokio::test]

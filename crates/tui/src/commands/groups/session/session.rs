@@ -80,6 +80,100 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
     }
 }
 
+/// Fork a specific session by id/prefix into a new sibling session and switch to it.
+/// This implements `/fork <session_id>` for picker-based forking (#576).
+pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandResult {
+    if app.session_transition_blocked() {
+        return CommandResult::error(
+            "Cannot fork a session while runtime work is active. Wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work first.",
+        );
+    }
+    let manager = match crate::session_manager::SessionManager::default_location() {
+        Ok(m) => m,
+        Err(err) => {
+            return CommandResult::error(format!("could not open sessions directory: {err}"));
+        }
+    };
+    let source = manager
+        .load_session(session_id_or_prefix)
+        .or_else(|_| manager.load_session_by_prefix(session_id_or_prefix));
+    let mut source_session = match source {
+        Ok(s) => s,
+        Err(e) => {
+            return CommandResult::error(format!(
+                "could not load session '{}': {e}",
+                session_id_or_prefix
+            ));
+        }
+    };
+    source_session.ensure_journal();
+    let journal = source_session.journal.clone().unwrap_or_else(|| {
+        crate::session_tree::SessionJournal::from_messages(
+            source_session.messages.clone(),
+            source_session.metadata.spawn_depth,
+        )
+    });
+    let forked_journal = journal.fork_from(None).unwrap_or_else(|_| {
+        crate::session_tree::SessionJournal::with_spawn_depth(
+            source_session.metadata.spawn_depth.saturating_add(1),
+        )
+    });
+    let messages = forked_journal.to_messages();
+    let mut forked = crate::session_manager::create_saved_session_with_id_and_mode(
+        uuid::Uuid::new_v4().to_string(),
+        &messages,
+        &source_session.metadata.model,
+        &app.workspace,
+        source_session.metadata.total_tokens,
+        source_session
+            .system_prompt
+            .as_ref()
+            .map(|s| crate::models::SystemPrompt::Text(s.clone()))
+            .as_ref(),
+        source_session.metadata.mode.as_deref(),
+    );
+    forked.journal = Some(forked_journal);
+    forked.leaf_id = forked.journal.as_ref().and_then(|j| j.leaf_id.clone());
+    forked.messages = messages;
+    forked.metadata.spawn_depth = forked.journal.as_ref().map(|j| j.spawn_depth).unwrap_or(0);
+    forked.metadata.parent_session_id = Some(source_session.metadata.id.clone());
+    forked.metadata.forked_from_message_count = Some(source_session.metadata.message_count);
+    forked.metadata.set_model_provider_route(
+        source_session.metadata.model_provider.as_str(),
+        source_session.metadata.model_provider_id.as_deref(),
+    );
+    forked.metadata.copy_cost_from(&source_session.metadata);
+    forked.context_references = source_session.context_references.clone();
+    forked.artifacts = source_session.artifacts.clone();
+    forked.work_state = source_session.work_state.clone();
+    forked.last_auto_route = source_session.last_auto_route.clone();
+    if let Err(err) = manager.save_session(&forked) {
+        return CommandResult::error(format!("Failed to save forked session: {err}"));
+    }
+    app.current_session_id = Some(forked.metadata.id.clone());
+    app.current_session_metadata = Some(forked.metadata.clone());
+    app.session_title = Some(forked.metadata.title.clone());
+    let parent_label = crate::session_manager::truncate_id(&source_session.metadata.id).to_string();
+    let fork_label = crate::session_manager::truncate_id(&forked.metadata.id).to_string();
+    CommandResult::with_message_and_action(
+        format!(
+            "Forked session {parent_label} -> {fork_label} (spawn_depth {})",
+            forked.metadata.spawn_depth
+        ),
+        AppAction::SyncSession {
+            session_id: Some(forked.metadata.id.clone()),
+            messages: forked.messages.clone(),
+            system_prompt: forked
+                .system_prompt
+                .as_ref()
+                .map(|s| crate::models::SystemPrompt::Text(s.clone())),
+            model: forked.metadata.model.clone(),
+            workspace: app.workspace.clone(),
+            mode: app.mode,
+        },
+    )
+}
+
 /// Fork the active conversation into a new saved sibling session and switch to it.
 pub fn fork(app: &mut App) -> CommandResult {
     if app.session_transition_blocked() {
@@ -153,6 +247,14 @@ pub fn fork(app: &mut App) -> CommandResult {
         .metadata
         .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     forked.metadata.copy_cost_from(&parent.metadata);
+    forked.metadata.spawn_depth = parent.metadata.spawn_depth.saturating_add(1);
+    // Ensure journal for both sessions: parent already has one from factory, bump forked's journal depth
+    if let Some(j) = forked.journal.as_mut() {
+        j.spawn_depth = forked.metadata.spawn_depth;
+    }
+    if let Some(j) = parent.journal.as_mut() {
+        j.spawn_depth = parent.metadata.spawn_depth;
+    }
     forked.metadata.mark_forked_from(&parent.metadata);
     forked.context_references = app.session_context_references.clone();
     forked.artifacts = app.session_artifacts.clone();
@@ -228,7 +330,7 @@ pub fn new_session(app: &mut App, arg: Option<&str>) -> CommandResult {
     app.tool_evidence.clear();
     app.current_session_id = Some(new_id.clone());
     app.current_session_metadata = None;
-    app.session_title = Some("New Session".to_string());
+    app.session_title = Some(crate::session_manager::DEFAULT_SESSION_TITLE.to_string());
     app.scroll_to_bottom();
 
     CommandResult::with_message_and_action(

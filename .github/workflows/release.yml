@@ -270,7 +270,6 @@ jobs:
           docker pull "${IMAGE}"
           docker run --rm --entrypoint codewhale "${IMAGE}" --version
           docker run --rm --entrypoint codew "${IMAGE}" --version
-          docker run --rm --entrypoint codewhale-tui "${IMAGE}" --version
 
   release:
     needs: [artifacts, docker, resolve]

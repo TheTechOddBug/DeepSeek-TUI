@@ -99,13 +99,12 @@ claim one.
 ## When anything is sent, and where
 
 Nothing is sent at all unless telemetry resolved on **and** the first-run notice
-was answered with "Enable" on this machine. Given both, there are exactly two
-flush points: a startup drain, at most once every six hours, that recovers
-events a crashed or signalled prior session left behind; and one attempt during
-shutdown, bounded at three seconds. There is no mid-session flush, no per-turn
-flush, and no per-tool-call flush. Both re-resolve your setting from disk
-immediately beforehand, so `codewhale config set telemetry false` written from
-another terminal stops the flush of a session that is already running.
+was answered with "Enable" on this machine. Given both, there is exactly one
+flush point: an attempt during shutdown, bounded at three seconds. There is no
+startup flush, mid-session flush, per-turn flush, or per-tool-call flush. The
+shutdown flush re-resolves your setting from disk immediately beforehand, so
+`codewhale config set telemetry false` written from another terminal stops the
+flush of a session that is already running.
 
 A flush is **one `POST`** to the resolved endpoint — by default
 `https://telemetry.codewhale.net/v1/telemetry`. The request carries a
@@ -304,4 +303,3 @@ Prompts; completions; tool arguments; diffs; patches; file contents; filenames; 
 Two named traps for the implementer. `crates/state/src/lib.rs` persists `git_sha`, `git_branch`, `git_origin_url`, `cwd`, and `path` on the threads table (`:88, :394, :648`): a payload builder that accepts a `Thread` or `ThreadMeta` and derives `Serialize` breaches the contract in one line. **Never derive `Serialize` over an existing state type** — build every telemetry struct from scratch with explicit fields. And `crates/core/src/lib.rs:1381-1390` is the one place in the tree where the word `telemetry` sits inside a JSON object next to `prompt`, `base_url`, and `has_api_key`. It is the object someone will copy. Do not.
 
 ---
-

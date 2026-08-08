@@ -5,7 +5,7 @@
 # Run:    docker run --rm -it -e DEEPSEEK_API_KEY -v codewhale-home:/home/codewhale/.codewhale codewhale
 #
 # The image ships the canonical binaries (`codewhale`, `codew`, and
-# `codewhale-tui`) in a minimal runtime layer.
+# `codewhale`) in a minimal runtime layer.
 #
 # API keys MUST be passed at runtime (never baked into the image):
 #   docker run --rm -it -e DEEPSEEK_API_KEY codewhale
@@ -53,18 +53,18 @@ RUN rustup target add "$(cat /rust-target)"
 WORKDIR /build
 COPY . .
 
-# Build both binaries for the target platform.  --locked ensures
-# reproducible builds from the committed lockfile.
+# Build the one runtime for the target platform. Expose the same verified
+# bytes under both supported command names. --locked keeps the build
+# reproducible from the committed lockfile.
 RUN --mount=type=cache,id=codewhale-target-${TARGETARCH},target=/build/target,sharing=locked \
     --mount=type=cache,id=codewhale-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewhale-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     rustup target add "$(cat /rust-target)" \
     && cargo build --release --locked --target "$(cat /rust-target)" \
-      -p codewhale-cli -p codewhale-tui \
+      -p codewhale-cli \
     && mkdir -p /out \
     && cp target/$(cat /rust-target)/release/codewhale /out/ \
-    && cp target/$(cat /rust-target)/release/codew /out/ \
-    && cp target/$(cat /rust-target)/release/codewhale-tui /out/
+    && cp target/$(cat /rust-target)/release/codewhale /out/codew
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -86,10 +86,8 @@ WORKDIR /home/codewhale
 
 COPY --from=builder --chown=codewhale:codewhale /out/codewhale /usr/local/bin/codewhale
 COPY --from=builder --chown=codewhale:codewhale /out/codew /usr/local/bin/codew
-COPY --from=builder --chown=codewhale:codewhale /out/codewhale-tui /usr/local/bin/codewhale-tui
 
-# The dispatcher expects to find its companion binary next to it.
-# Both are in /usr/local/bin — no further path setup needed.
+# `codewhale` and `codew` are two command names for the same runtime.
 
 ENTRYPOINT ["codewhale"]
 CMD []

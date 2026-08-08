@@ -3207,6 +3207,36 @@ fn error_severity_cell_renders_in_red() {
     assert_eq!(body_span.style.fg, Some(palette::STATUS_ERROR));
 }
 
+/// A multiline engine failure may extend below the visible terminal even
+/// though its full text remains in history. The live cell must advertise the
+/// dedicated pager, while pager/transcript rendering must contain the exact
+/// recovery instruction without recursively advertising itself.
+#[test]
+fn error_cell_advertises_full_message_pager_and_preserves_recovery_text() {
+    let recovery = "Refusing insecure base URL 'http://192.168.1.25:8000/v1'.\n\
+Loopback hosts (localhost, 127.0.0.1, [::1]) are auto-allowed.\n\
+Set CODEWHALE_ALLOW_INSECURE_HTTP=1 only for a trusted LAN host.";
+    let cell = HistoryCell::Error {
+        message: recovery.to_string(),
+        severity: crate::error_taxonomy::ErrorSeverity::Error,
+    };
+
+    let live_text = lines_text(&cell.lines(48));
+    let transcript_text = lines_text(&cell.transcript_lines(200));
+    let hint = crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full error");
+
+    assert!(live_text.contains(&hint), "{live_text}");
+    assert!(!transcript_text.contains(&hint), "{transcript_text}");
+    assert!(
+        transcript_text.contains("CODEWHALE_ALLOW_INSECURE_HTTP=1"),
+        "{transcript_text}"
+    );
+    assert!(
+        transcript_text.contains("192.168.1.25"),
+        "{transcript_text}"
+    );
+}
+
 /// `Warning`-severity uses amber, not red — distinguishes a transient
 /// retry hiccup from a hard failure.
 #[test]

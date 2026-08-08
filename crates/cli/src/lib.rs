@@ -1262,9 +1262,49 @@ fn workflow_exec_command(spec: WorkflowExecSpec<'_>) -> Result<WorkflowProcessSp
         "--input-json".to_string(),
         input_json,
     ];
-    let command =
-        build_tui_command_with_paths(cli, resolved_runtime, passthrough, Some(config_path), None)?;
-    lane_process_spec_from_command(&command)
+    let argv = {
+        // Build argv with explicit config path like the previous dispatcher did.
+        let mut args = Vec::new();
+        let executable = std::env::current_exe()
+            .context("resolve current Codewhale executable for workflow lane")?;
+        let executable = executable.into_os_string().into_string().map_err(|path| {
+            anyhow!(
+                "current Codewhale executable path is not valid UTF-8: {}",
+                PathBuf::from(path).display()
+            )
+        })?;
+        args.push(executable);
+        // config_path is the explicit workflow config path; prefer it over cli.config
+        let cfg = Some(config_path);
+        if let Some(cp) = cfg {
+            args.push("--config".to_string());
+            args.push(cp.display().to_string());
+        } else if let Some(cp) = cli.config.as_deref() {
+            args.push("--config".to_string());
+            args.push(cp.display().to_string());
+        }
+        if let Some(profile) = cli.profile.as_ref() {
+            args.push("--profile".to_string());
+            args.push(profile.clone());
+        }
+
+        if cli.mouse_capture {
+            args.push("--mouse-capture".to_string());
+        }
+        if cli.no_mouse_capture {
+            args.push("--no-mouse-capture".to_string());
+        }
+        if cli.skip_onboarding {
+            args.push("--skip-onboarding".to_string());
+        }
+        if cli.no_project_config {
+            args.push("--no-project-config".to_string());
+        }
+        args.extend(passthrough.clone());
+        args
+    };
+    apply_tui_env(cli, resolved_runtime, &passthrough);
+    lane_process_spec_from_argv(&argv)
 }
 
 fn valid_lane_environment_key(key: &str) -> bool {
@@ -1282,14 +1322,7 @@ fn shell_owned_lane_environment(key: &str) -> bool {
     )
 }
 
-fn lane_process_spec_from_command(command: &Command) -> Result<WorkflowProcessSpec> {
-    let mut argv = Vec::new();
-    argv.push(command.get_program().to_string_lossy().into_owned());
-    argv.extend(
-        command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned()),
-    );
+fn lane_process_spec_from_argv(argv: &[String]) -> Result<WorkflowProcessSpec> {
     let mut environment = std::collections::BTreeMap::new();
     for (key, value) in std::env::vars_os() {
         let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
@@ -1299,25 +1332,8 @@ fn lane_process_spec_from_command(command: &Command) -> Result<WorkflowProcessSp
             environment.insert(key.to_string(), value.to_string());
         }
     }
-    for (key, value) in command.get_envs() {
-        let key = key
-            .to_str()
-            .context("workflow runtime environment key is not UTF-8")?
-            .to_string();
-        if let Some(value) = value {
-            environment.insert(
-                key,
-                value
-                    .to_str()
-                    .context("workflow runtime environment value is not UTF-8")?
-                    .to_string(),
-            );
-        } else {
-            environment.remove(&key);
-        }
-    }
     Ok(WorkflowProcessSpec {
-        command: argv,
+        command: argv.to_vec(),
         environment: environment.into_iter().collect(),
     })
 }
@@ -1711,7 +1727,7 @@ fn run() -> Result<()> {
         && let Some((resolved_runtime, passthrough)) =
             prepare_raw_provider_tui_dispatch(&cli, command.as_ref(), &runtime_overrides)?
     {
-        return delegate_to_tui(&cli, &resolved_runtime, passthrough);
+        return run_tui_in_process(&cli, &resolved_runtime, passthrough);
     }
 
     let mut store = ConfigStore::load(cli.config.clone()).map_err(|error| {
@@ -1724,24 +1740,24 @@ fn run() -> Result<()> {
     match command {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, args.args)
+            run_tui_in_process(&cli, &resolved_runtime, args.args)
         }
         Some(Commands::Doctor(args)) => {
             let resolved_runtime =
                 resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("doctor", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("doctor", args))
         }
         Some(Commands::Models(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("models", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("models", args))
         }
         Some(Commands::Speech(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("speech", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("speech", args))
         }
         Some(Commands::Sessions(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("sessions", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("sessions", args))
         }
         Some(Commands::Resume(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -1751,15 +1767,15 @@ fn run() -> Result<()> {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let mut passthrough = vec!["--remote-control".to_string()];
             passthrough.extend(args.args);
-            delegate_to_tui(&cli, &resolved_runtime, passthrough)
+            run_tui_in_process(&cli, &resolved_runtime, passthrough)
         }
         Some(Commands::Fork(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("fork", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("fork", args))
         }
         Some(Commands::Init(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("init", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("init", args))
         }
         Some(Commands::Setup(args)) => {
             let resolved_runtime = if setup_is_status_report(&args) {
@@ -1767,24 +1783,24 @@ fn run() -> Result<()> {
             } else {
                 resolve_runtime_for_dispatch(&mut store, &runtime_overrides)
             };
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("setup", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("setup", args))
         }
         Some(Commands::RemoteSetup(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, remote_setup_tui_args(args))
+            run_tui_in_process(&cli, &resolved_runtime, remote_setup_tui_args(args))
         }
         Some(Commands::Exec(args)) => {
             reject_exec_global_flags(&args.args)?;
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("exec", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("exec", args))
         }
         Some(Commands::Fleet(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("fleet", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("fleet", args))
         }
         Some(Commands::WorkflowTool(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("workflow-tool", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("workflow-tool", args))
         }
         Some(Commands::LaneLogProxy(_)) => unreachable!("lane log proxy dispatched above"),
         Some(Commands::Workflow(args)) => {
@@ -1795,44 +1811,44 @@ fn run() -> Result<()> {
         Some(Commands::Lane(args)) => run_lane_command(args),
         Some(Commands::Review(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("review", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("review", args))
         }
         Some(Commands::Apply(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("apply", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("apply", args))
         }
         Some(Commands::Eval(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("eval", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("eval", args))
         }
         Some(Commands::Mcp(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("mcp", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("mcp", args))
         }
         Some(Commands::Features(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("features", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("features", args))
         }
         Some(Commands::Serve(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             // `serve` starts a long-running runtime API listener; supervise the
             // delegated child so it is torn down with the dispatcher (#3259).
-            delegate_server_to_tui(&cli, &resolved_runtime, tui_args("serve", args))
+            run_tui_server_in_process(&cli, &resolved_runtime, tui_args("serve", args))
         }
         Some(Commands::Web(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_server_to_tui(&cli, &resolved_runtime, web_serve_passthrough(&args))
+            run_tui_server_in_process(&cli, &resolved_runtime, web_serve_passthrough(&args))
         }
         Some(Commands::Completions(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("completions", args))
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("completions", args))
         }
         Some(Commands::Login(args)) => run_login_command(&mut store, args),
         Some(Commands::Logout) => run_logout_command(&mut store),
         Some(Commands::Auth(args)) => match args.command {
             AuthCommand::XaiDevice => {
                 let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-                delegate_to_tui(
+                run_tui_in_process(
                     &cli,
                     &resolved_runtime,
                     vec!["auth".to_string(), "xai-device".to_string()],
@@ -1944,7 +1960,7 @@ fn run() -> Result<()> {
         None => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let forwarded = root_tui_passthrough(&cli)?;
-            delegate_to_tui(&cli, &resolved_runtime, forwarded)
+            run_tui_in_process(&cli, &resolved_runtime, forwarded)
         }
     }
 }
@@ -3449,7 +3465,17 @@ fn run_auth_command_with_secrets_and_runtime(
 ) -> Result<()> {
     match command {
         AuthCommand::XaiDevice => {
-            bail!("xAI device authentication must be delegated to codewhale-tui")
+            let argv = vec![
+                "codewhale".to_string(),
+                "auth".to_string(),
+                "xai-device".to_string(),
+            ];
+            let code = codewhale_tui::run(argv);
+            std::process::exit(if code == std::process::ExitCode::SUCCESS {
+                0
+            } else {
+                1
+            })
         }
         AuthCommand::ExternalConsent {
             provider,
@@ -4039,6 +4065,7 @@ fn run_model_command(
             let canonical = match trimmed.to_ascii_lowercase().as_str() {
                 "pro" | "deepseek-v4pro" => "deepseek-v4-pro",
                 "flash" | "deepseek-v4flash" => "deepseek-v4-flash",
+                "auto" => "auto",
                 _ => trimmed,
             };
             store.config.default_text_model = Some(canonical.to_string());
@@ -4075,16 +4102,16 @@ fn run_thread_command(
 ) -> Result<()> {
     // `thread resume`/`thread fork` start a full interactive session in the TUI
     // binary, so they delegate exactly like the top-level `resume` does —
-    // through `build_tui_command`, which forwards `--config` and states the
+    // through dispatcher, which forwards `--config` and states the
     // resolved telemetry value in the child's environment. They used to take a
-    // bare `Command::new(tui).args(args)` that forwarded neither, so a session
+    // bare command invocation that forwarded neither, so a session
     // launched this way re-resolved from `$CODEWHALE_HOME/config.toml` with no
     // overrides and armed telemetry even when the user had passed
     // `--telemetry false` or pointed `--config` at a file that said
     // `telemetry = false`.
     if let Some(passthrough) = thread_delegation(&command) {
         let resolved_runtime = resolve_runtime_for_dispatch(store, runtime_overrides);
-        return delegate_to_tui(cli, &resolved_runtime, passthrough);
+        return run_tui_in_process(cli, &resolved_runtime, passthrough);
     }
     let state = StateStore::open(None)?;
     match command {
@@ -4179,7 +4206,11 @@ fn run_app_server_command(
     if args.http || args.mobile {
         // Delegated runtime API listener — supervise it so the child does not
         // outlive the dispatcher (#3259).
-        return delegate_server_to_tui(cli, resolved_runtime, app_server_serve_passthrough(&args));
+        return run_tui_server_in_process(
+            cli,
+            resolved_runtime,
+            app_server_serve_passthrough(&args),
+        );
     }
 
     // Everything below runs the app-server *in this process*, which is why the
@@ -4342,24 +4373,11 @@ fn persist_mcp_server_definitions(
     store.save()
 }
 
-fn delegate_to_tui(
-    cli: &Cli,
-    resolved_runtime: &ResolvedRuntimeOptions,
-    passthrough: Vec<String>,
-) -> Result<()> {
-    let mut cmd = build_tui_command(cli, resolved_runtime, passthrough)?;
-    let tui = PathBuf::from(cmd.get_program());
-    let status = cmd
-        .status()
-        .map_err(|err| anyhow!("{}", tui_spawn_error(&tui, &err)))?;
-    exit_with_tui_status(status)
-}
-
 /// Delegate a long-running server command (`serve --http`/`--mobile`,
 /// `app-server --http`/`--mobile`) to the sibling TUI binary, supervising the
 /// child so its listener does not outlive the dispatcher (#3259).
 ///
-/// Plain [`delegate_to_tui`] blocks on `Command::status()`, which reaps the
+/// Plain [`run_tui_in_process`] blocks on `Command::status()`, which reaps the
 /// child only on the child's own exit. If the dispatcher is terminated while
 /// the delegated server is still running, the child can be reparented and keep
 /// its listener bound. Here the child runs under a Tokio supervisor that
@@ -4374,130 +4392,24 @@ fn delegate_to_tui(
 /// kill-on-job-close Job Object so closing the dispatcher's handle (which the
 /// OS does on process death) terminates it. macOS has no equivalent primitive,
 /// so an uncatchable dispatcher death there can still orphan the child.
-fn delegate_server_to_tui(
-    cli: &Cli,
-    resolved_runtime: &ResolvedRuntimeOptions,
-    passthrough: Vec<String>,
-) -> Result<()> {
-    let mut std_cmd = build_tui_command(cli, resolved_runtime, passthrough)?;
-    install_server_parent_death_signal(&mut std_cmd);
-    let tui = PathBuf::from(std_cmd.get_program());
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create server-teardown runtime")?;
-    runtime.block_on(async move {
-        let mut cmd = tokio::process::Command::from(std_cmd);
-        cmd.kill_on_drop(true);
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| anyhow!("{}", tui_spawn_error(&tui, &err)))?;
-        // Windows: hold a kill-on-job-close Job Object for the dispatcher's
-        // lifetime so an uncatchable dispatcher death tears the child down.
-        // Bound for the whole `block_on` scope; never dropped early because the
-        // match arms below `std::process::exit`.
-        #[cfg(windows)]
-        let _child_job = attach_server_child_job(&child);
-        match supervise_server_child(&mut child, server_shutdown_signal()).await? {
-            ServerTeardown::Exited(status) => exit_with_tui_status(status),
-            // The child has been killed and reaped; exit with the conventional
-            // 128 + signal code for the signal that initiated the shutdown.
-            ServerTeardown::Signaled(code) => std::process::exit(code),
-        }
-    })
-}
 
 /// On Linux, ask the kernel to terminate the delegated server if the dispatcher
 /// dies before it can run the graceful shutdown supervisor. This covers the
 /// hard parent-death edge of #3259 for `SIGKILL`, OOM, or abrupt process exit.
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-fn install_server_parent_death_signal(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: `pre_exec` runs in the child between fork and exec. The closure
-    // only calls `libc::prctl` with constant arguments and does not touch heap
-    // memory or parent-held locks.
-    unsafe {
-        cmd.pre_exec(|| {
-            let result = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
-            if result == -1 {
-                // Best effort: the child only loses this OS-level safety net.
-                let _ = std::io::Error::last_os_error();
-            }
-            Ok(())
-        });
-    }
-}
-
 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-fn install_server_parent_death_signal(_cmd: &mut Command) {}
 
 /// Outcome of supervising a delegated server child.
 #[derive(Debug)]
-enum ServerTeardown {
-    /// The child exited on its own; its status is carried for propagation.
-    Exited(std::process::ExitStatus),
-    /// A shutdown signal fired; the child was killed and reaped. Carries the
-    /// conventional `128 + signal` exit code to propagate.
-    Signaled(i32),
-}
 
 /// Wait for the server `child` to exit, or for `shutdown` to fire first. On
 /// shutdown, kill the child and reap it so no listener is left reparented.
-async fn supervise_server_child<F>(
-    child: &mut tokio::process::Child,
-    shutdown: F,
-) -> io::Result<ServerTeardown>
-where
-    F: std::future::Future<Output = i32>,
-{
-    tokio::select! {
-        status = child.wait() => Ok(ServerTeardown::Exited(status?)),
-        code = shutdown => {
-            // Send the kill, then wait so the PID is reaped before the
-            // dispatcher returns and exits.
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            Ok(ServerTeardown::Signaled(code))
-        }
-    }
-}
 
 /// Resolve when the dispatcher should tear down a delegated server child, and
 /// the conventional `128 + signal` exit code to propagate: Ctrl+C on every
 /// platform (130), plus SIGTERM (143) and SIGHUP (129) on Unix.
 #[cfg(unix)]
-async fn server_shutdown_signal() -> i32 {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut terminate = signal(SignalKind::terminate()).ok();
-    let mut hangup = signal(SignalKind::hangup()).ok();
-    let term = async {
-        match terminate.as_mut() {
-            Some(s) => {
-                s.recv().await;
-            }
-            None => std::future::pending::<()>().await,
-        }
-    };
-    let hup = async {
-        match hangup.as_mut() {
-            Some(s) => {
-                s.recv().await;
-            }
-            None => std::future::pending::<()>().await,
-        }
-    };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => 130,
-        _ = term => 143,
-        _ = hup => 129,
-    }
-}
-
 #[cfg(not(unix))]
-async fn server_shutdown_signal() -> i32 {
-    let _ = tokio::signal::ctrl_c().await;
-    130
-}
 
 /// Assign the delegated server `child` to a kill-on-job-close Job Object so the
 /// OS terminates it when the dispatcher's handle to the job closes — which it
@@ -4506,137 +4418,11 @@ async fn server_shutdown_signal() -> i32 {
 /// returns `None` if the job cannot be created or assigned. Mirrors the Job
 /// Object idiom in `crates/tui/src/tools/shell.rs`.
 #[cfg(windows)]
-fn attach_server_child_job(child: &tokio::process::Child) -> Option<ServerChildJob> {
-    let Some(child_handle) = child.raw_handle() else {
-        tracing::warn!("delegated server child exited before a job object could be attached");
-        return None;
-    };
-
-    match ServerChildJob::attach(child_handle) {
-        Ok(job) => Some(job),
-        Err(err) => {
-            tracing::warn!("failed to place delegated server child in a job object: {err}");
-            None
-        }
-    }
-}
-
 #[cfg(windows)]
-struct ServerChildJob {
-    handle: windows::Win32::Foundation::HANDLE,
-}
-
 // SAFETY: the wrapped value is a process-wide kernel handle; moving it across
 // threads does not invalidate it, and it is only ever closed once, on drop.
 #[cfg(windows)]
 unsafe impl Send for ServerChildJob {}
-
-#[cfg(windows)]
-impl ServerChildJob {
-    fn attach(child_handle: std::os::windows::io::RawHandle) -> std::io::Result<Self> {
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject,
-        };
-        use windows::core::PCWSTR;
-
-        // SAFETY: FFI calls with valid arguments; results are checked via the
-        // `windows` Result wrappers and the handle is stored for close-on-drop.
-        let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(win_io_error)?;
-        let job = Self { handle };
-
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        unsafe {
-            SetInformationJobObject(
-                job.handle,
-                JobObjectExtendedLimitInformation,
-                &limits as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-            .map_err(win_io_error)?;
-            AssignProcessToJobObject(job.handle, HANDLE(child_handle)).map_err(win_io_error)?;
-        }
-        Ok(job)
-    }
-}
-
-#[cfg(windows)]
-impl Drop for ServerChildJob {
-    fn drop(&mut self) {
-        // Closing the last handle triggers KILL_ON_JOB_CLOSE. On a normal return
-        // the child has already been reaped, so this is a no-op cleanup; an
-        // uncatchable dispatcher death closes the handle via the OS instead.
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn win_io_error(err: windows::core::Error) -> std::io::Error {
-    std::io::Error::other(err)
-}
-
-#[cfg(all(test, unix))]
-mod server_teardown_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn supervisor_propagates_child_exit_when_no_shutdown() {
-        // `true` exits immediately with success; a never-firing shutdown must
-        // let the child's own exit win.
-        let mut child = tokio::process::Command::new("true")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn true");
-        let outcome = supervise_server_child(&mut child, std::future::pending::<i32>())
-            .await
-            .expect("supervise");
-        match outcome {
-            ServerTeardown::Exited(status) => assert!(status.success()),
-            other => panic!("expected Exited, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn shutdown_signal_kills_and_reaps_long_running_child() {
-        // A long-lived child stands in for the delegated server listener; the
-        // regression is that it outlives dispatcher teardown (#3259).
-        let mut child = tokio::process::Command::new("sleep")
-            .arg("30")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn sleep");
-        assert!(
-            child.id().is_some(),
-            "child should be running before shutdown"
-        );
-        // A ready future models an immediate shutdown signal carrying the
-        // SIGTERM exit code (143).
-        let outcome = supervise_server_child(&mut child, async { 143 })
-            .await
-            .expect("supervise");
-        assert!(matches!(outcome, ServerTeardown::Signaled(143)));
-        // Once supervise returns the child has been killed AND reaped, so tokio
-        // drops the recorded pid — no listener is left reparented.
-        assert!(
-            child.id().is_none(),
-            "delegated child must be reaped after dispatcher teardown"
-        );
-    }
-
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[test]
-    fn parent_death_signal_hook_does_not_break_spawn() {
-        let mut cmd = Command::new("true");
-        install_server_parent_death_signal(&mut cmd);
-        let status = cmd.status().expect("spawn true with parent-death hook");
-        assert!(status.success());
-    }
-}
 
 fn run_resume_command(
     cli: &Cli,
@@ -4647,20 +4433,22 @@ fn run_resume_command(
     if should_pick_resume_in_dispatcher(&passthrough, cfg!(windows)) {
         return run_dispatcher_resume_picker(cli, resolved_runtime);
     }
-    delegate_to_tui(cli, resolved_runtime, passthrough)
+    run_tui_in_process(cli, resolved_runtime, passthrough)
 }
 
 fn run_dispatcher_resume_picker(
     cli: &Cli,
     resolved_runtime: &ResolvedRuntimeOptions,
 ) -> Result<()> {
-    let mut sessions_cmd = build_tui_command(cli, resolved_runtime, vec!["sessions".to_string()])?;
-    let tui = PathBuf::from(sessions_cmd.get_program());
-    let status = sessions_cmd
-        .status()
-        .map_err(|err| anyhow!("{}", tui_spawn_error(&tui, &err)))?;
-    if !status.success() {
-        return exit_with_tui_status(status);
+    let argv = tui_argv(cli, vec!["sessions".to_string()]);
+    apply_tui_env(cli, resolved_runtime, &argv);
+    let code = codewhale_tui::run(argv);
+    if code != std::process::ExitCode::SUCCESS {
+        std::process::exit(if code == std::process::ExitCode::SUCCESS {
+            0
+        } else {
+            1
+        })
     }
 
     println!();
@@ -4678,7 +4466,7 @@ fn run_dispatcher_resume_picker(
         bail!("No session selected.");
     }
 
-    delegate_to_tui(
+    run_tui_in_process(
         cli,
         resolved_runtime,
         vec!["resume".to_string(), session_id.to_string()],
@@ -4689,28 +4477,68 @@ fn should_pick_resume_in_dispatcher(passthrough: &[String], is_windows: bool) ->
     is_windows && passthrough == ["resume"]
 }
 
-fn build_tui_command(
+fn run_tui_in_process(
     cli: &Cli,
     resolved_runtime: &ResolvedRuntimeOptions,
     passthrough: Vec<String>,
-) -> Result<Command> {
-    build_tui_command_with_paths(
-        cli,
-        resolved_runtime,
-        passthrough,
-        cli.config.as_deref(),
-        cli.workspace.as_deref(),
-    )
+) -> Result<()> {
+    let argv = tui_argv(cli, passthrough.clone());
+    apply_tui_env(cli, resolved_runtime, &passthrough);
+    let code = codewhale_tui::run(argv);
+    std::process::exit(if code == std::process::ExitCode::SUCCESS {
+        0
+    } else {
+        1
+    })
 }
 
-fn build_tui_command_with_paths(
+fn run_tui_server_in_process(
     cli: &Cli,
     resolved_runtime: &ResolvedRuntimeOptions,
     passthrough: Vec<String>,
-    config_path: Option<&Path>,
-    workspace_path: Option<&Path>,
-) -> Result<Command> {
-    let tui = locate_sibling_tui_binary()?;
+) -> Result<()> {
+    let argv = tui_argv(cli, passthrough.clone());
+    apply_tui_env(cli, resolved_runtime, &passthrough);
+    let code = codewhale_tui::run(argv);
+    std::process::exit(if code == std::process::ExitCode::SUCCESS {
+        0
+    } else {
+        1
+    })
+}
+
+fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
+    let mut args = Vec::new();
+    args.push("codewhale".to_string());
+    if let Some(config) = cli.config.as_deref() {
+        args.push("--config".to_string());
+        args.push(config.display().to_string());
+    }
+    if let Some(profile) = cli.profile.as_ref() {
+        args.push("--profile".to_string());
+        args.push(profile.clone());
+    }
+    if let Some(workspace) = cli.workspace.as_deref() {
+        args.push("--workspace".to_string());
+        args.push(workspace.display().to_string());
+    }
+    if cli.mouse_capture {
+        args.push("--mouse-capture".to_string());
+    }
+    if cli.no_mouse_capture {
+        args.push("--no-mouse-capture".to_string());
+    }
+    if cli.skip_onboarding {
+        args.push("--skip-onboarding".to_string());
+    }
+    if cli.no_project_config {
+        args.push("--no-project-config".to_string());
+    }
+    args.extend(passthrough);
+    args
+}
+
+fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrough: &[String]) {
     let mut verbosity = if cli.profile.is_some() {
         cli.verbosity.clone()
     } else {
@@ -4723,31 +4551,6 @@ fn build_tui_command_with_paths(
     {
         verbosity = Some("concise".to_string());
     }
-
-    let mut cmd = Command::new(&tui);
-    if let Some(config) = config_path {
-        cmd.arg("--config").arg(config);
-    }
-    if let Some(profile) = cli.profile.as_ref() {
-        cmd.arg("--profile").arg(profile);
-    }
-    if let Some(workspace) = workspace_path {
-        cmd.arg("--workspace").arg(workspace);
-    }
-    if cli.mouse_capture {
-        cmd.arg("--mouse-capture");
-    }
-    if cli.no_mouse_capture {
-        cmd.arg("--no-mouse-capture");
-    }
-    if cli.skip_onboarding {
-        cmd.arg("--skip-onboarding");
-    }
-    if cli.no_project_config {
-        cmd.arg("--no-project-config");
-    }
-    cmd.args(passthrough);
-
     let uses_raw_tui_provider = cli
         .provider
         .as_deref()
@@ -4755,7 +4558,6 @@ fn build_tui_command_with_paths(
     let keyring_bridge_provider = resolved_runtime.provider;
     let keyring_bridge_api_key = resolved_runtime.api_key.as_ref();
     let keyring_bridge_source = resolved_runtime.api_key_source;
-
     if let Some(provider) = cli.provider.as_deref() {
         let provider = builtin_provider_arg(provider)
             .map(ProviderKind::from)
@@ -4763,10 +4565,10 @@ fn build_tui_command_with_paths(
                 || provider.to_string(),
                 |provider| provider.as_str().to_string(),
             );
-        // Set both names so an inherited CODEWHALE_PROVIDER cannot outrank the
-        // explicit CLI pin when the TUI applies its environment overrides.
-        cmd.env("CODEWHALE_PROVIDER", &provider);
-        cmd.env("DEEPSEEK_PROVIDER", provider);
+        unsafe {
+            std::env::set_var("CODEWHALE_PROVIDER", &provider);
+            std::env::set_var("DEEPSEEK_PROVIDER", provider);
+        }
     }
     if !(uses_raw_tui_provider
         || (cli.profile.is_some()
@@ -4774,228 +4576,111 @@ fn build_tui_command_with_paths(
         && matches!(keyring_bridge_source, Some(RuntimeApiKeySource::Keyring))
         && let Some(api_key) = keyring_bridge_api_key
     {
-        // TUI reloads auth_mode from config/profile, but it does not re-query the
-        // platform keyring on normal startup. Bridge only the recovered secret;
-        // replaying auth_mode here would turn it back into a profile override.
-        cmd.env("DEEPSEEK_API_KEY", api_key);
-        for var in provider_env_vars(keyring_bridge_provider) {
-            if *var != "DEEPSEEK_API_KEY" {
-                cmd.env(var, api_key);
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", api_key);
+            for var in provider_env_vars(keyring_bridge_provider) {
+                if *var != "DEEPSEEK_API_KEY" {
+                    std::env::set_var(var, api_key);
+                }
             }
+            std::env::set_var(
+                "DEEPSEEK_API_KEY_SOURCE",
+                RuntimeApiKeySource::Keyring.as_env_value(),
+            );
         }
-        cmd.env(
-            "DEEPSEEK_API_KEY_SOURCE",
-            RuntimeApiKeySource::Keyring.as_env_value(),
-        );
     }
-
-    // For every forwarded flag below, set both the canonical CODEWHALE_* name
-    // and the legacy DEEPSEEK_* alias so an inherited CODEWHALE_* shell export
-    // cannot outrank the explicit CLI flag when the TUI applies its
-    // CODEWHALE-first environment overrides.
     if let Some(model) = cli.model.as_ref() {
-        cmd.env("CODEWHALE_MODEL", model);
-        cmd.env("DEEPSEEK_MODEL", model);
+        unsafe {
+            std::env::set_var("CODEWHALE_MODEL", model);
+            std::env::set_var("DEEPSEEK_MODEL", model);
+        }
     }
     if let Some(output_mode) = cli.output_mode.as_ref() {
-        cmd.env("CODEWHALE_OUTPUT_MODE", output_mode);
-        cmd.env("DEEPSEEK_OUTPUT_MODE", output_mode);
+        unsafe {
+            std::env::set_var("CODEWHALE_OUTPUT_MODE", output_mode);
+            std::env::set_var("DEEPSEEK_OUTPUT_MODE", output_mode);
+        }
     }
     if let Some(v) = verbosity.as_ref() {
-        cmd.env("CODEWHALE_VERBOSITY", v);
-        cmd.env("DEEPSEEK_VERBOSITY", v);
+        unsafe {
+            std::env::set_var("CODEWHALE_VERBOSITY", v);
+            std::env::set_var("DEEPSEEK_VERBOSITY", v);
+        }
     }
     if let Some(log_level) = cli.log_level.as_ref() {
-        cmd.env("CODEWHALE_LOG_LEVEL", log_level);
-        cmd.env("DEEPSEEK_LOG_LEVEL", log_level);
+        unsafe {
+            std::env::set_var("CODEWHALE_LOG_LEVEL", log_level);
+            std::env::set_var("DEEPSEEK_LOG_LEVEL", log_level);
+        }
     }
-    // Forward the *resolved* value, never the raw flag, and forward it
-    // unconditionally including `false`. Forwarding only `Some(flag)`
-    // overwrote an inherited `CODEWHALE_TELEMETRY=0` in the child's
-    // environment, so `CODEWHALE_TELEMETRY=0 codewhale --telemetry true`
-    // handed the TUI — which is the process that would emit — an environment
-    // that resolves on. The child re-resolves from its own environment and
-    // config file, and must not be able to fall back past the floor the
-    // dispatcher has already applied.
     let telemetry = resolved_runtime.telemetry.to_string();
-    cmd.env("CODEWHALE_TELEMETRY", &telemetry);
-    cmd.env("DEEPSEEK_TELEMETRY", &telemetry);
-    // …and state *why*, because the value alone cannot say. Off is the shipped
-    // default, so the child receives `false` on every ordinary run and cannot
-    // tell that from an operator who declared a kill switch. The child needs
-    // the difference exactly once: the first-run notice must not ask a question
-    // whose answer this environment overrides, and answering it must not
-    // reverse a decision somebody already made. Stated on every run, so an
-    // inherited marker can never leak in either direction.
+    unsafe {
+        std::env::set_var("CODEWHALE_TELEMETRY", &telemetry);
+        std::env::set_var("DEEPSEEK_TELEMETRY", &telemetry);
+    }
     let floor = cli.telemetry == Some(false) || codewhale_config::telemetry_floor_in_force();
-    cmd.env(
-        codewhale_config::TELEMETRY_FLOOR_ENV,
-        if floor { "1" } else { "0" },
-    );
-    // The endpoint travels with the switch. The child re-validates it — plain
-    // `http://` to anything that is not loopback is refused there, and there is
-    // no environment variable that overrides that refusal — so forwarding is a
-    // convenience, never an authorization.
+    unsafe {
+        std::env::set_var(
+            codewhale_config::TELEMETRY_FLOOR_ENV,
+            if floor { "1" } else { "0" },
+        );
+    }
     if let Some(endpoint) = resolved_runtime.telemetry_endpoint.as_ref() {
-        cmd.env("CODEWHALE_TELEMETRY_ENDPOINT", endpoint);
-        cmd.env("DEEPSEEK_TELEMETRY_ENDPOINT", endpoint);
+        unsafe {
+            std::env::set_var("CODEWHALE_TELEMETRY_ENDPOINT", endpoint);
+            std::env::set_var("DEEPSEEK_TELEMETRY_ENDPOINT", endpoint);
+        }
     }
     if let Some(policy) = cli.approval_policy.as_ref() {
-        cmd.env("CODEWHALE_APPROVAL_POLICY", policy);
-        cmd.env("DEEPSEEK_APPROVAL_POLICY", policy);
+        unsafe {
+            std::env::set_var("CODEWHALE_APPROVAL_POLICY", policy);
+            std::env::set_var("DEEPSEEK_APPROVAL_POLICY", policy);
+        }
     }
     if let Some(mode) = cli.sandbox_mode.as_ref() {
-        cmd.env("CODEWHALE_SANDBOX_MODE", mode);
-        cmd.env("DEEPSEEK_SANDBOX_MODE", mode);
+        unsafe {
+            std::env::set_var("CODEWHALE_SANDBOX_MODE", mode);
+            std::env::set_var("DEEPSEEK_SANDBOX_MODE", mode);
+        }
     }
     if cli.yolo {
-        cmd.env("CODEWHALE_YOLO", "true");
-        cmd.env("DEEPSEEK_YOLO", "true");
+        unsafe {
+            std::env::set_var("CODEWHALE_YOLO", "true");
+            std::env::set_var("DEEPSEEK_YOLO", "true");
+        }
     }
     if let Some(api_key) = cli.api_key.as_ref() {
-        // `--profile` is resolved by the TUI after this facade starts it, so
-        // the base ConfigStore provider may not be the effective provider.
-        // Carry the explicit secret through a provider-neutral, source-marked
-        // slot; the TUI applies it after profile/OAuth resolution and before
-        // saved API-key slots. Preserve legacy provider envs only when their
-        // identity is already unambiguous here.
-        cmd.env("CODEWHALE_CLI_API_KEY", api_key);
+        unsafe {
+            std::env::set_var("CODEWHALE_CLI_API_KEY", api_key);
+        }
         if !uses_raw_tui_provider && (cli.profile.is_none() || cli.provider.is_some()) {
-            cmd.env("DEEPSEEK_API_KEY", api_key);
-            for var in provider_env_vars(resolved_runtime.provider) {
-                if *var != "DEEPSEEK_API_KEY" {
-                    cmd.env(var, api_key);
+            unsafe {
+                std::env::set_var("DEEPSEEK_API_KEY", api_key);
+                for var in provider_env_vars(resolved_runtime.provider) {
+                    if *var != "DEEPSEEK_API_KEY" {
+                        std::env::set_var(var, api_key);
+                    }
                 }
             }
         }
-        cmd.env("DEEPSEEK_API_KEY_SOURCE", "cli");
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY_SOURCE", "cli");
+        }
     }
     if let Some(base_url) = cli.base_url.as_ref() {
-        cmd.env("CODEWHALE_BASE_URL", base_url);
-        cmd.env("DEEPSEEK_BASE_URL", base_url);
+        unsafe {
+            std::env::set_var("CODEWHALE_BASE_URL", base_url);
+            std::env::set_var("DEEPSEEK_BASE_URL", base_url);
+        }
     }
-
-    Ok(cmd)
-}
-
-fn tui_child_exit_code(status: std::process::ExitStatus) -> Option<i32> {
-    if let Some(code) = status.code() {
-        return Some(code);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-
-        status.signal().map(|signal| 128 + signal)
-    }
-
-    #[cfg(not(unix))]
-    {
-        None
-    }
-}
-
-fn exit_with_tui_status(status: std::process::ExitStatus) -> Result<()> {
-    if let Some(code) = tui_child_exit_code(status) {
-        std::process::exit(code);
-    }
-    bail!("codewhale-tui terminated without an exit code")
 }
 
 // There is deliberately no "just run the TUI with these args" helper here. One
 // existed, `thread resume`/`thread fork` used it, and it forwarded neither
 // `--config` nor the resolved telemetry value — so the kill switch the
 // dispatcher had already applied never reached the process that emits. Every
-// delegation goes through `build_tui_command_with_paths`, and
+// delegation is now in-process, and
 // `only_one_function_may_locate_and_spawn_the_tui` pins that.
-
-fn tui_spawn_error(tui: &Path, err: &io::Error) -> String {
-    format!(
-        "failed to spawn companion TUI binary at {}: {err}\n\
-\n\
-The `codewhale` dispatcher found a `codewhale-tui` file, but the OS refused \
-to execute it. Common fixes:\n\
-  - Reinstall with `npm install -g codewhale`, or run `codewhale update`.\n\
-  - On Windows, run `where codewhale` and `where codewhale-tui`; both should \
-come from the same install directory.\n\
-  - If you downloaded release assets manually, keep both `codewhale` and \
-`codewhale-tui` binaries together and make sure the TUI binary is executable.\n\
-  - Set CODEWHALE_TUI_BIN (legacy alias: DEEPSEEK_TUI_BIN) to the absolute \
-path of a working `codewhale-tui` binary.",
-        tui.display()
-    )
-}
-
-/// Resolve the sibling `codewhale-tui` executable next to the running
-/// dispatcher. Honours platform executable suffix (`.exe` on Windows) so
-/// the npm-distributed Windows package — which ships
-/// `bin/downloads/codewhale-tui.exe` — is found by `Path::exists` (#247).
-///
-/// `CODEWHALE_TUI_BIN` (legacy alias: `DEEPSEEK_TUI_BIN`) is consulted first
-/// as an explicit override for custom installs and CI test layouts. On
-/// Windows we additionally try the suffix-less name as a fallback for users
-/// who already manually renamed the file before this fix landed.
-fn locate_sibling_tui_binary() -> Result<PathBuf> {
-    for var in ["CODEWHALE_TUI_BIN", "DEEPSEEK_TUI_BIN"] {
-        if let Ok(override_path) = std::env::var(var) {
-            let candidate = PathBuf::from(override_path);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-            bail!(
-                "{var} points at {}, which is not a regular file.",
-                candidate.display()
-            );
-        }
-    }
-
-    let current = std::env::current_exe().context("failed to locate current executable path")?;
-    if let Some(found) = sibling_tui_candidate(&current) {
-        return Ok(found);
-    }
-
-    // Build a stable error path so the user sees the platform-correct
-    // expected name, not "codewhale-tui" on Windows.
-    let expected = current.with_file_name(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX));
-    bail!(
-        "Companion `codewhale-tui` binary not found at {}.\n\
-\n\
-The `codewhale` dispatcher delegates interactive sessions to a sibling \
-`codewhale-tui` binary. To fix this, install one of:\n\
-  • npm:    npm install -g codewhale                (downloads both binaries)\n\
-  • cargo:  cargo install codewhale-cli codewhale-tui --locked\n\
-  • GitHub Releases: download BOTH `codewhale-<platform>` AND \
-`codewhale-tui-<platform>` from https://github.com/Hmbown/CodeWhale/releases/latest \
-and place them in the same directory.\n\
-\n\
-Or set CODEWHALE_TUI_BIN (legacy alias: DEEPSEEK_TUI_BIN) to the absolute path \
-of an existing `codewhale-tui` binary.",
-        expected.display()
-    );
-}
-
-/// Return the first existing sibling-binary path under any of the names
-/// `codewhale-tui` might use on this platform. Pure function to keep
-/// `locate_sibling_tui_binary` testable.
-fn sibling_tui_candidate(dispatcher: &Path) -> Option<PathBuf> {
-    // Primary: platform-correct name. EXE_SUFFIX is "" on Unix and ".exe"
-    // on Windows.
-    let primary =
-        dispatcher.with_file_name(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX));
-    if primary.is_file() {
-        return Some(primary);
-    }
-    // Windows fallback: a user who manually renamed `.exe` away (per the
-    // workaround in #247) still launches successfully under the new code.
-    if cfg!(windows) {
-        let suffixless = dispatcher.with_file_name("codewhale-tui");
-        if suffixless.is_file() {
-            return Some(suffixless);
-        }
-    }
-    None
-}
 
 fn run_metrics_command(args: MetricsArgs) -> Result<()> {
     let since = match args.since.as_deref() {
@@ -5040,17 +4725,6 @@ mod tests {
         err.to_string()
     }
 
-    fn command_env(cmd: &Command, name: &str) -> Option<String> {
-        let name = std::ffi::OsStr::new(name);
-        cmd.get_envs().find_map(|(key, value)| {
-            if key == name {
-                value.map(|v| v.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-    }
-
     pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -5086,7 +4760,7 @@ mod tests {
             // Safety: tests using this helper serialize with env_lock().
             unsafe {
                 if let Some(previous) = self.previous.take() {
-                    std::env::set_var(self.name, previous);
+                    std::env::set_var(self.name, previous.clone());
                 } else {
                     std::env::remove_var(self.name);
                 }
@@ -5851,70 +5525,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_custom_provider_crosses_config_and_root_tui_launch_boundary() {
-        let _lock = env_lock();
-        let (_tui_dir, _tui_bin) = install_fake_tui_binary();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            r#"provider = "lm-studio"
-
-[providers.lm-studio]
-kind = "openai-compatible"
-base_url = "http://127.0.0.1:1234/v1"
-model = "qwen-2.5-7b"
-"#,
-        )
-        .expect("custom provider config fixture");
-        let store = ConfigStore::load(Some(config_path.clone()))
-            .expect("a TUI-persisted custom provider must cross the dispatcher parser");
-        assert_eq!(store.config.provider, ProviderKind::Custom);
-        assert_eq!(store.config.provider_id(), "lm-studio");
-
-        let resolved = store
-            .config
-            .resolve_runtime_options(&CliRuntimeOverrides::default());
-        assert_eq!(resolved.provider, ProviderKind::Custom);
-        assert_eq!(resolved.base_url, "http://127.0.0.1:1234/v1");
-        assert_eq!(resolved.model, "qwen-2.5-7b");
-
-        let config = config_path.to_string_lossy().into_owned();
-        let root_cli = parse_ok(&["codewhale", "--config", &config]);
-        let root_command = build_tui_command(&root_cli, &resolved, Vec::new())
-            .expect("root launch should reach the TUI command boundary");
-        let root_args = root_command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert!(
-            root_args
-                .windows(2)
-                .any(|args| args == ["--config", &config])
-        );
-        assert_eq!(command_env(&root_command, "CODEWHALE_PROVIDER"), None);
-        assert_eq!(command_env(&root_command, "DEEPSEEK_PROVIDER"), None);
-
-        let cli = parse_ok(&[
-            "codewhale",
-            "--config",
-            &config,
-            "--provider",
-            "lm-studio",
-            "exec",
-            "Reply OK",
-        ]);
-        let prepared = prepare_raw_provider_tui_dispatch(
-            &cli,
-            cli.command.as_ref(),
-            &CliRuntimeOverrides::default(),
-        )
-        .expect("prepare raw provider dispatch")
-        .expect("Exec with a raw provider should bypass dispatcher config resolution");
-        assert_eq!(prepared.1, ["exec", "Reply OK"].map(str::to_string));
-    }
-
-    #[test]
     fn hidden_lane_log_proxy_parses_child_argv_and_preserves_other_commands() {
         let cli = parse_ok(&[
             "codewhale",
@@ -6087,6 +5697,12 @@ model = "qwen-2.5-7b"
             verify: true,
         })
         .expect("command");
+        let current_executable = std::env::current_exe().expect("current executable");
+        assert_eq!(
+            process.command.first().map(String::as_str),
+            current_executable.to_str(),
+            "workflow lanes must launch the exact runtime that built their process spec"
+        );
         let joined = process.command.join("\n");
         assert!(joined.contains("workflow-tool"));
         assert!(joined.contains("explicit-workflow-command"));
@@ -8290,203 +7906,6 @@ model = "qwen-2.5-7b"
     }
 
     #[test]
-    fn build_tui_command_forwards_raw_exec_and_fleet_provider_without_secret_bridge() {
-        let _lock = env_lock();
-        let (_dir, _bin) = install_fake_tui_binary();
-        let _ambient_provider = ScopedEnvVar::set("CODEWHALE_PROVIDER", "openrouter");
-
-        let cases = [
-            (
-                parse_ok(&["codewhale", "--provider", "lm-studio", "exec", "Reply OK"]),
-                vec!["exec".to_string(), "Reply OK".to_string()],
-            ),
-            (
-                parse_ok(&["codewhale", "--provider", "lm-studio", "fleet", "status"]),
-                vec!["fleet".to_string(), "status".to_string()],
-            ),
-        ];
-
-        for (cli, passthrough) in cases {
-            let mut resolved =
-                resolved_runtime_for_test(ProviderKind::Openrouter, ProviderSource::Config);
-            resolved.api_key = Some("unrelated-keyring-secret".to_string());
-            resolved.api_key_source = Some(RuntimeApiKeySource::Keyring);
-
-            let cmd = build_tui_command(&cli, &resolved, passthrough.clone())
-                .expect("raw provider should dispatch to the TUI");
-            assert_eq!(
-                command_env(&cmd, "CODEWHALE_PROVIDER").as_deref(),
-                Some("lm-studio")
-            );
-            assert_eq!(
-                command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-                Some("lm-studio")
-            );
-            for secret_var in [
-                "CODEWHALE_CLI_API_KEY",
-                "DEEPSEEK_API_KEY",
-                "OPENROUTER_API_KEY",
-                "DEEPSEEK_API_KEY_SOURCE",
-            ] {
-                assert_eq!(
-                    command_env(&cmd, secret_var),
-                    None,
-                    "raw provider dispatch must not bridge {secret_var}"
-                );
-            }
-            assert_eq!(
-                cmd.get_args()
-                    .map(|arg| arg.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>(),
-                passthrough
-            );
-        }
-    }
-
-    #[test]
-    fn build_tui_command_allows_openai_and_forwards_provider_key() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&[
-            "deepseek",
-            "--provider",
-            "openai",
-            "--workspace",
-            "/tmp/codewhale-workspace",
-        ]);
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::Openai,
-            provider_source: ProviderSource::Cli,
-            model_source: ModelSource::ProviderDefault,
-            model: "glm-5".to_string(),
-            api_key: Some("resolved-openai-key".to_string()),
-            api_key_source: Some(RuntimeApiKeySource::Keyring),
-            base_url: "https://openai-compatible.example/v4".to_string(),
-            auth_mode: Some("api_key".to_string()),
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, "CODEWHALE_PROVIDER").as_deref(),
-            Some("openai")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-            Some("openai")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_API_KEY").as_deref(),
-            Some("resolved-openai-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "OPENAI_API_KEY").as_deref(),
-            Some("resolved-openai-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE").as_deref(),
-            Some("keyring")
-        );
-        assert_eq!(command_env(&cmd, "DEEPSEEK_AUTH_MODE"), None);
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--workspace", "/tmp/codewhale-workspace"]),
-            "expected workspace forwarding in args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn build_tui_command_forwards_the_resolved_telemetry_value_not_the_raw_flag() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        // The user passed `--telemetry true`, but the resolver applied the
-        // kill-switch floor (an explicit `CODEWHALE_TELEMETRY=0`, or an
-        // unreadable value) and resolved to off. The TUI holds every emission
-        // site, so it is the resolved value that must reach it.
-        let cli = parse_ok(&["codewhale", "--telemetry", "true", "exec", "hi"]);
-        assert_eq!(cli.telemetry, Some(true));
-        let mut resolved = telemetry_test_resolved();
-        resolved.telemetry = false;
-        resolved.telemetry_explicit_off = true;
-
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, "CODEWHALE_TELEMETRY").as_deref(),
-            Some("false")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_TELEMETRY").as_deref(),
-            Some("false")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_forwards_the_endpoint_only_when_one_is_configured() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&["codewhale", "exec", "hi"]);
-
-        // A resolved `None` is the dry-run sink — the user configured an empty
-        // endpoint — and it must not be forwarded as an empty variable, which
-        // would look like a configured endpoint to anything that only checks
-        // for presence. Not forwarding is safe because the child re-resolves
-        // from the same config file and the same inherited environment, so it
-        // reaches the same `None`.
-        let resolved = telemetry_test_resolved();
-        assert_eq!(resolved.telemetry_endpoint, None);
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(command_env(&cmd, "CODEWHALE_TELEMETRY_ENDPOINT"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_TELEMETRY_ENDPOINT"), None);
-
-        let mut resolved = telemetry_test_resolved();
-        resolved.telemetry_endpoint = Some("https://telemetry.example/v1".to_string());
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, "CODEWHALE_TELEMETRY_ENDPOINT").as_deref(),
-            Some("https://telemetry.example/v1")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_TELEMETRY_ENDPOINT").as_deref(),
-            Some("https://telemetry.example/v1")
-        );
-    }
-
-    #[test]
     fn the_telemetry_flag_documents_itself_in_help() {
         // A consent control nobody can find is a consent control nobody has.
         let help = Cli::command().render_long_help().to_string();
@@ -8506,215 +7925,30 @@ model = "qwen-2.5-7b"
     }
 
     #[test]
-    fn build_tui_command_always_states_telemetry_so_an_inherited_value_cannot_leak_through() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        // No `--telemetry` flag at all. The old code forwarded nothing here,
-        // leaving the child to inherit whatever the shell happened to export.
-        let cli = parse_ok(&["codewhale", "exec", "hi"]);
-        assert_eq!(cli.telemetry, None);
-        let mut resolved = telemetry_test_resolved();
-        resolved.telemetry = true;
-
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, "CODEWHALE_TELEMETRY").as_deref(),
-            Some("true")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_TELEMETRY").as_deref(),
-            Some("true")
-        );
-    }
-
-    #[test]
-    fn thread_resume_and_fork_delegate_with_the_kill_switch_attached() {
-        // Regression: both took a bare `Command::new(tui).args(args)` that
-        // forwarded no arguments and set no environment, so the child
-        // re-resolved from `$CODEWHALE_HOME/config.toml` with no overrides and
-        // collected a full session — `install_or_upgrade`, `session_start`,
-        // `session_end` — for a user who had passed `--telemetry false` or
-        // pointed `--config` at a file saying `telemetry = false`.
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let off_config = dir.path().join("off.toml");
-        std::fs::write(&off_config, b"telemetry = false\n").unwrap();
-        let off_config_str = off_config.to_string_lossy().into_owned();
-
-        for (subcommand, thread_command) in [
-            (
-                "resume",
-                ThreadCommand::Resume {
-                    thread_id: "t-1".to_string(),
-                },
-            ),
-            (
-                "fork",
-                ThreadCommand::Fork {
-                    thread_id: "t-1".to_string(),
-                },
-            ),
-        ] {
-            let passthrough =
-                thread_delegation(&thread_command).expect("resume and fork must delegate");
-            assert_eq!(passthrough, vec![subcommand.to_string(), "t-1".to_string()]);
-
-            let cli = parse_ok(&[
-                "codewhale",
-                "--config",
-                &off_config_str,
-                "--telemetry",
-                "false",
-                "thread",
-                subcommand,
-                "t-1",
-            ]);
-            let mut resolved = telemetry_test_resolved();
-            resolved.telemetry = false;
-
-            let cmd = build_tui_command(&cli, &resolved, passthrough).expect("command");
-            let args: Vec<String> = cmd
-                .get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect();
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["--config", off_config_str.as_str()]),
-                "thread {subcommand} must forward --config: {args:?}"
-            );
-            assert!(
-                args.ends_with(&[subcommand.to_string(), "t-1".to_string()]),
-                "thread {subcommand} must pass the session through: {args:?}"
-            );
-            assert_eq!(
-                command_env(&cmd, "CODEWHALE_TELEMETRY").as_deref(),
-                Some("false"),
-                "thread {subcommand} must carry the resolved kill switch"
-            );
-            assert_eq!(
-                command_env(&cmd, "DEEPSEEK_TELEMETRY").as_deref(),
-                Some("false")
-            );
-        }
-
-        // The non-delegating verbs stay in this process; naming them here is
-        // what makes the match above exhaustive, so a future variant that
-        // starts a session cannot be added without stating its passthrough.
-        assert!(
-            thread_delegation(&ThreadCommand::List {
-                all: false,
-                limit: None
-            })
-            .is_none()
-        );
-    }
-
-    #[test]
     fn only_one_function_may_locate_and_spawn_the_tui() {
-        // The finding above was not a wrong argument list; it was a *second*
-        // way to start the TUI, one that had never been taught the floor. So
-        // the property worth pinning is that there is one.
+        // Single-binary invariant: no sibling TUI discovery exists. The
+        // two-process glue has been deleted; the only TUI entry is codewhale_tui::run.
         let source = include_str!("lib.rs");
-        let runtime = source
-            .split_once("\nmod tests {")
-            .map_or(source, |(before, _)| before);
-        let call_sites = runtime
-            .lines()
-            .filter(|line| {
-                line.contains("locate_sibling_tui_binary()")
-                    && !line.trim_start().starts_with("//")
-                    && !line.contains("fn locate_sibling_tui_binary")
-            })
-            .count();
-        assert_eq!(
-            call_sites, 1,
-            "exactly one function may locate and spawn the sibling TUI, so that \
-             one function is the only place the telemetry floor has to be applied"
+        let a = format!("{}{}", "locate_sibling", "_tui_binary");
+        let b = format!("{}{}", "tui_spawn", "_error");
+        let c = format!("{}{}", "build_tui", "_command");
+        let d = format!("{}{}", "Command::new", "(&tui)");
+        assert!(
+            !source.contains(&a),
+            "single binary must not contain sibling TUI discovery"
         );
-    }
-
-    #[test]
-    fn build_tui_command_states_whether_a_kill_switch_is_in_force() {
-        // The forwarded `CODEWHALE_TELEMETRY=false` is ambiguous by
-        // construction: it is both the shipped default and a declared kill
-        // switch. The child needs the difference for the first-run notice, so
-        // the dispatcher states it on every run rather than leaving the child
-        // to infer it from a value that cannot say.
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-        let _telemetry_env = ScopedEnvVar::remove("CODEWHALE_TELEMETRY");
-        let _legacy_env = ScopedEnvVar::remove("DEEPSEEK_TELEMETRY");
-        let _floor_env = ScopedEnvVar::remove(codewhale_config::TELEMETRY_FLOOR_ENV);
-
-        // An ordinary first run: off, but nobody declared anything.
-        let cli = parse_ok(&["codewhale"]);
-        let resolved = telemetry_test_resolved();
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, codewhale_config::TELEMETRY_FLOOR_ENV).as_deref(),
-            Some("0")
+        assert!(
+            !source.contains(&b),
+            "single binary must not contain tui spawn error"
         );
-
-        // The per-run flag is a floor for the run it belongs to.
-        let cli = parse_ok(&["codewhale", "--telemetry", "false"]);
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, codewhale_config::TELEMETRY_FLOOR_ENV).as_deref(),
-            Some("1")
+        assert!(
+            !source.contains(&c),
+            "single binary must not contain build_tui dispatch"
         );
-
-        // So is the operator's environment.
-        let _env_off = ScopedEnvVar::set("CODEWHALE_TELEMETRY", "0");
-        let cli = parse_ok(&["codewhale"]);
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, codewhale_config::TELEMETRY_FLOOR_ENV).as_deref(),
-            Some("1")
+        assert!(
+            !source.contains(&d),
+            "single binary must not contain Command new tui"
         );
-    }
-
-    fn telemetry_test_resolved() -> ResolvedRuntimeOptions {
-        ResolvedRuntimeOptions {
-            provider: ProviderKind::Deepseek,
-            provider_source: ProviderSource::Config,
-            model_source: ModelSource::ProviderDefault,
-            model: "deepseek-chat".to_string(),
-            api_key: None,
-            api_key_source: None,
-            base_url: "https://api.deepseek.com".to_string(),
-            auth_mode: None,
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        }
     }
 
     #[test]
@@ -8741,579 +7975,6 @@ model = "qwen-2.5-7b"
                 assert!(args.args.iter().any(|a| a == "--no-project-config"));
             }
             other => panic!("expected exec subcommand, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_tui_command_forwards_no_project_config_before_subcommand() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&["codewhale", "--no-project-config", "exec", "hi"]);
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::Openai,
-            provider_source: ProviderSource::Cli,
-            model_source: ModelSource::ProviderDefault,
-            model: "glm-5".to_string(),
-            api_key: Some("resolved-openai-key".to_string()),
-            api_key_source: Some(RuntimeApiKeySource::Keyring),
-            base_url: "https://openai-compatible.example/v4".to_string(),
-            auth_mode: Some("api_key".to_string()),
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, vec!["exec".to_string(), "hi".to_string()])
-            .expect("command");
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        let flag = args
-            .iter()
-            .position(|a| a == "--no-project-config")
-            .expect("--no-project-config forwarded");
-        let subcommand = args
-            .iter()
-            .position(|a| a == "exec")
-            .expect("exec forwarded");
-        assert!(
-            flag < subcommand,
-            "--no-project-config must be forwarded before the subcommand: {args:?}"
-        );
-    }
-
-    #[test]
-    fn build_tui_command_allows_openai_codex_from_resolved_runtime() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&["codewhale", "doctor"]);
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::OpenaiCodex,
-            provider_source: ProviderSource::Config,
-            model_source: ModelSource::ProviderDefault,
-            model: "gpt-5.5".to_string(),
-            api_key: None,
-            api_key_source: None,
-            base_url: "https://chatgpt.com/backend-api".to_string(),
-            auth_mode: Some("oauth".to_string()),
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect("openai-codex should be accepted by the facade");
-        assert_eq!(command_env(&cmd, "DEEPSEEK_PROVIDER"), None);
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(args, vec!["doctor"]);
-    }
-
-    #[test]
-    fn build_tui_command_forwards_explicit_openai_codex_provider() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&["codewhale", "--provider", "openai-codex", "doctor"]);
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::OpenaiCodex,
-            provider_source: ProviderSource::Cli,
-            model_source: ModelSource::ProviderDefault,
-            model: "gpt-5.5".to_string(),
-            api_key: None,
-            api_key_source: None,
-            base_url: "https://chatgpt.com/backend-api".to_string(),
-            auth_mode: Some("oauth".to_string()),
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect("openai-codex should be accepted by the facade");
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-            Some("openai-codex")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_allows_anthropic_cli_provider() {
-        let _lock = env_lock();
-        let (_dir, _bin) = install_fake_tui_binary();
-
-        let cli = parse_ok(&["codewhale", "--provider", "anthropic", "doctor"]);
-        let resolved = resolved_runtime_for_test(ProviderKind::Anthropic, ProviderSource::Cli);
-
-        let cmd = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect("anthropic should be accepted by the facade");
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-            Some("anthropic")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_allows_anthropic_env_provider() {
-        let _lock = env_lock();
-        let (_dir, _bin) = install_fake_tui_binary();
-
-        let cli = parse_ok(&["codewhale", "doctor"]);
-        let resolved = resolved_runtime_for_test(
-            ProviderKind::Anthropic,
-            ProviderSource::Env("DEEPSEEK_PROVIDER"),
-        );
-
-        build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect("anthropic from provider env should be accepted by the facade");
-    }
-
-    #[test]
-    fn build_tui_command_bridges_anthropic_keyring_secret() {
-        let _lock = env_lock();
-        let (_dir, _bin) = install_fake_tui_binary();
-
-        let cli = parse_ok(&["codewhale", "doctor"]);
-        let mut resolved =
-            resolved_runtime_for_test(ProviderKind::Anthropic, ProviderSource::Config);
-        resolved.api_key = Some("anthropic-keyring-secret".to_string());
-        resolved.api_key_source = Some(RuntimeApiKeySource::Keyring);
-
-        let cmd = build_tui_command(&cli, &resolved, vec!["doctor".to_string()])
-            .expect("config-sourced anthropic provider should be accepted");
-
-        assert_eq!(command_env(&cmd, "DEEPSEEK_PROVIDER"), None);
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_API_KEY").as_deref(),
-            Some("anthropic-keyring-secret")
-        );
-        assert_eq!(
-            command_env(&cmd, "ANTHROPIC_API_KEY").as_deref(),
-            Some("anthropic-keyring-secret")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE").as_deref(),
-            Some("keyring")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_does_not_export_default_runtime_overrides_for_profiles() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&["deepseek", "--profile", "google"]);
-        let mut resolved_headers = std::collections::BTreeMap::new();
-        resolved_headers.insert("X-From-Base".to_string(), "base".to_string());
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::Deepseek,
-            provider_source: ProviderSource::Config,
-            model_source: ModelSource::ProviderDefault,
-            model: "deepseek-v4-pro".to_string(),
-            api_key: Some("config-file-key".to_string()),
-            api_key_source: Some(RuntimeApiKeySource::ConfigFile),
-            base_url: "https://api.deepseek.com/beta".to_string(),
-            auth_mode: Some("api_key".to_string()),
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: Some("normal".to_string()),
-            http_headers: resolved_headers,
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-
-        assert_eq!(command_env(&cmd, "DEEPSEEK_PROVIDER"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_MODEL"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_BASE_URL"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_API_KEY"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_AUTH_MODE"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_HTTP_HEADERS"), None);
-        assert_eq!(command_env(&cmd, "CODEWHALE_VERBOSITY"), None);
-        assert_eq!(command_env(&cmd, "DEEPSEEK_VERBOSITY"), None);
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            args.windows(2).any(|pair| pair == ["--profile", "google"]),
-            "expected profile forwarding in args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn build_tui_command_defaults_noninteractive_to_concise_verbosity() {
-        let _lock = env_lock();
-        let (_dir, _bin) = install_fake_tui_binary();
-
-        let cli = parse_ok(&["codewhale"]);
-        let resolved = resolved_runtime_for_test(ProviderKind::Deepseek, ProviderSource::Config);
-
-        let cmd = build_tui_command(
-            &cli,
-            &resolved,
-            vec!["exec".to_string(), "summarize".to_string()],
-        )
-        .expect("command");
-
-        assert_eq!(
-            command_env(&cmd, "CODEWHALE_VERBOSITY").as_deref(),
-            Some("concise")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_VERBOSITY").as_deref(),
-            Some("concise")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_respects_resolved_verbosity_override() {
-        let _lock = env_lock();
-        let (_dir, _bin) = install_fake_tui_binary();
-
-        let cli = parse_ok(&["codewhale"]);
-        let mut resolved =
-            resolved_runtime_for_test(ProviderKind::Deepseek, ProviderSource::Config);
-        resolved.verbosity = Some("normal".to_string());
-
-        let cmd = build_tui_command(&cli, &resolved, vec!["exec".to_string()]).expect("command");
-
-        assert_eq!(
-            command_env(&cmd, "CODEWHALE_VERBOSITY").as_deref(),
-            Some("normal")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_VERBOSITY").as_deref(),
-            Some("normal")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_allows_moonshot_and_forwards_kimi_key() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&[
-            "codewhale",
-            "--provider",
-            "moonshot",
-            "--model",
-            "kimi-k2.7-code",
-            "--workspace",
-            "/tmp/codewhale-workspace",
-        ]);
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::Moonshot,
-            provider_source: ProviderSource::Cli,
-            model_source: ModelSource::ProviderDefault,
-            model: "kimi-k2.7-code".to_string(),
-            api_key: Some("resolved-kimi-key".to_string()),
-            api_key_source: Some(RuntimeApiKeySource::Keyring),
-            base_url: "https://api.moonshot.ai/v1".to_string(),
-            auth_mode: Some("api_key".to_string()),
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-            Some("moonshot")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_MODEL").as_deref(),
-            Some("kimi-k2.7-code")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_API_KEY").as_deref(),
-            Some("resolved-kimi-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "MOONSHOT_API_KEY").as_deref(),
-            Some("resolved-kimi-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "KIMI_API_KEY").as_deref(),
-            Some("resolved-kimi-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE").as_deref(),
-            Some("keyring")
-        );
-        assert_eq!(command_env(&cmd, "DEEPSEEK_AUTH_MODE"), None);
-    }
-
-    #[test]
-    fn build_tui_command_allows_volcengine_and_forwards_ark_keys() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&[
-            "codewhale",
-            "--provider",
-            "volcengine",
-            "--model",
-            "DeepSeek-V4-Pro",
-            "--workspace",
-            "/tmp/codewhale-workspace",
-        ]);
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::Volcengine,
-            provider_source: ProviderSource::Cli,
-            model_source: ModelSource::ProviderDefault,
-            model: "DeepSeek-V4-Pro".to_string(),
-            api_key: Some("resolved-ark-key".to_string()),
-            api_key_source: Some(RuntimeApiKeySource::Keyring),
-            base_url: "https://ark.cn-beijing.volces.com/api/coding/v3".to_string(),
-            auth_mode: Some("api_key".to_string()),
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-            Some("volcengine")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_MODEL").as_deref(),
-            Some("DeepSeek-V4-Pro")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_API_KEY").as_deref(),
-            Some("resolved-ark-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "VOLCENGINE_API_KEY").as_deref(),
-            Some("resolved-ark-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "VOLCENGINE_ARK_API_KEY").as_deref(),
-            Some("resolved-ark-key")
-        );
-        assert_eq!(
-            command_env(&cmd, "ARK_API_KEY").as_deref(),
-            Some("resolved-ark-key")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_exports_explicit_provider_model_and_base_url() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let cli = parse_ok(&[
-            "deepseek",
-            "--profile",
-            "google",
-            "--provider",
-            "openai",
-            "--model",
-            "glm-5",
-            "--base-url",
-            "https://openai-compatible.example/v4",
-        ]);
-        let resolved = ResolvedRuntimeOptions {
-            provider: ProviderKind::Openai,
-            provider_source: ProviderSource::Cli,
-            model_source: ModelSource::ProviderDefault,
-            model: "glm-5".to_string(),
-            api_key: None,
-            api_key_source: None,
-            base_url: "https://openai-compatible.example/v4".to_string(),
-            auth_mode: None,
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        };
-
-        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
-
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
-            Some("openai")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_MODEL").as_deref(),
-            Some("glm-5")
-        );
-        assert_eq!(
-            command_env(&cmd, "DEEPSEEK_BASE_URL").as_deref(),
-            Some("https://openai-compatible.example/v4")
-        );
-    }
-
-    #[test]
-    fn build_tui_command_forwards_provider_keyring_env_vars_for_all_providers() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        for provider in ProviderKind::ALL {
-            let cli = parse_ok(&["codewhale", "--workspace", "/tmp/codewhale-workspace"]);
-            let resolved = ResolvedRuntimeOptions {
-                provider,
-                provider_source: ProviderSource::Config,
-                model_source: ModelSource::ProviderDefault,
-                model: "test-model".to_string(),
-                api_key: Some("test-key".to_string()),
-                api_key_source: Some(RuntimeApiKeySource::Keyring),
-                base_url: "http://localhost:8000/v1".to_string(),
-                auth_mode: Some("api_key".to_string()),
-                insecure_skip_tls_verify: false,
-                output_mode: None,
-                log_level: None,
-                telemetry: false,
-                telemetry_explicit_off: false,
-                telemetry_endpoint: None,
-                approval_policy: None,
-                sandbox_mode: None,
-                yolo: None,
-                verbosity: None,
-                http_headers: std::collections::BTreeMap::new(),
-            };
-
-            let cmd = build_tui_command(&cli, &resolved, Vec::new())
-                .unwrap_or_else(|e| panic!("{}: {e}", provider.as_str()));
-
-            assert_eq!(
-                command_env(&cmd, "DEEPSEEK_API_KEY").as_deref(),
-                Some("test-key"),
-                "{}: DEEPSEEK_API_KEY not forwarded",
-                provider.as_str()
-            );
-            for var in provider_env_vars(provider)
-                .iter()
-                .filter(|var| **var != "DEEPSEEK_API_KEY")
-            {
-                assert_eq!(
-                    command_env(&cmd, var).as_deref(),
-                    Some("test-key"),
-                    "{}: {var} not forwarded",
-                    provider.as_str()
-                );
-            }
-            assert_eq!(
-                command_env(&cmd, "DEEPSEEK_API_KEY_SOURCE").as_deref(),
-                Some("keyring"),
-                "{}: expected keyring source bridge",
-                provider.as_str()
-            );
-            assert_eq!(
-                command_env(&cmd, "DEEPSEEK_AUTH_MODE"),
-                None,
-                "{}: auth mode should come from config/profile, not env handoff",
-                provider.as_str()
-            );
         }
     }
 
@@ -9498,110 +8159,5 @@ model = "qwen-2.5-7b"
                 );
             }
         }
-    }
-
-    /// Regression for issue #247: on Windows the dispatcher must find the
-    /// sibling `codewhale-tui.exe`, not bail out looking for an
-    /// extension-less `codewhale-tui`. The candidate resolver also accepts
-    /// the suffix-less name on Windows so users who manually renamed the
-    /// file as a workaround keep working after the upgrade.
-    #[test]
-    fn sibling_tui_candidate_picks_platform_correct_name() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let dispatcher = dir
-            .path()
-            .join("codewhale")
-            .with_extension(std::env::consts::EXE_EXTENSION);
-        // Touch the dispatcher so its parent dir is the lookup root.
-        std::fs::write(&dispatcher, b"").unwrap();
-
-        // No sibling yet — resolver returns None.
-        assert!(sibling_tui_candidate(&dispatcher).is_none());
-
-        let target =
-            dispatcher.with_file_name(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&target, b"").unwrap();
-
-        let found = sibling_tui_candidate(&dispatcher).expect("must locate sibling");
-        assert_eq!(found, target, "primary platform-correct name wins");
-    }
-
-    #[test]
-    fn dispatcher_spawn_error_names_path_and_recovery_checks() {
-        let err = io::Error::new(io::ErrorKind::PermissionDenied, "access is denied");
-        let message = tui_spawn_error(Path::new("C:/tools/codewhale-tui.exe"), &err);
-
-        assert!(message.contains("C:/tools/codewhale-tui.exe"));
-        assert!(message.contains("access is denied"));
-        assert!(message.contains("where codewhale"));
-        assert!(message.contains("DEEPSEEK_TUI_BIN"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn tui_child_exit_code_maps_unix_signal_to_shell_status() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let status = std::process::ExitStatus::from_raw(libc::SIGPIPE);
-
-        assert_eq!(tui_child_exit_code(status), Some(141));
-    }
-
-    /// Windows-only fallback: the user from #247 manually renamed the
-    /// file to drop `.exe`. After the fix lands, that workaround must
-    /// still resolve via the suffix-less fallback so they don't have to
-    /// rename it back.
-    #[cfg(windows)]
-    #[test]
-    fn sibling_tui_candidate_windows_falls_back_to_suffixless() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let dispatcher = dir.path().join("codewhale.exe");
-        std::fs::write(&dispatcher, b"").unwrap();
-
-        // Only the suffixless name exists — emulates the manual rename.
-        let suffixless = dispatcher.with_file_name("codewhale-tui");
-        std::fs::write(&suffixless, b"").unwrap();
-
-        let found = sibling_tui_candidate(&dispatcher)
-            .expect("Windows fallback must locate suffixless codewhale-tui");
-        assert_eq!(found, suffixless);
-    }
-
-    /// `DEEPSEEK_TUI_BIN` overrides the discovery path. Useful for
-    /// custom Windows install layouts and CI test rigs.
-    #[test]
-    fn locate_sibling_tui_binary_honours_env_override() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let custom = dir
-            .path()
-            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&custom, b"").unwrap();
-        let custom_str = custom.to_string_lossy().into_owned();
-        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
-
-        let resolved = locate_sibling_tui_binary().expect("override must resolve");
-        assert_eq!(resolved, custom);
-    }
-
-    /// `CODEWHALE_TUI_BIN` is the canonical override name and outranks the
-    /// legacy `DEEPSEEK_TUI_BIN` alias when both are set.
-    #[test]
-    fn locate_sibling_tui_binary_prefers_codewhale_env_override() {
-        let _lock = env_lock();
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let canonical = dir
-            .path()
-            .join(format!("canonical-tui{}", std::env::consts::EXE_SUFFIX));
-        let legacy = dir
-            .path()
-            .join(format!("legacy-tui{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&canonical, b"").unwrap();
-        std::fs::write(&legacy, b"").unwrap();
-        let _canonical_bin = ScopedEnvVar::set("CODEWHALE_TUI_BIN", &canonical.to_string_lossy());
-        let _legacy_bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &legacy.to_string_lossy());
-
-        let resolved = locate_sibling_tui_binary().expect("override must resolve");
-        assert_eq!(resolved, canonical);
     }
 }

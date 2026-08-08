@@ -229,6 +229,7 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         argv, env = runtime.programs[0]
         self.assertEqual(argv[argv.index("--sandbox") + 1], "external-sandbox")
         self.assertNotIn("--allow-sandbox-elevation", argv)
+        self.assertNotIn("--max-turns", argv)
         self.assertNotIn("CODEWHALE_ALLOW_INSECURE_HTTP", env)
 
     async def test_success_without_exact_terminal_receipt_fails_closed(self):

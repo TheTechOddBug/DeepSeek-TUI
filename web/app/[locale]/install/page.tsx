@@ -24,23 +24,21 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
 const SHELL_INSTALL = `curl -fsSL https://codewhale.net/install.sh | sh`;
 const SHELL_INSPECT = `curl -fsSL https://codewhale.net/install.sh`;
 const NPM_INSTALL = `npm install -g codewhale`;
-const CARGO_INSTALL = `cargo install codewhale-cli --locked
-cargo install codewhale-tui --locked`;
+const CARGO_INSTALL = `cargo install codewhale-cli --locked`;
 const FIRST_RUN = `codewhale`;
 const UPDATE = `codewhale update`;
 
 const RELEASE_DOWNLOAD = `# Download your platform archive:
 https://github.com/Hmbown/CodeWhale/releases/latest`;
-const cnbInstall = (tag: string) => `cargo install --git https://cnb.cool/codewhale.net/codewhale --tag ${tag} codewhale-cli --locked --force
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag ${tag} codewhale-tui --locked --force`;
+const cnbInstall = (tag: string) =>
+  `cargo install --git https://cnb.cool/codewhale.net/codewhale --tag ${tag} codewhale-cli --locked --force`;
 const TUNA_CONFIG = `# ~/.cargo/config.toml
 [source.crates-io]
 replace-with = "tuna"
 
 [source.tuna]
 registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"`;
-const TUNA_INSTALL = `cargo install codewhale-cli --locked
-cargo install codewhale-tui --locked`;
+const TUNA_INSTALL = `cargo install codewhale-cli --locked`;
 
 const BREW = `brew tap Hmbown/deepseek-tui
 brew install deepseek-tui`;
@@ -56,9 +54,8 @@ const FROM_SOURCE = `git clone https://github.com/Hmbown/CodeWhale
 cd CodeWhale
 cargo build --release --locked
 
-# Install two Cargo packages; together they provide three commands
-cargo install --path crates/cli --locked   # codewhale + codew
-cargo install --path crates/tui --locked   # codewhale-tui`;
+# Install the compiled runtime as codewhale
+cargo install --path crates/cli --locked`;
 
 const CONFIG_TREE = `$CODEWHALE_HOME/ (default: ~/.codewhale/)
 ├── config.toml      api keys, model, hooks, profiles
@@ -121,9 +118,9 @@ codewhale doctor`;
           {isZh ? (
             <>
               macOS / Linux 安装脚本会从 GitHub Releases 下载经 SHA-256 校验的二进制，
-              默认安装到 <code className="inline">~/.local/bin</code>，并安装{" "}
-              <code className="inline">codewhale</code>、<code className="inline">codew</code> 和{" "}
-              <code className="inline">codewhale-tui</code>。先审阅脚本可运行{" "}
+              默认安装到 <code className="inline">~/.local/bin</code>，并提供{" "}
+              <code className="inline">codewhale</code> 和 <code className="inline">codew</code>
+              两个命令名；两者运行同一个编译后的 runtime。先审阅脚本可运行{" "}
               <code className="inline">{SHELL_INSPECT}</code>。下方「其他安装方式」列出 npm、Cargo、GitHub Releases、
               CNB、国内镜像、Homebrew、预编译二进制和 Docker。
             </>
@@ -131,8 +128,8 @@ codewhale doctor`;
             <>
               The macOS / Linux installer downloads SHA-256-verified binaries from GitHub Releases,
               installs to <code className="inline">~/.local/bin</code> by default, and exposes{" "}
-              <code className="inline">codewhale</code>, <code className="inline">codew</code>, and{" "}
-              <code className="inline">codewhale-tui</code>. To inspect it first, run{" "}
+              <code className="inline">codewhale</code> and <code className="inline">codew</code> as
+              two names for the same compiled runtime. To inspect it first, run{" "}
               <code className="inline">{SHELL_INSPECT}</code>. See{" "}
               <a href="#other-ways" className="body-link">Other ways to install</a> below for
               npm, cargo, GitHub Releases, CNB, Homebrew, prebuilt binaries, Docker, or mainland
@@ -188,10 +185,10 @@ codewhale doctor`;
               <code className="inline">curl</code> 命令覆盖更新。
               通过包管理器安装的话，用包管理器升级更稳：npm 安装的运行{" "}
               <code className="inline">npm update -g codewhale</code>；
-              Cargo 安装的重跑两个 package 的 <code className="inline">cargo install</code> 命令并加{" "}
-              <code className="inline">--force</code>（<code className="inline">codewhale-cli</code> 提供
-              <code className="inline">codewhale</code> 与 <code className="inline">codew</code>，
-              <code className="inline">codewhale-tui</code> 提供同名命令）；
+              Cargo 安装的重跑 <code className="inline">codewhale-cli</code> 这一条{" "}
+              <code className="inline">cargo install</code> 命令并加 <code className="inline">--force</code>；
+              Cargo 只安装 <code className="inline">codewhale</code>，如需短名称可自行定义{" "}
+              <code className="inline">codew</code> shell alias；
               旧版 Homebrew tap 用 <code className="inline">brew upgrade deepseek-tui</code>。
             </>
           ) : (
@@ -200,11 +197,11 @@ codewhale doctor`;
               installed with <code className="inline">install.sh</code>, re-run the same{" "}
               <code className="inline">curl</code> command to overwrite the binaries.
               If you installed via a package manager, prefer it instead: npm users run{" "}
-              <code className="inline">npm update -g codewhale</code>; cargo users re-run the two
-              package <code className="inline">cargo install</code> commands with{" "}
-              <code className="inline">--force</code> (<code className="inline">codewhale-cli</code>
-              provides <code className="inline">codewhale</code> and <code className="inline">codew</code>;
-              <code className="inline">codewhale-tui</code> provides the command of the same name);
+              <code className="inline">npm update -g codewhale</code>; Cargo users re-run the one{" "}
+              <code className="inline">codewhale-cli</code> install command with{" "}
+              <code className="inline">--force</code>. Cargo installs only{" "}
+              <code className="inline">codewhale</code>; define your own{" "}
+              <code className="inline">codew</code> shell alias if you want the shorter name;
               the legacy Homebrew tap updates with{" "}
               <code className="inline">brew upgrade deepseek-tui</code>.
             </>
@@ -330,15 +327,14 @@ codewhale doctor`;
                 {isZh ? (
                   <>
                     npm wrapper 会从 GitHub Releases 下载经 SHA-256 校验的二进制，并安装{" "}
-                    <code className="inline">codewhale</code>、<code className="inline">codew</code> 和{" "}
-                    <code className="inline">codewhale-tui</code> 三个命令。
+                    <code className="inline">codewhale</code> 和 <code className="inline">codew</code>
+                    两个命令名；两者运行同一个 runtime。
                   </>
                 ) : (
                   <>
                     The npm wrapper downloads SHA-256-verified binaries from GitHub Releases and
-                    installs <code className="inline">codewhale</code>,{" "}
-                    <code className="inline">codew</code>, and{" "}
-                    <code className="inline">codewhale-tui</code>.
+                    installs <code className="inline">codewhale</code> and{" "}
+                    <code className="inline">codew</code> as two names for the same runtime.
                   </>
                 )}
               </p>
@@ -353,18 +349,18 @@ codewhale doctor`;
               <p className="mt-3 text-sm text-ink-soft leading-relaxed max-w-2xl">
                 {isZh ? (
                   <>
-                    两个 Cargo package 会把 <code className="inline">codewhale</code>、
-                    <code className="inline">codew</code> 和 <code className="inline">codewhale-tui</code>
-                    三个命令安装到 <code className="inline">~/.cargo/bin</code>。
+                    <code className="inline">codewhale-cli</code> 这一个 Cargo package 只会把{" "}
+                    <code className="inline">codewhale</code> 安装到 <code className="inline">~/.cargo/bin</code>。
+                    如需较短的 <code className="inline">codew</code> 名称，可自行定义 shell alias。
                     需要 Rust 1.88+；Linux 用户先安装 <code className="inline">pkg-config</code> 和{" "}
                     <code className="inline">libdbus-1-dev</code> 等构建依赖。如未安装 Rust，可访问{" "}
                     <a href="https://rustup.rs" className="body-link">rustup.rs</a>。
                   </>
                 ) : (
                   <>
-                    The two Cargo packages install three commands—
-                    <code className="inline">codewhale</code>, <code className="inline">codew</code>, and{" "}
-                    <code className="inline">codewhale-tui</code>—to <code className="inline">~/.cargo/bin</code>.
+                    The one <code className="inline">codewhale-cli</code> Cargo package installs only{" "}
+                    <code className="inline">codewhale</code> to <code className="inline">~/.cargo/bin</code>.
+                    Define your own <code className="inline">codew</code> shell alias if you want the shorter name.
                     Requires Rust 1.88+; install via{" "}
                     <a href="https://rustup.rs" className="body-link">rustup.rs</a> if you don&apos;t have it.
                     On Linux, install build dependencies such as{" "}

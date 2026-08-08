@@ -59,6 +59,25 @@ pub struct RuntimeCapabilities {
     pub fleet_event_stream: bool,
     #[serde(default)]
     pub fleet_local_target: bool,
+    /// `GET/PUT/DELETE /v1/threads/{id}/goal` and the `complete`/`block`
+    /// lifecycle actions are available.
+    #[serde(default)]
+    pub thread_goals: bool,
+    /// `GET /v1/memory` and `GET /v1/memory/{id}` are available for
+    /// bounded inspection of the native memory store.  `POST /v1/memory`
+    /// and `DELETE /v1/memory` are also available (auth-gated via the
+    /// standard route layer) for lifecycle controls.
+    #[serde(default)]
+    pub memory: bool,
+    /// Whether the runtime supports create/update/enable/disable/reconnect/delete
+    /// operations on MCP server configuration via the `POST|GET|PATCH|DELETE
+    /// /v1/apps/mcp/servers` family of endpoints.
+    #[serde(default)]
+    pub mcp_server_management: bool,
+    /// Skill lifecycle operations (install, update, uninstall, trust, audit)
+    /// are available via the HTTP API.
+    #[serde(default)]
+    pub skill_lifecycle: bool,
 }
 
 /// Experimental opt-in flags advertised by `GET /v1/runtime/info`.
@@ -355,6 +374,10 @@ mod tests {
             fleet_event_replay: true,
             fleet_event_stream: true,
             fleet_local_target: true,
+            thread_goals: true,
+            memory: true,
+            mcp_server_management: false,
+            skill_lifecycle: false,
         };
         let value = serde_json::to_value(&caps).unwrap();
         let obj = value.as_object().unwrap();
@@ -364,6 +387,8 @@ mod tests {
         assert!(obj.contains_key("worker_runtime"));
         assert_eq!(obj.get("fleet_run_create").unwrap(), &json!(true));
         assert_eq!(obj.get("fleet_event_stream").unwrap(), &json!(true));
+        assert_eq!(obj.get("thread_goals").unwrap(), &json!(true));
+        assert_eq!(obj.get("memory").unwrap(), &json!(true));
     }
 
     #[test]

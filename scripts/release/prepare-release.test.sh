@@ -12,7 +12,9 @@ make_fixture() {
     "${root}/crates/example" \
     "${root}/crates/tui" \
     "${root}/docs" \
+    "${root}/extensions/vscode" \
     "${root}/npm/codewhale" \
+    "${root}/npm/runtime-sdk" \
     "${root}/scripts/remote-smoke" \
     "${root}/scripts/release" \
     "${root}/web/lib" \
@@ -46,6 +48,34 @@ EOF
 }
 EOF
 
+  cat >"${root}/npm/runtime-sdk/package.json" <<'EOF'
+{
+  "name": "@codewhale/runtime-sdk",
+  "version": "0.8.68"
+}
+EOF
+
+  cat >"${root}/extensions/vscode/package.json" <<'EOF'
+{
+  "name": "codewhale-vscode",
+  "version": "0.8.68"
+}
+EOF
+
+  cat >"${root}/extensions/vscode/package-lock.json" <<'EOF'
+{
+  "name": "codewhale-vscode",
+  "version": "0.8.68",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "name": "codewhale-vscode",
+      "version": "0.8.68"
+    }
+  }
+}
+EOF
+
   cat >"${root}/package-lock.json" <<'EOF'
 {
   "name": "fixture",
@@ -53,6 +83,10 @@ EOF
   "packages": {
     "": { "name": "fixture" },
     "npm/codewhale": {
+      "version": "0.8.68",
+      "license": "MIT"
+    },
+    "npm/runtime-sdk": {
       "version": "0.8.68",
       "license": "MIT"
     }
@@ -157,7 +191,10 @@ grep -Fq 'version = "0.9.0"' "${success_root}/crates/example/Cargo.toml"
 grep -Fq '"version": "0.9.0"' "${success_root}/npm/codewhale/package.json"
 grep -Fq '"codewhaleBinaryVersion": "0.9.0"' \
   "${success_root}/npm/codewhale/package.json"
-grep -Fq '"version": "0.9.0"' "${success_root}/package-lock.json"
+grep -Fq '"version": "0.9.0"' "${success_root}/npm/runtime-sdk/package.json"
+grep -Fq '"version": "0.9.0"' "${success_root}/extensions/vscode/package.json"
+[[ "$(grep -Fc '"version": "0.9.0"' "${success_root}/extensions/vscode/package-lock.json")" == "2" ]]
+[[ "$(grep -Fc '"version": "0.9.0"' "${success_root}/package-lock.json")" == "2" ]]
 grep -Fq 'RELEASE_TAG="${RELEASE_TAG:-v0.9.0}"' \
   "${success_root}/scripts/remote-smoke/setup-vm.sh"
 grep -Fq '"sourceCandidate": { "version": "0.9.0" }' \

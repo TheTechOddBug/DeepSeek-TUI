@@ -165,12 +165,90 @@ pub struct ToolAuthorityEnvelope {
     /// launches always carry the resolved worker permission explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_access: Option<bool>,
+    /// Explicit shell cap for a headless worker. Older v1 envelopes omit this
+    /// field and therefore remain shell-less; mutation authority is never
+    /// treated as an implicit shell grant.
+    #[serde(default, skip_serializing_if = "ToolShellAuthority::is_none")]
+    pub shell: ToolShellAuthority,
+    /// Narrow process-start authority for the built-in verification surface.
+    /// This is separate from both mutation and shell authority: a verifier may
+    /// run classifier-bounded workspace checks, but that never grants Bash or
+    /// an operator-supplied command line.
+    #[serde(default, skip_serializing_if = "ToolVerificationAuthority::is_none")]
+    pub verification: ToolVerificationAuthority,
     #[serde(default)]
     pub writable_roots: Vec<String>,
     #[serde(default)]
     pub writable_files: Vec<String>,
     #[serde(default)]
     pub coordination_contracts: Vec<String>,
+}
+
+/// Shell authority carried across the Fleet subprocess boundary.
+///
+/// Full/arbitrary shell is intentionally not representable here. Fleet can
+/// opt a recon worker into the classifier-proven read subset, while every
+/// other headless role keeps the historical shell-less posture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolShellAuthority {
+    #[default]
+    None,
+    ReadOnly,
+}
+
+impl ToolShellAuthority {
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    #[must_use]
+    const fn shell_policy(self) -> ShellPolicy {
+        match self {
+            Self::None => ShellPolicy::None,
+            Self::ReadOnly => ShellPolicy::ReadOnly,
+        }
+    }
+}
+
+/// Process authority for Fleet's dedicated verifier role.
+///
+/// Arbitrary execution is intentionally not representable. The registry and
+/// dispatch boundary admit only calls that the shared verification classifier
+/// proves are default workspace checks or pure test selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolVerificationAuthority {
+    #[default]
+    None,
+    Bounded,
+}
+
+impl ToolVerificationAuthority {
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+/// Whether a headless Fleet process should register the one read-only Bash
+/// surface after intersecting the transported cap with explicit tool denies.
+#[must_use]
+pub(crate) fn fleet_exec_shell_enabled(
+    fleet_authority_active: bool,
+    shell_authority: ToolShellAuthority,
+    disallowed_tools: Option<&[String]>,
+) -> bool {
+    fleet_authority_active
+        && shell_authority == ToolShellAuthority::ReadOnly
+        && !disallowed_tools.is_some_and(|rules| {
+            rules.iter().any(|rule| {
+                let rule = rule.trim().to_ascii_lowercase();
+                rule.strip_suffix('*')
+                    .map_or_else(|| rule == "bash", |prefix| "bash".starts_with(prefix))
+            })
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +294,15 @@ impl ToolAuthorityEnvelope {
         {
             return Err("read_only authority cannot carry mutation scope".to_string());
         }
+        if self.verification == ToolVerificationAuthority::Bounded
+            && (self.authority != ToolMutationAuthority::ReadOnly
+                || self.shell != ToolShellAuthority::None)
+        {
+            return Err(
+                "bounded verification requires read_only mutation authority and no Bash authority"
+                    .to_string(),
+            );
+        }
         Ok(self)
     }
 
@@ -227,6 +314,12 @@ impl ToolAuthorityEnvelope {
 
     #[cfg(test)]
     fn is_within(&self, outer: &Self) -> bool {
+        if self.shell > outer.shell
+            || self.verification > outer.verification
+            || (outer.network_access == Some(false) && self.network_access != Some(false))
+        {
+            return false;
+        }
         if self.authority == ToolMutationAuthority::ReadOnly {
             return true;
         }
@@ -594,6 +687,11 @@ impl ToolContext {
     ) -> Self {
         let workspace = workspace.into();
         let shell_manager = new_shared_shell_manager(workspace.clone());
+        let tool_authority = process_tool_authority();
+        let shell_policy = match tool_authority.as_deref() {
+            Some(cap) => cap.shell.shell_policy(),
+            None => ShellPolicy::Full,
+        };
         Self {
             workspace,
             execution: Box::new(ToolExecutionState {
@@ -601,7 +699,7 @@ impl ToolContext {
                 file_read_tracker: new_shared_file_read_tracker(),
                 owner_agent_id: None,
                 owner_agent_name: None,
-                tool_authority: process_tool_authority(),
+                tool_authority,
                 trust_mode,
                 sandbox_policy: SandboxPolicy::None,
                 notes_path: notes_path.into(),
@@ -612,7 +710,7 @@ impl ToolContext {
                 elevated_sandbox_policy: None,
                 shell_network_denied_hint: None,
                 auto_approve: false,
-                shell_policy: ShellPolicy::Full,
+                shell_policy,
                 features: Features::with_defaults(),
                 state_namespace: "workspace".to_string(),
                 route_context_window: None,
@@ -691,6 +789,7 @@ impl ToolContext {
             );
         }
         self.tool_authority = Some(Arc::new(envelope));
+        self.shell_policy = self.authority_clamped_shell_policy(self.shell_policy);
         Ok(self)
     }
 
@@ -730,8 +829,22 @@ impl ToolContext {
     /// Attach the effective shell policy for this turn.
     #[must_use]
     pub fn with_shell_policy(mut self, policy: ShellPolicy) -> Self {
-        self.shell_policy = policy;
+        self.shell_policy = self.authority_clamped_shell_policy(policy);
         self
+    }
+
+    /// Replace the turn shell policy while retaining the process authority as
+    /// an outer ceiling. Live mode changes rebuild this value on every tool
+    /// call, so the clamp belongs here rather than only at engine startup.
+    pub(crate) fn set_shell_policy(&mut self, policy: ShellPolicy) {
+        self.shell_policy = self.authority_clamped_shell_policy(policy);
+    }
+
+    fn authority_clamped_shell_policy(&self, policy: ShellPolicy) -> ShellPolicy {
+        match self.tool_authority.as_deref() {
+            Some(cap) => policy.min_with(cap.shell.shell_policy()),
+            None => policy,
+        }
     }
 
     /// Attach an external sandbox backend for remote shell execution.

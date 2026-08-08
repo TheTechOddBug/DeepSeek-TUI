@@ -205,7 +205,10 @@ fn built_in_party_lists_all_members_in_canonical_order() {
             "verifier",
             "consultant",
             "synthesizer",
-            "general"
+            "general",
+            "worker",
+            "planner",
+            "custom"
         ]
     );
 }
@@ -402,5 +405,5 @@ fn selection_stays_visible_when_list_scrolls() {
         24,
     );
     let text = rows.join("\n");
-    assert!(text.contains("▸ · general"), "{text}");
+    assert!(text.contains("▸ · custom"), "{text}");
 }

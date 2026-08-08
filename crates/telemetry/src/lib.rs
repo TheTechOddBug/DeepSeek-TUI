@@ -68,9 +68,6 @@ pub use event::{
 /// handshake would hold a user's terminal past exit.
 pub const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Minimum gap between startup drains.
-pub const STARTUP_DRAIN_INTERVAL_HOURS: i64 = 6;
-
 /// Everything a write path needs once the process is armed.
 struct Armed {
     handle: actor::Handle,
@@ -260,19 +257,6 @@ pub fn exit_class() -> ExitClass {
     })
 }
 
-/// Flush whatever is buffered, waiting at most `deadline`.
-///
-/// Blocking, so async callers must hand this to `spawn_blocking` and bound it —
-/// [`SHUTDOWN_FLUSH_TIMEOUT`] is the teardown budget. Consent is re-resolved
-/// from disk inside the writer thread before anything is sent.
-///
-/// Returns [`FlushOutcome::Empty`] when unarmed.
-pub fn flush_blocking(deadline: Duration) -> FlushOutcome {
-    ARMED
-        .get()
-        .map_or(FlushOutcome::Empty, |armed| armed.handle.flush(deadline))
-}
-
 /// Final flush, then stop the writer thread.
 ///
 /// Returns [`FlushOutcome::Empty`] when unarmed.
@@ -280,31 +264,4 @@ pub fn shutdown_blocking(deadline: Duration) -> FlushOutcome {
     ARMED
         .get()
         .map_or(FlushOutcome::Empty, |armed| armed.handle.shutdown(deadline))
-}
-
-/// Whether a startup drain is due: a prior session crashed or was signalled and
-/// left events behind, and enough time has passed since the last attempt.
-///
-/// The check happens **before** the drain task is spawned, so "not due" means no
-/// task at all rather than a task that returns early.
-#[must_use]
-pub fn startup_drain_due() -> bool {
-    let Some(armed) = ARMED.get() else {
-        return false;
-    };
-    let path = buffer::buffer_path(&armed.root);
-    if buffer::read_lines(&path).is_empty() {
-        return false;
-    }
-    let state = envelope::read_state(&armed.root);
-    let Some(last) = state.last_flush else {
-        return true;
-    };
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&last) else {
-        return true;
-    };
-    chrono::Utc::now()
-        .signed_duration_since(parsed.with_timezone(&chrono::Utc))
-        .num_hours()
-        >= STARTUP_DRAIN_INTERVAL_HOURS
 }

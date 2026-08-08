@@ -12,16 +12,13 @@
 
 #![cfg(unix)]
 
-#[path = "support/qa_harness/mod.rs"]
-mod qa_harness;
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
+use crate::qa_harness::keys;
 use anyhow::{Result, anyhow};
-use qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
-use qa_harness::keys;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -184,7 +181,10 @@ impl Respond for ProbeResponder {
     }
 }
 
-fn tui_builder(ws: &SealedWorkspace, server_uri: &str) -> qa_harness::harness::HarnessBuilder {
+fn tui_builder(
+    ws: &SealedWorkspace,
+    server_uri: &str,
+) -> crate::qa_harness::harness::HarnessBuilder {
     Harness::builder(Harness::cargo_bin("codewhale-tui"))
         .cwd(ws.workspace())
         .clear_env()
@@ -246,7 +246,7 @@ fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_divider_row(frame: &qa_harness::Frame, y: u16) -> bool {
+fn is_divider_row(frame: &crate::qa_harness::Frame, y: u16) -> bool {
     frame
         .row(y)
         .chars()

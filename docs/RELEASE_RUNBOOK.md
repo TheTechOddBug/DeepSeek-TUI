@@ -100,11 +100,11 @@ without unpublished workspace dependencies and a packaging preflight for depende
 workspace crates. That avoids false negatives from crates.io not yet containing the
 new workspace version while still validating package contents before publish.
 
-For npm wrapper verification, build the three shipped entrypoints and run the
+For npm wrapper verification, build the single runtime and run the
 cross-platform smoke harness. This packs the npm wrapper, installs it into a
-clean temporary project, serves local release assets over HTTP, and checks the
-dispatcher-to-TUI path (`codewhale doctor --help`), the installed native shortcut
-(`codew --version`), and the direct TUI entrypoint (`codewhale-tui --help`).
+clean temporary project, serves local release assets over HTTP, and checks both
+published commands against that runtime: `codewhale doctor --help` and
+`codew --version`.
 
 ```bash
 cargo build --release --locked -p codewhale-cli -p codewhale-tui
@@ -140,9 +140,11 @@ different head.
 `release-candidate.yml` also fails unless the selected ref resolves to the
 exact requested SHA. It invokes the same reusable artifact workflow as the
 public release, building all seven targets (including Android arm64 and native
-Windows arm64), staging `codewhale`, `codew`, and `codewhale-tui`, building the
+Windows arm64), staging `codewhale` and `codew` (single binary), building the
 NSIS installer and nine platform archives, and validating the authoritative
-34-file inventory from `npm/codewhale/scripts/artifacts.js`. It then installs
+34-file v0.9.5 bridge inventory from `npm/codewhale/scripts/artifacts.js` (27
+current assets plus seven legacy `codewhale-tui-*` names containing the same
+compiled `codewhale` bytes for v0.9.4 update compatibility). It then installs
 the packed npm wrapper against those assembled local assets and exercises its
 delegated entrypoints. The resulting `codewhale-release-assets` bundle is a
 short-lived GitHub Actions artifact only.
@@ -279,12 +281,13 @@ The publish helper is idempotent for reruns: already-published crate versions ar
 
 ## GitHub Release Assets
 
-`.github/workflows/release.yml` builds these binaries:
+`.github/workflows/release.yml` builds and stages these artifacts:
 
-- `codewhale-*` CLI binaries for Linux x64/arm64, Android arm64, macOS
+- one `codewhale-*` runtime binary for Linux x64/arm64, Android arm64, macOS
   x64/arm64, and Windows x64/arm64
-- `codewhale-tui-*` TUI binaries for the same target matrix
-- `codew-*` shortcut binaries for the same target matrix
+- byte-identical `codew-*` command assets copied from that runtime
+- for v0.9.5 only, byte-identical `codewhale-tui-*` compatibility filenames so
+  installed v0.9.4 clients can discover and complete the one-runtime upgrade
 - `codewhale.bat` for the Windows npm launcher
 - platform `.tar.gz` / `.zip` archives and `CodeWhaleSetup.exe`
 
@@ -401,8 +404,9 @@ If the workflow failed for the release tag, use the exact-tag rerun or
 
 - User-facing rollback:
   - npm: `npm install -g codewhale@X.Y.Z`
-  - Cargo: `cargo install codewhale-cli --version X.Y.Z --locked --force`
-    and `cargo install codewhale-tui --version X.Y.Z --locked --force`
+  - Cargo: `cargo install codewhale-cli --version X.Y.Z --locked --force`;
+    add an optional `codew` alias as documented in
+    [docs/INSTALL.md](INSTALL.md#7-build-from-source)
   - manual assets: download binaries or the platform archive plus the matching
     `codewhale-artifacts-sha256.txt` or `codewhale-bundles-sha256.txt`
     manifest from `https://github.com/Hmbown/CodeWhale/releases/tag/vX.Y.Z`

@@ -1066,8 +1066,9 @@ fn workflow_panel_uses_non_text_keys_for_controls() {
 }
 
 struct ConfigPathEnvGuard {
+    _codewhale_config_path: crate::test_support::EnvVarGuard,
+    _deepseek_config_path: crate::test_support::EnvVarGuard,
     _tmp: TempDir,
-    previous: Option<OsString>,
     _lock: crate::test_support::TestEnvLock,
 }
 
@@ -1077,35 +1078,22 @@ impl ConfigPathEnvGuard {
         let tmp = TempDir::new().expect("config tempdir");
         let config_path = tmp.path().join(".deepseek").join("config.toml");
         std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
-        let previous = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-        // Safety: test-only environment mutation guarded by a global mutex.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-        }
+        let codewhale_config_path =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+        let deepseek_config_path =
+            crate::test_support::EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
         Self {
+            _codewhale_config_path: codewhale_config_path,
+            _deepseek_config_path: deepseek_config_path,
             _tmp: tmp,
-            previous,
             _lock: lock,
         }
     }
 
     fn config_path(&self) -> PathBuf {
-        std::env::var_os("DEEPSEEK_CONFIG_PATH")
+        std::env::var_os("CODEWHALE_CONFIG_PATH")
             .map(PathBuf::from)
             .expect("config path set")
-    }
-}
-
-impl Drop for ConfigPathEnvGuard {
-    fn drop(&mut self) {
-        // Safety: test-only environment mutation guarded by a global mutex.
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", previous);
-            } else {
-                std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-            }
-        }
     }
 }
 
@@ -4647,7 +4635,10 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
             archived: false,
+            spawn_depth: 0,
         },
+        journal: None,
+        leaf_id: None,
         messages,
         system_prompt: None,
         context_references: Vec::new(),
@@ -6169,6 +6160,9 @@ async fn failed_native_xai_oauth_activation_stays_in_onboarding_recovery() {
 #[tokio::test]
 async fn xai_api_key_confirmation_saves_only_the_selected_xai_slot() {
     let config_env = ConfigPathEnvGuard::new();
+    let codewhale_home = config_env._tmp.path().canonicalize().expect("temp home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
     let mut app = create_test_app();
     app.config_path = Some(config_env.config_path());
     let mut engine = mock_engine_handle();
@@ -6187,7 +6181,7 @@ async fn xai_api_key_confirmation_saves_only_the_selected_xai_slot() {
     )
     .await;
 
-    assert!(switched);
+    assert!(switched, "provider switch failed: {:?}", app.history);
     let xai = config
         .provider_config_for(ApiProvider::Xai)
         .expect("saved xAI slot");
@@ -10117,6 +10111,60 @@ fn complete_release_json(tag: &str) -> serde_json::Value {
 }
 
 #[test]
+fn startup_notice_accepts_the_v095_single_binary_release_inventory() {
+    const V095_ASSETS: &[&str] = &[
+        "codewhale-linux-x64",
+        "codew-linux-x64",
+        "codewhale-linux-arm64",
+        "codew-linux-arm64",
+        "codewhale-android-arm64",
+        "codew-android-arm64",
+        "codewhale-macos-x64",
+        "codew-macos-x64",
+        "codewhale-macos-arm64",
+        "codew-macos-arm64",
+        "codewhale-windows-x64.exe",
+        "codew-windows-x64.exe",
+        "codewhale.bat",
+        "codewhale-windows-arm64.exe",
+        "codew-windows-arm64.exe",
+        "codewhale-linux-x64.tar.gz",
+        "codewhale-linux-arm64.tar.gz",
+        "codewhale-android-arm64.tar.gz",
+        "codewhale-macos-x64.tar.gz",
+        "codewhale-macos-arm64.tar.gz",
+        "codewhale-windows-x64.zip",
+        "codewhale-windows-x64-portable.zip",
+        "codewhale-windows-arm64.zip",
+        "codewhale-windows-arm64-portable.zip",
+        "CodeWhaleSetup.exe",
+        "codewhale-bundles-sha256.txt",
+        "codewhale-artifacts-sha256.txt",
+    ];
+
+    assert_eq!(REQUIRED_RELEASE_ASSETS, V095_ASSETS);
+    assert!(
+        REQUIRED_RELEASE_ASSETS
+            .iter()
+            .all(|asset| !asset.starts_with("codewhale-tui-")),
+        "the single-binary release must not wait for removed TUI assets"
+    );
+
+    let release = serde_json::json!({
+        "tag_name": "v0.9.5",
+        "draft": false,
+        "prerelease": false,
+        "assets": V095_ASSETS
+            .iter()
+            .map(|name| serde_json::json!({ "name": name, "state": "uploaded" }))
+            .collect::<Vec<_>>(),
+    });
+    let notice = version_hint_from_release_json(&release, "0.9.4")
+        .expect("the complete v0.9.5 inventory must produce an update notice");
+    assert_eq!(notice.chip_label(), "↑ v0.9.5");
+}
+
+#[test]
 fn version_hint_requires_complete_release_assets() {
     let complete = complete_release_json("v0.8.47");
     let hint = version_hint_from_release_json(&complete, "0.8.46").expect("newer complete release");
@@ -12828,6 +12876,43 @@ fn open_tool_details_pager_supports_active_virtual_tool_cell() {
 }
 
 #[test]
+fn visible_error_becomes_full_detail_target_ahead_of_adjacent_tool() {
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "exec_shell".to_string(),
+            status: ToolStatus::Success,
+            input_summary: Some("command: true".to_string()),
+            output: Some("ok".to_string()),
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+        HistoryCell::Error {
+            message: "Refusing insecure base URL.\nSet CODEWHALE_ALLOW_INSECURE_HTTP=1 only for a trusted LAN host."
+                .to_string(),
+            severity: crate::error_taxonomy::ErrorSeverity::Error,
+        },
+    ];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+    app.viewport.last_transcript_top = 0;
+    app.viewport.last_transcript_visible = app.viewport.transcript_cache.total_lines();
+
+    assert!(app.cell_has_detail_target(1));
+    assert_eq!(detail_target_cell_index(&app), Some(1));
+    assert!(open_tool_details_pager(&mut app));
+    let body = pop_pager_body(&mut app);
+    assert!(body.contains("CODEWHALE_ALLOW_INSECURE_HTTP=1"), "{body}");
+}
+
+#[test]
 fn tool_details_pager_frames_leaf_scope_and_preserves_raw_content() {
     let mut app = create_test_app();
     app.history = vec![HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
@@ -14163,6 +14248,85 @@ fn picker_renamed_active_title_survives_automatic_snapshot() {
         Some("session-parent")
     );
     assert_eq!(snapshot.metadata.forked_from_message_count, Some(7));
+}
+
+#[test]
+fn stale_cached_placeholder_title_does_not_override_generated_title() {
+    let mut app = create_test_app();
+    let manager = SessionManager::new(tempfile::tempdir().expect("tempdir").path().to_path_buf())
+        .expect("session manager");
+    app.api_messages.push(crate::models::Message {
+        role: "user".to_string(),
+        content: vec![crate::models::ContentBlock::Text {
+            text: "Please fix the login bug".to_string(),
+            cache_control: None,
+        }],
+    });
+    // Cache pinned to the placeholder title — exactly what the old behavior
+    // left behind when the first snapshot ran before any user message existed.
+    let mut cached = crate::session_manager::create_saved_session_with_id_and_mode(
+        "session-title-bug".to_string(),
+        &app.api_messages,
+        &app.model,
+        &app.workspace,
+        0,
+        app.system_prompt.as_ref(),
+        Some(app.mode.as_setting()),
+    )
+    .metadata;
+    cached.title = "New Session".to_string();
+    app.current_session_id = Some(cached.id.clone());
+    app.current_session_metadata = Some(cached);
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("snapshot");
+
+    assert_eq!(snapshot.metadata.title, "Please fix the login bug");
+    assert_eq!(
+        app.current_session_metadata
+            .as_ref()
+            .map(|metadata| metadata.title.as_str()),
+        Some("Please fix the login bug")
+    );
+}
+
+#[test]
+fn persisted_placeholder_title_yields_to_computed_title_when_conversation_has_content() {
+    let mut app = create_test_app();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manager = SessionManager::new(dir.path().join("sessions")).expect("session manager");
+    // A session whose first save happened before any user message existed:
+    // the old behavior pinned its title to the "New Session" placeholder on
+    // disk, and a later snapshot must let the computed title win.
+    let stale = crate::session_manager::create_saved_session_with_id_and_mode(
+        "session-stale-title".to_string(),
+        &[],
+        &app.model,
+        &app.workspace,
+        0,
+        app.system_prompt.as_ref(),
+        Some(app.mode.as_setting()),
+    );
+    assert_eq!(stale.metadata.title, "New Session");
+    manager.save_session(&stale).expect("save stale session");
+    app.api_messages.push(crate::models::Message {
+        role: "user".to_string(),
+        content: vec![crate::models::ContentBlock::Text {
+            text: "fix me".to_string(),
+            cache_control: None,
+        }],
+    });
+    app.current_session_id = Some(stale.metadata.id.clone());
+    app.current_session_metadata = Some(stale.metadata.clone());
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("snapshot");
+
+    assert_eq!(snapshot.metadata.title, "fix me");
+    assert_eq!(
+        app.current_session_metadata
+            .as_ref()
+            .map(|metadata| metadata.title.as_str()),
+        Some("fix me")
+    );
 }
 
 #[test]

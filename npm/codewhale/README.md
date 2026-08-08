@@ -10,9 +10,9 @@ rollback.
 
 This npm package is a small launcher: it downloads the matching native
 Codewhale binaries for your platform, verifies them against the release
-SHA-256 manifest, and installs the `codewhale`, `codew`, and `codewhale-tui`
-commands. The application state and credentials still live in Codewhale's
-normal config files, not inside `node_modules`.
+SHA-256 manifest, and installs `codewhale` plus the `codew` convenience name.
+Both names run the same compiled runtime. The application state and credentials
+still live in Codewhale's normal config files, not inside `node_modules`.
 
 > Previously published as `deepseek-tui`. See
 > [docs/REBRAND.md](https://github.com/Hmbown/CodeWhale/blob/main/docs/REBRAND.md)
@@ -52,10 +52,9 @@ Every provider is the same one-line shape — `--provider openrouter`,
 Claude key; the full registry lives in
 [docs/PROVIDERS.md](https://github.com/Hmbown/CodeWhale/blob/main/docs/PROVIDERS.md).
 
-The `codewhale` facade and `codewhale-tui` binary share
-`~/.codewhale/config.toml` for auth and default model settings. Legacy
-`~/.deepseek/config.toml` installs are still read as a compatibility fallback.
-Common TUI commands are available directly through the facade, including
+The single runtime reads `~/.codewhale/config.toml` for auth and default model
+settings. Legacy `~/.deepseek/config.toml` installs are still read as a
+compatibility fallback. Common commands are available directly, including
 `codewhale doctor`, `codewhale models`, `codewhale sessions`, and
 `codewhale resume --last`.
 
@@ -71,10 +70,10 @@ Prebuilt binaries for the GitHub release are downloaded automatically:
   selected GitHub Release)
 
 The source-candidate wrapper recognizes Android arm64 and resolves the
-Termux-native `codewhale`, `codew`, and `codewhale-tui` assets. That path works
-only for package versions whose matching GitHub Release publishes all three
-assets, and remains preview support pending real-device QA. See the support
-table in [docs/INSTALL.md](https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md).
+Termux-native `codewhale` and `codew` assets. That path works only for package
+versions whose matching GitHub Release publishes both assets, and remains
+preview support pending real-device QA. See the support table in
+[docs/INSTALL.md](https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md).
 
 HarmonyOS PC (`openharmony`) is treated as `linux`, so it gets the Linux
 binaries matching your CPU architecture (x64 or arm64). Linux riscv64 prebuilts

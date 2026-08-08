@@ -33,51 +33,39 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux-x64
-            cli_binary: codewhale
-            shim_binary: codew
-            tui_binary: codewhale-tui
-            cli_artifact: codewhale-linux-x64
-            tui_artifact: codewhale-tui-linux-x64
+            binary: codewhale
+            primary_artifact: codewhale-linux-x64
+            alias_artifact: codew-linux-x64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-arm64
-            cli_binary: codewhale
-            shim_binary: codew
-            tui_binary: codewhale-tui
-            cli_artifact: codewhale-linux-arm64
-            tui_artifact: codewhale-tui-linux-arm64
+            binary: codewhale
+            primary_artifact: codewhale-linux-arm64
+            alias_artifact: codew-linux-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
             platform: macos-x64
-            cli_binary: codewhale
-            shim_binary: codew
-            tui_binary: codewhale-tui
-            cli_artifact: codewhale-macos-x64
-            tui_artifact: codewhale-tui-macos-x64
+            binary: codewhale
+            primary_artifact: codewhale-macos-x64
+            alias_artifact: codew-macos-x64
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: macos-arm64
-            cli_binary: codewhale
-            shim_binary: codew
-            tui_binary: codewhale-tui
-            cli_artifact: codewhale-macos-arm64
-            tui_artifact: codewhale-tui-macos-arm64
+            binary: codewhale
+            primary_artifact: codewhale-macos-arm64
+            alias_artifact: codew-macos-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x64
-            cli_binary: codewhale.exe
-            shim_binary: codew.exe
-            tui_binary: codewhale-tui.exe
-            cli_artifact: codewhale-windows-x64.exe
-            tui_artifact: codewhale-tui-windows-x64.exe
+            binary: codewhale.exe
+            primary_artifact: codewhale-windows-x64.exe
+            alias_artifact: codew-windows-x64.exe
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             platform: windows-arm64
-            cli_binary: codewhale.exe
-            shim_binary: codew.exe
-            tui_binary: codewhale-tui.exe
-            cli_artifact: codewhale-windows-arm64.exe
-            tui_artifact: codewhale-tui-windows-arm64.exe
+            binary: codewhale.exe
+            primary_artifact: codewhale-windows-arm64.exe
+            alias_artifact: codew-windows-arm64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -92,9 +80,11 @@ jobs:
         if: steps.sccache.outcome == 'success'
         shell: bash
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "${GITHUB_ENV}"
-          echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
-          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "${GITHUB_ENV}"
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          } >> "${GITHUB_ENV}"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
@@ -117,7 +107,7 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
         run: |
           for attempt in 1 2 3; do
-            if cargo build --release --locked --target ${{ matrix.target }} -p codewhale-cli -p codewhale-tui; then
+            if cargo build --release --locked --target ${{ matrix.target }} -p codewhale-cli; then
               exit 0
             fi
             if [ "${attempt}" -lt 3 ]; then
@@ -127,30 +117,29 @@ jobs:
           done
           echo "Build failed after 3 attempts" >&2
           exit 1
-      - name: Smoke native ARM binaries
-        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-pc-windows-msvc'
+      - name: Smoke binary on matching native runners
+        if: >-
+          (startsWith(matrix.target, 'x86_64-') && runner.arch == 'X64') ||
+          (startsWith(matrix.target, 'aarch64-') && runner.arch == 'ARM64')
         shell: bash
         run: |
           bin_dir="target/${{ matrix.target }}/release"
-          "${bin_dir}/${{ matrix.cli_binary }}" --version
-          "${bin_dir}/${{ matrix.shim_binary }}" --version
-          "${bin_dir}/${{ matrix.tui_binary }}" --version
+          "${bin_dir}/${{ matrix.binary }}" --version
       - name: Stage artifact
         id: stage
         shell: bash
         run: |
           short_sha="${GITHUB_SHA::12}"
-          stage_one() {
-            local binary="$1"
-            local artifact="$2"
-            local dir="$3"
-            local bin_path="target/${{ matrix.target }}/release/${binary}"
-            if [ ! -f "${bin_path}" ]; then
-              echo "Binary not at ${bin_path}; searching target/ for ${binary}:"
-              find target -name "${binary}" -type f
-              exit 1
-            fi
+          bin_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if [ ! -f "${bin_path}" ]; then
+            echo "Binary not at ${bin_path}; searching target/ for ${{ matrix.binary }}:"
+            find target -name "${{ matrix.binary }}" -type f
+            exit 1
+          fi
 
+          stage_copy() {
+            local artifact="$1"
+            local dir="$2"
             mkdir -p "${dir}"
             cp "${bin_path}" "${dir}/${artifact}"
             cat > "${dir}/nightly-build-info.txt" <<INFO
@@ -162,17 +151,20 @@ jobs:
           INFO
           }
 
-          stage_one "${{ matrix.cli_binary }}" "${{ matrix.cli_artifact }}" nightly-cli
-          stage_one "${{ matrix.tui_binary }}" "${{ matrix.tui_artifact }}" nightly-tui
-          echo "cli_name=${{ matrix.cli_artifact }}-${short_sha}" >> "${GITHUB_OUTPUT}"
-          echo "tui_name=${{ matrix.tui_artifact }}-${short_sha}" >> "${GITHUB_OUTPUT}"
+          stage_copy "${{ matrix.primary_artifact }}" nightly-primary
+          stage_copy "${{ matrix.alias_artifact }}" nightly-alias
+          cmp -s \
+            "nightly-primary/${{ matrix.primary_artifact }}" \
+            "nightly-alias/${{ matrix.alias_artifact }}"
+          echo "primary_name=${{ matrix.primary_artifact }}-${short_sha}" >> "${GITHUB_OUTPUT}"
+          echo "alias_name=${{ matrix.alias_artifact }}-${short_sha}" >> "${GITHUB_OUTPUT}"
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.stage.outputs.cli_name }}
-          path: nightly-cli/*
+          name: ${{ steps.stage.outputs.primary_name }}
+          path: nightly-primary/*
           retention-days: 14
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.stage.outputs.tui_name }}
-          path: nightly-tui/*
+          name: ${{ steps.stage.outputs.alias_name }}
+          path: nightly-alias/*
           retention-days: 14

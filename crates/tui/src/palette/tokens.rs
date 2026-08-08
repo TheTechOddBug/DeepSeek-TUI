@@ -12,7 +12,7 @@ pub const WHALE_SELECTION_RGB: (u8, u8, u8) = (31, 50, 77); // #1F324D Action-bl
 pub const WHALE_TEXT_BODY_RGB: (u8, u8, u8) = (246, 242, 232); // #F6F2E8 Whale Ivory
 pub const WHALE_TEXT_SOFT_RGB: (u8, u8, u8) = (182, 192, 212); // #B6C0D4
 pub const WHALE_TEXT_MUTED_RGB: (u8, u8, u8) = (147, 160, 184); // #93A0B8
-pub const WHALE_TEXT_HINT_RGB: (u8, u8, u8) = (132, 145, 170); // #8491AA
+pub const WHALE_TEXT_HINT_RGB: (u8, u8, u8) = (138, 153, 179); // #8A99B3 — nudged +0.4 contrast for AA hint on #03070D
 #[allow(dead_code)]
 pub const WHALE_TEXT_DIM_RGB: (u8, u8, u8) = (105, 119, 145); // #697791
 pub const WHALE_ACTION_RGB: (u8, u8, u8) = (106, 174, 242); // #6AAEF2 Blue — owns interaction on dark

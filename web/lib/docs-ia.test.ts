@@ -107,6 +107,22 @@ describe("navigation parity and accessibility", () => {
     // One generator feeds both surfaces — no per-locale hardcoded arrays.
     expect(nav).toContain("navLinks(locale, chrome)");
     expect(nav).not.toMatch(/const (EN|ZH)_LINKS/);
+    // The six-link desktop strip does not replace the compact menu until xl;
+    // translated labels are wider than English and used to push real controls
+    // beyond the clipped viewport at md widths.
+    expect(navLinks).toContain('className="hidden xl:flex items-center gap-5"');
+    expect(navLinks).toContain("nav-link-secondary hidden 2xl:inline");
+    expect(mobileMenu).toContain("xl:hidden inline-flex");
+    expect(nav).toContain("paper-install-cta hidden xl:inline-flex");
+    // A fixed descendant of the blurred sticky header uses the header as its
+    // containing block and collapses. The open sheet must live at body scope.
+    expect(mobileMenu).toContain('import { createPortal } from "react-dom"');
+    expect(mobileMenu).toContain("createPortal(<div");
+    expect(mobileMenu).toContain("document.body");
+    expect(mobileMenu).toContain("element.inert = true");
+    expect(mobileMenu).toContain('if (e.key !== "Tab") return');
+    expect(mobileMenu).toContain('window.matchMedia("(min-width: 1280px)")');
+    expect(mobileMenu).toContain("if (event.matches) closeImmediately()");
   });
 
   it("keeps nav link paths in exact locale-swap parity for every routed locale", () => {

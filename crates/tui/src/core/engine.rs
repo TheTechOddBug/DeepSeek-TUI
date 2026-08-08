@@ -4913,7 +4913,7 @@ impl Engine {
         );
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
-        context.shell_policy = authority.shell_policy();
+        context.set_shell_policy(authority.shell_policy());
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
             self.api_config.sandbox_mode.as_deref(),

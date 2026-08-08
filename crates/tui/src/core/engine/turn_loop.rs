@@ -469,10 +469,6 @@ impl Engine {
         // across model steps so 3 consecutive empty blocks end the turn, not
         // just 3 blocks inside one message.
         let mut consecutive_empty_repl_rounds: u32 = 0;
-        // Combined no-user-input resume backstop (NOTE §5): ends runaway
-        // resumes well before max_steps (1000). Each continue without user
-        // input bumps this; threshold is honest and observable.
-        let mut no_user_input_continues: u32 = 0;
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
         // Phase 3), the host slept mid-turn (#2990), or a headless host hit
@@ -1791,16 +1787,6 @@ impl Engine {
                         self.add_session_message(self.user_text_message_with_turn_metadata(steer))
                             .await;
                     }
-                    no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
-                            ))
-                            .await;
-                        break;
-                    }
                     let _ = self
                         .tx_event
                         .send(Event::status("Continuing — queued steer input".to_string()))
@@ -1824,16 +1810,6 @@ impl Engine {
                 // work; results return via sentinel on a later turn.
                 let subagent_completions = self.drain_subagent_completion_events("").await;
                 if subagent_completions > 0 {
-                    no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
-                            ))
-                            .await;
-                        break;
-                    }
                     let _ = self
                         .tx_event
                         .send(Event::status(format!(
@@ -2088,17 +2064,6 @@ impl Engine {
                     }
 
                     // No FINAL — let the model iterate with the feedback.
-                    // Count toward the combined no-user-input backstop.
-                    no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12 consecutive continuations)".to_string(),
-                            ))
-                            .await;
-                        break;
-                    }
                     let _ = self
                         .tx_event
                         .send(Event::status(format!(
@@ -2137,16 +2102,6 @@ impl Engine {
                 }
 
                 if self.drain_subagent_completion_events("late").await > 0 {
-                    no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
-                            ))
-                            .await;
-                        break;
-                    }
                     let _ = self
                         .tx_event
                         .send(Event::status(
@@ -2170,16 +2125,6 @@ impl Engine {
                         UserInputProvenance::Runtime,
                     ))
                     .await;
-                    no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
-                            ))
-                            .await;
-                        break;
-                    }
                     let _ = self
                         .tx_event
                         .send(Event::status(format!(
@@ -3902,18 +3847,9 @@ impl Engine {
                 consecutive_tool_error_steps = 0;
             }
 
-            // Tool stepping (4d): one line why we're continuing without user input.
-            // This is the fourth resume kind alongside subagent/goal/REPL.
-            no_user_input_continues = no_user_input_continues.saturating_add(1);
-            if no_user_input_continues >= 12 {
-                let _ = self
-                    .tx_event
-                    .send(Event::status(
-                        "Turn ending: no-user-input resume backstop hit (12)".to_string(),
-                    ))
-                    .await;
-                break;
-            }
+            // A successful tool step is productive progress, not a runaway
+            // synthetic resume. Declared per-task tool budgets and max_steps
+            // remain the explicit limits for tool-driven work.
             let _ = self
                 .tx_event
                 .send(Event::status("Continuing — tool results".to_string()))

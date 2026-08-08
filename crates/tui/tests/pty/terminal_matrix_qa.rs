@@ -29,17 +29,14 @@
 
 #![cfg(unix)]
 
-#[path = "support/qa_harness/mod.rs"]
-mod qa_harness;
-
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
+use crate::qa_harness::modes::{MODES_THAT_MUST_NOT_LEAK, mode};
+use crate::qa_harness::view_log::{self, VIEW_STACK_RUST_LOG};
+use crate::qa_harness::{Frame, keys};
 use anyhow::{Result, anyhow};
-use qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
-use qa_harness::modes::{MODES_THAT_MUST_NOT_LEAK, mode};
-use qa_harness::view_log::{self, VIEW_STACK_RUST_LOG};
-use qa_harness::{Frame, keys};
 
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const KEY_TIMEOUT: Duration = Duration::from_secs(6);
@@ -274,7 +271,7 @@ fn size_matrix_keeps_the_composer_visible_and_inside_the_viewport() -> Result<()
     for (rows, cols, label) in SIZE_MATRIX {
         let transcript_before_resize = harness.transcript().len();
         harness.resize(*rows, *cols)?;
-        let deadline = Instant::now() + qa_harness::harness::ci_scaled(KEY_TIMEOUT);
+        let deadline = Instant::now() + crate::qa_harness::harness::ci_scaled(KEY_TIMEOUT);
         loop {
             harness.pump();
             let saw_post_resize_output = harness.transcript().len() > transcript_before_resize;

@@ -1,12 +1,13 @@
 //! MCP Registry sync tool.
 //!
-//! Provides `McpSyncRegistry` — fetches the MCP Registry index,
-//! filters for stdio-type servers, caches locally, and returns a summary.
-//! The cache is deliberately simple: every sync pulls the complete
-//! paginated listing and atomically replaces the previous `mcp-index.json`
-//! (no TTL freshness bookkeeping, no merge, no eviction). The on-disk file
-//! is the launch-metadata store for `start_registry_mcp_server`, and a
-//! failed sync leaves the previous snapshot untouched.
+//! `registry_sync` fetches the MCP Registry index, filters stdio servers,
+//! caches locally, and returns a summary. The snapshot is reused while
+//! fresh (`INCREMENTAL_INTERVAL_SECS`); refresh is incremental via
+//! `updated_since`, with a full pagination only when the snapshot is
+//! missing or older than `FULL_RESYNC_INTERVAL_SECS`. Downloads run in the
+//! background; the cache file is replaced atomically and doubles as the
+//! launch-metadata store for `start_registry_mcp_server` (a failed sync
+//! leaves the previous snapshot untouched).
 //!
 //! Upstream contract (MCP Registry, preview — breaking changes possible):
 //!   * List operation `GET /v0.1/servers` (cursor / limit / search / version
@@ -19,12 +20,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
 
 use crate::mcp::McpPool;
 use crate::tools::spec::{
@@ -263,11 +265,16 @@ struct RegistryMetadata {
 /// cache file and trigger a full resync instead of failing to deserialize.
 pub const MCP_REGISTRY_CACHE_VERSION: u32 = 6;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct McpRegistryIndex {
     pub version: u32,
     pub count: usize,
     pub servers: Vec<McpRegistryServerEntry>,
+    /// RFC3339 timestamp of the last successful sync. Absent or older
+    /// than `INCREMENTAL_INTERVAL_SECS` triggers the next refresh;
+    /// older than `FULL_RESYNC_INTERVAL_SECS` makes it a full resync.
+    #[serde(default)]
+    pub synced_at: Option<DateTime<Utc>>,
 }
 
 /// One Registry catalog entry exposed to the model for contextual selection.
@@ -317,11 +324,57 @@ pub struct McpRegistryArgEntry {
 
 // === Tool implementation ===
 
-pub struct McpSyncRegistry;
+pub struct McpSyncRegistry {
+    cache_path_override: Option<PathBuf>,
+}
+
+impl McpSyncRegistry {
+    /// Default instance; resolves the cache under `dirs::home_dir()`.
+    pub fn new() -> Self {
+        Self {
+            cache_path_override: None,
+        }
+    }
+
+    /// Test hook: pin the cache file to an explicit path. `dirs::home_dir()`
+    /// resolves the OS profile directory on Windows via SHGetKnownFolderPath,
+    /// which no environment variable can redirect, so tests that need a
+    /// hermetic cache inject the path directly on every platform.
+    #[cfg(test)]
+    pub fn with_cache_path(path: PathBuf) -> Self {
+        Self {
+            cache_path_override: Some(path),
+        }
+    }
+
+    fn cache_path(&self) -> Result<PathBuf, ToolError> {
+        match &self.cache_path_override {
+            Some(path) => Ok(path.clone()),
+            None => dirs::home_dir()
+                .ok_or_else(|| ToolError::execution_failed("Cannot determine home directory"))
+                .map(|h| h.join(".codewhale").join("mcp-index.json")),
+        }
+    }
+}
 
 const REGISTRY_API: &str = "https://registry.modelcontextprotocol.io/v0.1/servers";
 const PER_PAGE: usize = 100;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Inter-page delay: the upstream stalls under request bursts.
+const PAGE_PACING_MS: u64 = 500;
+/// Freshness window: within it `registry_sync` serves the cache with zero
+/// network requests; past it a background refresh starts.
+const INCREMENTAL_INTERVAL_SECS: i64 = 24 * 60 * 60;
+/// Age at which the background refresh falls back to a full pagination,
+/// reconciling servers that vanished from the listing entirely.
+const FULL_RESYNC_INTERVAL_SECS: i64 = 30 * 24 * 60 * 60;
+/// Identifies the client (RFC 9110); matches the crate-wide convention in
+/// `web/fetch.rs`. HTTP hygiene, not a fix for upstream stalls.
+const USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (compatible; codewhale/",
+    env!("CARGO_PKG_VERSION"),
+    "; +https://github.com/Hmbown/CodeWhale)"
+);
 /// Bounded retries for one sync. The on-disk cache only changes at the
 /// final atomic replace, so a failed fetch (HTTP/parse error) never
 /// mutates state and retrying is side-effect free.
@@ -337,9 +390,20 @@ fn cache_path() -> Result<PathBuf, ToolError> {
         .map(|h| h.join(".codewhale").join("mcp-index.json"))
 }
 
-fn read_cache(path: &PathBuf) -> Option<McpRegistryIndex> {
+fn read_cache(path: &Path) -> Option<McpRegistryIndex> {
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()
+}
+
+/// True when the snapshot is fresh enough to serve without a network
+/// round-trip. Version mismatch or missing timestamp count as stale.
+fn cache_is_fresh(cache: &McpRegistryIndex, now: DateTime<Utc>) -> bool {
+    if cache.version != MCP_REGISTRY_CACHE_VERSION {
+        return false;
+    }
+    cache.synced_at.is_some_and(|synced| {
+        now.signed_duration_since(synced).num_seconds() < INCREMENTAL_INTERVAL_SECS
+    })
 }
 
 /// Convert one fetched listing into launchable cache entries. Servers the
@@ -497,6 +561,19 @@ fn server_to_entry(server: RegistryServer) -> Option<McpRegistryServerEntry> {
     })
 }
 
+/// Prompt attached to every `registry_sync` result (Registry-first policy).
+const REGISTRY_FIRST_PROMPT: &str = concat!(
+    "REGISTRY-FIRST POLICY: Compare the user's full task ",
+    "against every server name and description. Treat a server as a match ",
+    "when it plausibly covers the task's core specialized capability; ",
+    "wording need not be exact. If any plausible match exists, you must ",
+    "call start_registry_mcp_server with its exact name and inspect its ",
+    "tools before using shell commands, local programs, custom code, or a ",
+    "manual implementation. A familiar local alternative is not a reason ",
+    "to skip it. Fall back only when every catalog entry is clearly ",
+    "irrelevant or the matching server fails to start.",
+);
+
 #[derive(Serialize)]
 struct RegistryCatalogResult {
     instruction: &'static str,
@@ -515,36 +592,84 @@ fn catalog_from_cache(cache: &McpRegistryIndex) -> RegistryCatalogResult {
         })
         .collect::<Vec<_>>();
     RegistryCatalogResult {
-        instruction: "REGISTRY-FIRST POLICY: Compare the user's full task against every server name and description. Treat a server as a match when it plausibly covers the task's core specialized capability; wording need not be exact. If any plausible match exists, you must call start_registry_mcp_server with its exact name and inspect its tools before using shell commands, local programs, custom code, or a manual implementation. A familiar local alternative is not a reason to skip it. Fall back only when every catalog entry is clearly irrelevant or the matching server fails to start.",
+        instruction: REGISTRY_FIRST_PROMPT,
         count: servers.len(),
         servers,
     }
 }
 
-async fn load_registry_catalog() -> Result<RegistryCatalogResult, ToolError> {
-    let path = cache_path()?;
-    sync_once(&path).await?;
-    let cache = read_cache(&path).ok_or_else(|| {
-        ToolError::execution_failed(format!(
-            "Registry cache was not written at {}",
-            path.display()
-        ))
-    })?;
-    Ok(catalog_from_cache(&cache))
+/// Always fast: serve the local snapshot and start a background download
+/// only when it is missing or stale.
+async fn load_registry_catalog(path: &Path) -> Result<RegistryCatalogResult, ToolError> {
+    let existing = read_cache(path);
+    let fresh = existing
+        .as_ref()
+        .is_some_and(|cache| cache_is_fresh(cache, Utc::now()));
+    if !fresh {
+        spawn_background_sync(path);
+    }
+    Ok(catalog_for_snapshot(existing))
 }
 
-/// Paginate the full registry listing. Continues from each page's cursor,
-/// appending entries, until the upstream reports no more pages — a complete
-/// listing is the only shape ever cached. Never writes anything; callers
-/// may retry freely because the on-disk cache only changes at the final
-/// atomic replace.
+/// Decide what `registry_sync` returns: the cached entries as-is (they
+/// pin their own package versions, so snapshot age is irrelevant to the
+/// model), or an empty catalog when no snapshot exists yet.
+fn catalog_for_snapshot(existing: Option<McpRegistryIndex>) -> RegistryCatalogResult {
+    match existing {
+        Some(cache) => catalog_from_cache(&cache),
+        // No snapshot yet: an empty catalog has no candidates to match, so
+        // the Registry-first prompt would be noise — keep it empty.
+        None => RegistryCatalogResult {
+            instruction: "",
+            count: 0,
+            servers: Vec::new(),
+        },
+    }
+}
+
+/// Process-wide lock so at most one background sync runs at a time;
+/// released when the sync settles, so the next call can retry.
+fn try_acquire_sync_permit() -> Option<MutexGuard<'static, ()>> {
+    static SYNC_GUARD: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    SYNC_GUARD
+        .get_or_init(|| AsyncMutex::new(()))
+        .try_lock()
+        .ok()
+}
+
+/// Start the download in the background. Returns false when one is
+/// already running.
+fn spawn_background_sync(path: &Path) -> bool {
+    let Some(permit) = try_acquire_sync_permit() else {
+        return false;
+    };
+    let path = path.to_path_buf();
+    tokio::spawn(async move {
+        if let Err(error) = sync_once(&path).await {
+            tracing::warn!("background Registry sync failed: {error}");
+        }
+        drop(permit);
+    });
+    true
+}
+
+/// Paginate the listing; with `updated_since`, only servers updated after
+/// it. The filter MUST be repeated on every page — the cursor alone does
+/// not carry it (verified against the live API). Never writes anything.
 async fn fetch_registry_entries(
     client: &reqwest::Client,
+    updated_since: Option<DateTime<Utc>>,
 ) -> Result<Vec<RegistryServerEntry>, ToolError> {
     let mut all_entries: Vec<RegistryServerEntry> = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let mut url = format!("{REGISTRY_API}?version=latest&limit={PER_PAGE}");
+        if let Some(since) = updated_since {
+            url.push_str(&format!(
+                "&updated_since={}",
+                urlencoding::encode(&since.to_rfc3339())
+            ));
+        }
         if let Some(ref c) = cursor {
             url.push_str(&format!("&cursor={}", urlencoding::encode(c)));
         }
@@ -565,29 +690,102 @@ async fn fetch_registry_entries(
         if cursor.is_none() {
             break;
         }
+        // Pace the next request so a burst of page fetches does not stall
+        // the upstream (and, with many clients, each other).
+        tokio::time::sleep(std::time::Duration::from_millis(PAGE_PACING_MS)).await;
     }
     Ok(all_entries)
 }
 
-/// Pull the full registry listing, convert it to a fresh snapshot, and
-/// atomically replace the cache file. The fetch is retried (bounded) on
-/// failure; the old cache only changes at the atomic replace, so a failed
-/// sync leaves the previous snapshot untouched. Returns `Err` only after
-/// the retries are exhausted.
+/// Refresh strategy: full listing, or `updated_since` delta from the
+/// snapshot's last sync (full when the snapshot is missing, legacy, or
+/// older than `FULL_RESYNC_INTERVAL_SECS`).
+#[derive(Debug, PartialEq)]
+enum SyncStrategy {
+    Full,
+    Incremental { since: DateTime<Utc> },
+}
+
+fn sync_strategy(cache: Option<&McpRegistryIndex>, now: DateTime<Utc>) -> SyncStrategy {
+    match cache {
+        None => SyncStrategy::Full,
+        Some(cache) if cache.version != MCP_REGISTRY_CACHE_VERSION => SyncStrategy::Full,
+        Some(cache) => match cache.synced_at {
+            None => SyncStrategy::Full,
+            Some(synced)
+                if now.signed_duration_since(synced).num_seconds() >= FULL_RESYNC_INTERVAL_SECS =>
+            {
+                SyncStrategy::Full
+            }
+            Some(synced) => SyncStrategy::Incremental { since: synced },
+        },
+    }
+}
+
+/// Merge an incremental listing into the snapshot (in memory). Delta
+/// entries replace by name; retired or no-longer-launchable servers are
+/// dropped; everything else keeps its cached copy.
+fn merge_incremental_entries(
+    base: &[McpRegistryServerEntry],
+    entries: Vec<RegistryServerEntry>,
+) -> Vec<McpRegistryServerEntry> {
+    let mut merged: HashMap<String, McpRegistryServerEntry> = base
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.clone()))
+        .collect();
+    for entry in entries {
+        let name = entry.server.name.clone();
+        if matches!(
+            entry.lifecycle_status(),
+            Some("deleted") | Some("deprecated")
+        ) {
+            merged.remove(&name);
+            continue;
+        }
+        match server_to_entry(entry.server) {
+            Some(updated) => {
+                merged.insert(name, updated);
+            }
+            None => {
+                merged.remove(&name);
+            }
+        }
+    }
+    merged.into_values().collect()
+}
+
+/// Fetch the index (full or incremental), assemble the next snapshot in
+/// memory, and atomically replace the cache file. Retried on failure;
+/// the old snapshot survives any failed sync.
 async fn sync_once(path: &Path) -> Result<(), ToolError> {
     // rustls default-provider install pattern (matches `client.rs`).
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build()
         .map_err(|e| ToolError::execution_failed(format!("HTTP client: {e}")))?;
 
+    let now = Utc::now();
+    let cached = read_cache(path);
+    let strategy = sync_strategy(cached.as_ref(), now);
+    let updated_since = match strategy {
+        SyncStrategy::Full => None,
+        SyncStrategy::Incremental { since } => Some(since),
+    };
+
     let mut last_error: Option<ToolError> = None;
     let mut servers: Option<Vec<McpRegistryServerEntry>> = None;
     for _attempt in 0..MAX_SYNC_ATTEMPTS {
-        match fetch_registry_entries(&client).await {
+        match fetch_registry_entries(&client, updated_since).await {
             Ok(entries) => {
-                servers = Some(viable_entries(entries));
+                servers = Some(match strategy {
+                    SyncStrategy::Full => viable_entries(entries),
+                    SyncStrategy::Incremental { .. } => merge_incremental_entries(
+                        &cached.expect("incremental needs a cache").servers,
+                        entries,
+                    ),
+                });
                 break;
             }
             Err(error) => last_error = Some(error),
@@ -600,6 +798,7 @@ async fn sync_once(path: &Path) -> Result<(), ToolError> {
         version: MCP_REGISTRY_CACHE_VERSION,
         count: servers.len(),
         servers,
+        synced_at: Some(now),
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -652,7 +851,8 @@ impl ToolSpec for McpSyncRegistry {
     }
 
     async fn execute(&self, _input: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        let result = load_registry_catalog().await?;
+        let path = self.cache_path()?;
+        let result = load_registry_catalog(&path).await?;
         let json = serde_json::to_string(&result)
             .map_err(|e| ToolError::execution_failed(format!("Serialize: {e}")))?;
         Ok(ToolResult::success(json))
@@ -1012,33 +1212,22 @@ mod tests {
         assert!(server_to_entry(server).is_none());
     }
 
-    /// End-to-end smoke test: drive `McpSyncRegistry::execute()` against the
-    /// real MCP Registry API, verify the cache file lands at the right
-    /// location with a valid shape, and verify the returned summary is
-    /// self-consistent.
+    /// End-to-end smoke test: cold-start `McpSyncRegistry::execute()`
+    /// against the live Registry, wait for the background download to
+    /// land, then verify the cache file and the next payload.
     ///
-    /// Marked `#[ignore]` because it depends on:
-    ///   * network access to <https://registry.modelcontextprotocol.io>
-    ///   * the upstream API schema matching our deserialization types
-    ///   * ~14s of wall clock for the first cold-cache sync
-    ///
-    /// Calls the public tool against an empty cache to exercise cold sync.
-    ///
-    /// Run manually with:
+    /// Ignored: needs network + minutes of wall clock (page pacing, flaky
+    /// upstream). Run manually with:
     ///   cargo test -p codewhale-tui --bin codewhale-tui --locked \
     ///     execute_writes_cache_file_and_returns_summary -- --ignored --nocapture
     ///
-    /// This test deliberately overrides `HOME` to a tempdir so it never
-    /// touches the user's real `~/.codewhale/mcp-index.json`.
+    /// The cache path is injected into a tempdir so the real cache is
+    /// untouched (works on every platform).
     #[tokio::test]
     #[ignore = "requires network access to the public MCP Registry; \
                 run with `cargo test -- --ignored`"]
     async fn execute_writes_cache_file_and_returns_summary() {
-        use crate::test_support::{EnvVarGuard, lock_test_env};
         use crate::tools::spec::ToolContext;
-
-        // Serialize env mutation across all tests in this binary.
-        let _env_lock = lock_test_env();
 
         let tmp = tempfile::tempdir().expect("tempdir");
         // Persist the tempdir so we can inspect the cache file after the
@@ -1046,14 +1235,13 @@ mod tests {
         // cleanup so the directory leaks — acceptable for a manual-run
         // integration smoke test that intentionally outlives its scope.
         let tmp_path = tmp.keep();
-        let _home_guard = EnvVarGuard::set("HOME", &tmp_path);
+        let cache_path = tmp_path.join(".codewhale").join("mcp-index.json");
 
-        let workspace = tmp_path.clone();
-        let ctx = ToolContext::new(workspace);
+        let ctx = ToolContext::new(tmp_path.clone());
 
         let input = json!({});
 
-        let result = McpSyncRegistry
+        let result = McpSyncRegistry::with_cache_path(cache_path.clone())
             .execute(input, &ctx)
             .await
             .expect("execute() should not error against the live Registry");
@@ -1063,21 +1251,28 @@ mod tests {
             "execute returned non-success: content={}",
             result.content
         );
+        // Cold start: empty catalog returned immediately, download in the
+        // background.
+        let first_payload: serde_json::Value =
+            serde_json::from_str(&result.content).expect("result content must parse");
+        assert_eq!(first_payload["count"], 0, "no cache ⇒ empty catalog");
 
-        // Cache file should land under the overridden HOME.
-        let cache_path = tmp_path.join(".codewhale").join("mcp-index.json");
-        assert!(
-            cache_path.exists(),
-            "cache file should exist at {:?}",
-            cache_path
-        );
-
-        // Cache file must be valid JSON matching the McpRegistryIndex
-        // schema. If parsing fails here, either the write code is broken
-        // or the schema drifted from what execute() writes.
-        let raw = std::fs::read_to_string(&cache_path).expect("read cache");
-        let cache: McpRegistryIndex =
-            serde_json::from_str(&raw).expect("cache must parse as McpRegistryIndex");
+        // Poll for the background download to land, then assert on the
+        // final snapshot (page pacing + upstream stalls take minutes).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let cache = loop {
+            if let Ok(raw) = std::fs::read_to_string(&cache_path)
+                && let Ok(cache) = serde_json::from_str::<McpRegistryIndex>(&raw)
+            {
+                break cache;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cache file did not appear at {:?} within 600s",
+                cache_path
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        };
 
         // The Registry has hundreds of stdio servers as of 2026; expect at
         // least 1 from a single page. If this fails the upstream either
@@ -1102,6 +1297,12 @@ mod tests {
             );
         }
 
+        // After the background download lands, the next call serves the
+        // fresh snapshot and its payload must match the cache file.
+        let result = McpSyncRegistry::with_cache_path(cache_path.clone())
+            .execute(json!({}), &ctx)
+            .await
+            .expect("execute() should succeed once the cache is fresh");
         let payload: serde_json::Value =
             serde_json::from_str(&result.content).expect("result content must parse");
         assert_eq!(payload["count"].as_u64(), Some(cache.count as u64));
@@ -1124,6 +1325,7 @@ mod tests {
             version: MCP_REGISTRY_CACHE_VERSION,
             count: 1,
             servers: vec![server],
+            synced_at: Some(Utc::now()),
         }
     }
 
@@ -1217,18 +1419,244 @@ mod tests {
             version: MCP_REGISTRY_CACHE_VERSION,
             count: servers.len(),
             servers,
+            synced_at: Some(Utc::now()),
         };
         let result = catalog_from_cache(&cache);
         assert_eq!(result.count, 12);
         assert_eq!(result.servers.len(), 12);
     }
 
-    /// Manual smoke run: execute `McpSyncRegistry` against the live Registry
-    /// API and print the catalog payload + cache file metadata to stdout so an
-    /// operator can inspect what the model would receive. Pure stdout;
-    /// assertions stay minimal so a flaky upstream does not mask a useful
-    /// manual run.
-    ///
+    #[test]
+    fn cache_is_fresh_honors_ttl_version_and_missing_timestamp() {
+        let now = Utc::now();
+        let base = make_test_cache();
+
+        // Within the window: fresh.
+        let mut fresh = base.clone();
+        fresh.synced_at = Some(now - chrono::Duration::minutes(30));
+        assert!(cache_is_fresh(&fresh, now));
+
+        // At/over the incremental window boundary: stale.
+        let mut expired = base.clone();
+        expired.synced_at = Some(now - chrono::Duration::seconds(INCREMENTAL_INTERVAL_SECS + 1));
+        assert!(!cache_is_fresh(&expired, now));
+
+        // Legacy cache without a timestamp: stale (triggers one resync).
+        let mut legacy = base.clone();
+        legacy.synced_at = None;
+        assert!(!cache_is_fresh(&legacy, now));
+
+        // Schema version mismatch: always stale.
+        let mut old_schema = base.clone();
+        old_schema.version = MCP_REGISTRY_CACHE_VERSION - 1;
+        old_schema.synced_at = Some(now);
+        assert!(!cache_is_fresh(&old_schema, now));
+
+        // Clock skew: a future-stamped cache stays fresh.
+        let mut future = base.clone();
+        future.synced_at = Some(now + chrono::Duration::hours(2));
+        assert!(cache_is_fresh(&future, now));
+    }
+
+    #[test]
+    fn catalog_for_snapshot_returns_empty_catalog_when_no_cache() {
+        let result = catalog_for_snapshot(None);
+        assert_eq!(result.count, 0);
+        assert!(result.servers.is_empty());
+    }
+
+    #[test]
+    fn catalog_for_snapshot_serves_cached_entries_without_flags() {
+        let result = catalog_for_snapshot(Some(make_test_cache()));
+        assert_eq!(result.count, 1);
+    }
+
+    #[test]
+    fn catalog_for_snapshot_serves_old_snapshot_as_is() {
+        // Snapshot age is invisible to the model: every entry pins its own
+        // package version, so even a month-old snapshot is served as-is.
+        let mut cache = make_test_cache();
+        cache.synced_at = Some(Utc::now() - chrono::Duration::days(31));
+        let result = catalog_for_snapshot(Some(cache));
+        assert_eq!(result.count, 1);
+    }
+
+    #[test]
+    fn sync_strategy_decides_full_vs_incremental() {
+        let now = Utc::now();
+
+        // No cache at all: full.
+        assert_eq!(sync_strategy(None, now), SyncStrategy::Full);
+
+        // Legacy schema version: full.
+        let mut old = make_test_cache();
+        old.version = MCP_REGISTRY_CACHE_VERSION - 1;
+        assert_eq!(sync_strategy(Some(&old), now), SyncStrategy::Full);
+
+        // Missing timestamp: full.
+        let mut no_ts = make_test_cache();
+        no_ts.synced_at = None;
+        assert_eq!(sync_strategy(Some(&no_ts), now), SyncStrategy::Full);
+
+        // Older than the full-resync window: full (reconciliation — an
+        // incremental delta cannot observe vanished servers).
+        let mut ancient = make_test_cache();
+        ancient.synced_at = Some(now - chrono::Duration::days(31));
+        assert_eq!(sync_strategy(Some(&ancient), now), SyncStrategy::Full);
+
+        // Past the incremental window but inside the full-resync window:
+        // incremental from the last sync.
+        let mut stale = make_test_cache();
+        stale.synced_at = Some(now - chrono::Duration::days(2));
+        assert_eq!(
+            sync_strategy(Some(&stale), now),
+            SyncStrategy::Incremental {
+                since: stale.synced_at.expect("set above")
+            }
+        );
+    }
+
+    /// One launchable delta entry (active stdio npm package); `status`
+    /// None means no `_meta` (treated as active).
+    fn delta_entry(name: &str, status: Option<&str>) -> RegistryServerEntry {
+        parse_server_entry(
+            json!({
+                "name": name,
+                "description": "d",
+                "packages": [{
+                    "registryType": "npm",
+                    "identifier": "@test/pkg",
+                    "version": "2.0.0",
+                    "runtimeHint": "npx",
+                    "transport": "stdio",
+                    "packageArguments": [],
+                    "runtimeArguments": [],
+                    "environmentVariables": null
+                }]
+            }),
+            status,
+        )
+    }
+
+    #[test]
+    fn merge_incremental_entries_updates_inserts_and_removes() {
+        let base = vec![
+            cache_entry("a/unchanged", "unchanged"),
+            cache_entry("b/updated", "old description"),
+            cache_entry("c/deleted", "will be removed"),
+            cache_entry("d/deprecated", "will be removed"),
+            cache_entry("e/unlaunchable", "will be removed"),
+        ];
+        let entries = vec![
+            // Replace the cached copy by name.
+            delta_entry("b/updated", Some("active")),
+            // Insert a brand-new server.
+            delta_entry("f/new", Some("active")),
+            // Retired servers are dropped from the snapshot.
+            delta_entry("c/deleted", Some("deleted")),
+            delta_entry("d/deprecated", Some("deprecated")),
+            // Present but no longer launchable (npm package whose runner
+            // no longer matches): the stale cached copy is dropped too.
+            parse_server_entry(
+                json!({
+                    "name": "e/unlaunchable",
+                    "description": "d",
+                    "packages": [{
+                        "registryType": "npm",
+                        "identifier": "@test/pkg",
+                        "version": "2.0.0",
+                        "runtimeHint": "uvx",
+                        "transport": "stdio",
+                        "packageArguments": [],
+                        "runtimeArguments": [],
+                        "environmentVariables": null
+                    }]
+                }),
+                Some("active"),
+            ),
+        ];
+
+        let merged = merge_incremental_entries(&base, entries);
+        let by_name: HashMap<&str, &McpRegistryServerEntry> = merged
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect();
+
+        assert_eq!(merged.len(), 3);
+        assert!(
+            by_name.contains_key("a/unchanged"),
+            "entries absent from the delta must keep their cached copy"
+        );
+        assert!(
+            by_name.contains_key("f/new"),
+            "a new server in the delta must be inserted"
+        );
+        assert_eq!(
+            by_name["b/updated"].description, "d",
+            "an updated entry must replace the cached copy"
+        );
+        assert!(!by_name.contains_key("c/deleted"));
+        assert!(!by_name.contains_key("d/deprecated"));
+        assert!(
+            !by_name.contains_key("e/unlaunchable"),
+            "an entry that lost its launchable package must be dropped"
+        );
+    }
+
+    /// The sync permit is exclusive while held (no duplicate background
+    /// downloads) and reusable after release (failed syncs get retried).
+    #[tokio::test]
+    async fn background_sync_permit_is_exclusive_until_released() {
+        let first = try_acquire_sync_permit();
+        assert!(first.is_some(), "first acquisition must succeed");
+        assert!(
+            try_acquire_sync_permit().is_none(),
+            "second acquisition must fail while the first is held"
+        );
+        drop(first);
+        let again = try_acquire_sync_permit();
+        assert!(again.is_some(), "permit must be reusable after release");
+        drop(again);
+    }
+
+    /// With a fresh snapshot on disk, `registry_sync` must serve it
+    /// without touching the network: the fixture is a single synthetic
+    /// server, so any live sync would return a different catalog and fail
+    /// the assertion. The cache path is injected explicitly because
+    /// `dirs::home_dir()` resolves the OS profile directory on Windows via
+    /// SHGetKnownFolderPath — no environment variable can redirect it.
+    #[tokio::test]
+    async fn fresh_cache_serves_catalog_without_network() {
+        use crate::tools::spec::ToolContext;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cache_dir = tmp.path().join(".codewhale");
+        std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+        let cache_file = cache_dir.join("mcp-index.json");
+        let index = make_test_cache();
+        std::fs::write(
+            &cache_file,
+            serde_json::to_string_pretty(&index).expect("serialize fixture"),
+        )
+        .expect("write fixture cache");
+
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let result = McpSyncRegistry::with_cache_path(cache_file)
+            .execute(json!({}), &ctx)
+            .await
+            .expect("fresh cache must serve without network");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content).expect("result content must parse");
+        assert_eq!(payload["count"], 1, "fixture catalog must be served as-is");
+        assert_eq!(
+            payload["servers"][0]["name"], "io.modelcontextprotocol/filesystem",
+            "cache-first path must return the cached entry, not a live sync"
+        );
+    }
+
+    /// Manual smoke run: cold-start against the live Registry, wait for
+    /// the background download, then print the final payload to stdout.
     /// Run with:
     ///   cargo test -p codewhale-tui --bin codewhale-tui --locked \
     ///     execute_and_print_catalog_for_manual_inspection -- --ignored --nocapture
@@ -1241,26 +1669,43 @@ mod tests {
     // entire purpose is printing the payload for operator inspection.
     #[allow(clippy::print_stderr)]
     async fn execute_and_print_catalog_for_manual_inspection() {
-        use crate::test_support::{EnvVarGuard, lock_test_env};
-
-        let _env_lock = lock_test_env();
+        use crate::tools::spec::ToolContext;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         // Persist the tempdir past the test so the cache file survives and
         // can be inspected from the shell after the test returns.
         let tmp_path = tmp.keep();
-        let _home_guard = EnvVarGuard::set("HOME", &tmp_path);
+        let cache_path = tmp_path.join(".codewhale").join("mcp-index.json");
 
         let ctx = ToolContext::new(tmp_path.clone());
 
         let input = json!({});
 
-        let result = McpSyncRegistry
+        let result = McpSyncRegistry::with_cache_path(cache_path.clone())
             .execute(input, &ctx)
             .await
             .expect("execute() should not error against the live Registry");
 
-        let cache_path = tmp_path.join(".codewhale").join("mcp-index.json");
+        // The cold-start call returns immediately (empty catalog +
+        // background download). Wait for the download to land, then call
+        // again and print the final payload the model would receive.
+        eprintln!("cold-start payload (background download flagged):");
+        eprintln!("{}", result.content);
+        eprintln!("waiting for the background download to land...");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        while !cache_path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cache file did not appear at {:?} within 600s",
+                cache_path
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        let result = McpSyncRegistry::with_cache_path(cache_path.clone())
+            .execute(json!({}), &ctx)
+            .await
+            .expect("execute() should succeed once the cache is fresh");
 
         eprintln!("\n=== registry_sync output ===");
         eprintln!("tool:               registry_sync");

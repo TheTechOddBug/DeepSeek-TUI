@@ -425,6 +425,190 @@ def update_command(receipt_path: Path | None, budget_path: Path) -> str:
     return shlex.join(parts)
 
 
+FRAGMENT_MODULE = REPO_ROOT / "crates" / "core" / "src" / "fragments.rs"
+FRAGMENT_MAX_TOKENS_CEILING = 10_000
+FRAGMENT_MAX_BYTES_CEILING = FRAGMENT_MAX_TOKENS_CEILING * 4
+FRAGMENT_DEFAULT_MAX_BYTES_CEILING = 4 * 1024
+FRAGMENT_MAX_COUNT_CEILING = 16
+
+
+def check_fragment_caps() -> None:
+    """Gate the bounded fragment hard caps (issue #5264).
+
+    Static check — no cargo needed. Fails closed if the fragment module is
+    missing, if any cap has been raised without review, or if the
+    project-instruction import is absent.
+    """
+    try:
+        text = FRAGMENT_MODULE.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise RuntimeContractError(
+            f"missing bounded fragment module: {FRAGMENT_MODULE} ({error})"
+        ) from error
+
+    def const_value(pattern: str) -> int:
+        match = re.search(pattern, text)
+        if not match:
+            raise RuntimeContractError(f"fragment cap missing: {pattern}")
+        try:
+            return int(match.group(1).replace("_", ""))
+        except ValueError as error:
+            raise RuntimeContractError(f"fragment cap not an int: {pattern}") from error
+
+    max_tokens = const_value(r"pub const MAX_FRAGMENT_TOKENS:\s*usize\s*=\s*([0-9_]+)")
+    if max_tokens != FRAGMENT_MAX_TOKENS_CEILING:
+        raise RuntimeContractError(
+            f"MAX_FRAGMENT_TOKENS must be {FRAGMENT_MAX_TOKENS_CEILING}, got {max_tokens}"
+        )
+    # MAX_FRAGMENT_BYTES must be defined as MAX_FRAGMENT_TOKENS * 4 (canonical)
+    # or as a literal 40000. Either way the derived ceiling is 40_000.
+    has_multiplication = re.search(
+        r"pub const MAX_FRAGMENT_BYTES:\s*usize\s*=\s*MAX_FRAGMENT_TOKENS\s*\*\s*4", text
+    )
+    bytes_literal = re.search(
+        r"pub const MAX_FRAGMENT_BYTES:\s*usize\s*=\s*([0-9_]+)", text
+    )
+    if bytes_literal:
+        literal = int(bytes_literal.group(1).replace("_", ""))
+        if literal != FRAGMENT_MAX_BYTES_CEILING:
+            raise RuntimeContractError(
+                f"MAX_FRAGMENT_BYTES must be {FRAGMENT_MAX_BYTES_CEILING}, got {literal}"
+            )
+    elif not has_multiplication:
+        raise RuntimeContractError(
+            "MAX_FRAGMENT_BYTES must be defined as MAX_FRAGMENT_TOKENS * 4 or as 40000"
+        )
+    # DEFAULT is defined as 4 * 1024 (canonical) or 4096 literal
+    has_default_multiplication = re.search(
+        r"pub const DEFAULT_FRAGMENT_MAX_BYTES:\s*usize\s*=\s*4\s*\*\s*1024", text
+    )
+    default_literal = re.search(
+        r"pub const DEFAULT_FRAGMENT_MAX_BYTES:\s*usize\s*=\s*([0-9_]+)", text
+    )
+    if has_default_multiplication:
+        # canonical 4*1024 == 4096, which equals ceiling
+        pass
+    elif default_literal:
+        default_bytes = int(default_literal.group(1).replace("_", ""))
+        if default_bytes != FRAGMENT_DEFAULT_MAX_BYTES_CEILING:
+            raise RuntimeContractError(
+                f"DEFAULT_FRAGMENT_MAX_BYTES must be {FRAGMENT_DEFAULT_MAX_BYTES_CEILING}, got {default_bytes}"
+            )
+        if default_bytes > FRAGMENT_MAX_BYTES_CEILING:
+            raise RuntimeContractError(
+                f"DEFAULT_FRAGMENT_MAX_BYTES ({default_bytes}) must not exceed MAX_FRAGMENT_BYTES ({FRAGMENT_MAX_BYTES_CEILING})"
+            )
+    else:
+        raise RuntimeContractError("DEFAULT_FRAGMENT_MAX_BYTES definition not found")
+
+    max_count = const_value(
+        r"pub const MAX_FRAGMENTS_PER_CONTEXT:\s*usize\s*=\s*([0-9_]+)"
+    )
+    if max_count != FRAGMENT_MAX_COUNT_CEILING:
+        raise RuntimeContractError(
+            f"MAX_FRAGMENTS_PER_CONTEXT must be {FRAGMENT_MAX_COUNT_CEILING}, got {max_count}"
+        )
+    if max_count > FRAGMENT_MAX_COUNT_CEILING:
+        raise RuntimeContractError(
+            f"MAX_FRAGMENTS_PER_CONTEXT ({max_count}) must not exceed {FRAGMENT_MAX_COUNT_CEILING}"
+        )
+
+    # Ensure every injection type is in FragmentId::all() and the
+    # project-instruction import is present as a typed fragment.
+    required_fragments = [
+        "Workspace",
+        "Permissions",
+        "Route",
+        "AgentTopology",
+        "SkillsTools",
+        "TokenBudget",
+        "ProjectInstructions",
+        "Constitution",
+    ]
+    for name in required_fragments:
+        if f"Self::{name}" not in text and f"{name} =>" not in text and f'"{name.lower()}"' not in text.lower():
+            # Fallback: search for enum variant declaration
+            if not re.search(rf"\b{name}\b", text):
+                raise RuntimeContractError(
+                    f"FragmentId missing required variant {name}"
+                )
+    # Marker stability — these strings are pinned by tests / prefix cache
+    required_markers = [
+        "<!-- cw:ctx:workspace -->",
+        "<!-- cw:ctx:project_instructions -->",
+        "<!-- cw:ctx:constitution -->",
+    ]
+    for marker in required_markers:
+        if marker not in text:
+            raise RuntimeContractError(
+                f"bounded fragment module missing required marker {marker!r}"
+            )
+
+    # Project-instruction import must be a typed fragment, not ad-hoc
+    if "load_project_instruction_fragment" not in text:
+        raise RuntimeContractError(
+            "bounded fragment module must expose load_project_instruction_fragment (project-instruction import as typed fragment)"
+        )
+    if "PROJECT_INSTRUCTION_CANDIDATES" not in text:
+        raise RuntimeContractError(
+            "bounded fragment module must define PROJECT_INSTRUCTION_CANDIDATES"
+        )
+    # Required candidate files from #3978
+    required_candidates = [
+        ".cursorrules",
+        ".clinerules",
+        ".windsurf/rules",
+        ".gemini",
+        ".github/copilot-instructions.md",
+    ]
+    for candidate in required_candidates:
+        if candidate not in text:
+            raise RuntimeContractError(
+                f"PROJECT_INSTRUCTION_CANDIDATES missing required entry {candidate!r}"
+            )
+
+    # matches_text recognizer must exist on the fragment trait
+    if "fn matches_text" not in text:
+        raise RuntimeContractError(
+            "bounded fragment module must define a matches_text recognizer on the fragment trait"
+        )
+    if "trait ContextFragment" not in text:
+        raise RuntimeContractError(
+            "bounded fragment module must define trait ContextFragment with matches_text"
+        )
+
+    # No unbounded fragment — enforce that creation clamps to MAX_FRAGMENT_BYTES
+    if "MAX_FRAGMENT_BYTES" not in text or "enforce_byte_cap" not in text:
+        raise RuntimeContractError(
+            "bounded fragment module must enforce byte caps via enforce_byte_cap and MAX_FRAGMENT_BYTES"
+        )
+
+    # TUI must be unified with the core boundary (shared crates/core module)
+    tui_fragment = REPO_ROOT / "crates" / "tui" / "src" / "model_context" / "fragment.rs"
+    try:
+        tui_text = tui_fragment.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise RuntimeContractError(
+            f"missing TUI fragment module: {tui_fragment} ({error})"
+        ) from error
+    if "codewhale_core::fragments" not in tui_text:
+        raise RuntimeContractError(
+            "TUI model_context/fragment.rs must re-export caps from codewhale_core::fragments (shared crates/core boundary)"
+        )
+    if "ProjectInstructions" not in tui_text:
+        raise RuntimeContractError(
+            "TUI fragment module must include ProjectInstructions variant (unified with core)"
+        )
+    if "MAX_FRAGMENT_BYTES" not in tui_text:
+        raise RuntimeContractError(
+            "TUI fragment module must enforce MAX_FRAGMENT_BYTES (10K-token ceiling)"
+        )
+    if "matches_text" not in tui_text:
+        raise RuntimeContractError(
+            "TUI fragment module must expose a matches_text recognizer"
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -446,6 +630,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        check_fragment_caps()
         if args.receipt is not None and args.receipt.resolve() == args.budget.resolve():
             raise RuntimeContractError(
                 "receipt and budget must resolve to distinct filesystem paths"

@@ -28,6 +28,23 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.5 — one runtime, managed controls, and uninterrupted turns</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[Sh1Zuku / SparkofSpike](https://github.com/SparkofSpike)** — stale cached
+  session-title recovery so `New Session` yields to the first real prompt
+- **[Paulo Aboim Pinto / aboimpinto](https://github.com/aboimpinto)** — the
+  shared alias-aware command discovery contract across the palette, slash
+  completion, dispatch, and acceptance harness
+- **[Sun Zhenyuan / bistack](https://github.com/bistack)** — background
+  incremental MCP Registry refreshes that return the local snapshot immediately
+- **[SKY ZHAO / skyzhao1223](https://github.com/skyzhao1223)** — prompt-based
+  `model = "auto"` tier selection in PR #5257
+
+</details>
+
+<details>
 <summary><strong>v0.9.4 — calmer output, recovery, and release hardening</strong></summary>
 
 **Merged or adapted contributions**

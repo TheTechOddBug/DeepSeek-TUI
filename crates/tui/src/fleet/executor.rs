@@ -30,8 +30,10 @@ use super::worker_runtime::{
     fleet_task_prompt, fleet_task_prompt_with_profiles, fleet_worker_launch_reasoning_effort,
     fleet_worker_launch_route,
 };
-use crate::tools::spec::{ToolAuthorityEnvelope, ToolMutationAuthority};
-use crate::tools::subagent::AgentWorkerSpec;
+use crate::tools::spec::{
+    ToolAuthorityEnvelope, ToolMutationAuthority, ToolShellAuthority, ToolVerificationAuthority,
+};
+use crate::tools::subagent::{AgentWorkerSpec, FleetRole};
 
 /// Resolve the executable used for Fleet worker subprocesses.
 ///
@@ -163,11 +165,32 @@ pub(crate) fn authority_envelope_for_worker(
                 Vec::new(),
             )
         };
+    let shell = if authority == ToolMutationAuthority::ReadOnly
+        && matches!(&spec.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+        && spec.runtime_profile.shell.allows_shell()
+    {
+        // Recon gets one classifier-bounded foreground shell. Verifiers keep
+        // the dedicated Run surface, while planners/consultants remain
+        // shell-less and writers retain the historical subprocess contract.
+        ToolShellAuthority::ReadOnly
+    } else {
+        ToolShellAuthority::None
+    };
+    let verification = if authority == ToolMutationAuthority::ReadOnly
+        && matches!(&spec.agent_type, FleetRole::Verifier)
+        && spec.runtime_profile.shell.allows_shell()
+    {
+        ToolVerificationAuthority::Bounded
+    } else {
+        ToolVerificationAuthority::None
+    };
     ToolAuthorityEnvelope {
         schema_version: 1,
         owner: spec.worker_id.clone(),
         authority,
         network_access: Some(spec.runtime_profile.permissions.network),
+        shell,
+        verification,
         writable_roots,
         writable_files,
         coordination_contracts,
@@ -968,9 +991,63 @@ mod tests {
         assert_eq!(authority.owner, "worker-1");
         assert_eq!(authority.authority, ToolMutationAuthority::ReadOnly);
         assert_eq!(authority.network_access, Some(false));
+        assert_eq!(authority.shell, ToolShellAuthority::None);
+        assert_eq!(authority.verification, ToolVerificationAuthority::None);
         assert!(authority.writable_roots.is_empty());
         assert!(authority.writable_files.is_empty());
         assert!(authority.coordination_contracts.is_empty());
+    }
+
+    #[test]
+    fn scout_and_reviewer_launches_carry_only_read_only_shell_authority() {
+        let tmp = TempDir::new().unwrap();
+        for role in ["scout", "reviewer"] {
+            let mut task = task("inspect repository and GitHub state");
+            task.worker.as_mut().unwrap().role = Some(role.to_string());
+            let launch_spec = launch_spec(&task, tmp.path());
+            let cmd = build_worker_exec_command_with_launch_spec(
+                "codewhale",
+                &task,
+                &launch_spec,
+                &FleetExecConfig::default(),
+                None,
+                &[],
+            )
+            .unwrap();
+            let authority_index = cmd
+                .args
+                .iter()
+                .position(|arg| arg == "--tool-authority-json")
+                .expect("launch command must carry machine-readable authority");
+            let authority =
+                ToolAuthorityEnvelope::from_json(&cmd.args[authority_index + 1]).unwrap();
+
+            assert_eq!(authority.authority, ToolMutationAuthority::ReadOnly);
+            assert_eq!(authority.network_access, Some(true));
+            assert_eq!(authority.shell, ToolShellAuthority::ReadOnly);
+            assert_eq!(authority.verification, ToolVerificationAuthority::None);
+        }
+    }
+
+    #[test]
+    fn verifier_launch_carries_only_bounded_verification_process_authority() {
+        let tmp = TempDir::new().unwrap();
+        let mut task = task("run the focused release checks");
+        task.worker.as_mut().unwrap().role = Some("verifier".to_string());
+        let mut launch_spec = launch_spec(&task, tmp.path());
+        let authority = authority_envelope_for_worker(&launch_spec, &task).unwrap();
+
+        assert_eq!(authority.authority, ToolMutationAuthority::ReadOnly);
+        assert_eq!(authority.shell, ToolShellAuthority::None);
+        assert_eq!(authority.verification, ToolVerificationAuthority::Bounded);
+
+        launch_spec.runtime_profile.shell = crate::worker_profile::ShellPolicy::None;
+        let shellless = authority_envelope_for_worker(&launch_spec, &task).unwrap();
+        assert_eq!(
+            shellless.verification,
+            ToolVerificationAuthority::None,
+            "the parent shell ceiling also removes bounded verification process authority"
+        );
     }
 
     #[test]
@@ -1004,6 +1081,8 @@ mod tests {
 
         assert_eq!(authority.authority, ToolMutationAuthority::ScopedWrite);
         assert_eq!(authority.network_access, Some(true));
+        assert_eq!(authority.shell, ToolShellAuthority::None);
+        assert_eq!(authority.verification, ToolVerificationAuthority::None);
         assert_eq!(authority.writable_roots, ["src"]);
         assert!(authority.writable_files.is_empty());
         assert!(authority.coordination_contracts.is_empty());

@@ -270,6 +270,11 @@ jobs:
       - name: Check dead-code budget
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-dead-code-budget.py
+      - name: Test runtime-contract measurement harness
+        if: needs.changes.outputs.heavy == 'true'
+        run: |
+          python3 scripts/test_measure_runtime_contract.py
+          python3 scripts/test_check_runtime_contract_budget.py
       # The offline runtime-contract measurement needs the full locked graph,
       # dev-dependencies included (e.g. wiremock -> assert-json-diff), but
       # clippy above builds no test targets and the rust-cache registry key
@@ -289,9 +294,11 @@ jobs:
       # Provider-free paused-consumer measurement of the production
       # persistence request channel. RSS is sampled only on macOS; every host
       # enforces the accepted/retained request and payload contract.
-      - name: Test persistence-backlog checker
+      - name: Test persistence-backlog measurement and checker harnesses
         if: needs.changes.outputs.heavy == 'true'
-        run: python3 scripts/test_check_persistence_backlog_budget.py
+        run: |
+          python3 scripts/test_measure_persistence_backlog.py
+          python3 scripts/test_check_persistence_backlog_budget.py
       - name: Check persistence-backlog budget
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-persistence-backlog-budget.py
@@ -451,10 +458,11 @@ jobs:
       - name: Run isolated Skills Manager PTY acceptance
         # This real-PTY scenario is deterministic in a fresh process (10/10
         # locally) but can inherit event starvation after the full qa_pty
-        # suite on loaded Linux runners. Keep the assertion intact and run it
-        # separately on Unix after the workspace suite has released its PTYs.
+        # module suite on loaded Linux runners. Keep the assertion intact and
+        # run it separately on Unix after the workspace suite has released its
+        # PTYs.
         if: needs.changes.outputs.heavy == 'true' && matrix.os != 'windows-latest' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
-        run: cargo test -p codewhale-tui --test qa_pty skills_opens_manager_owned_then_compatible -- --ignored --exact
+        run: cargo test -p codewhale-tui --test pty qa_pty::skills_opens_manager_owned_then_compatible -- --ignored --exact
       - name: Lockfile drift guard
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
         run: git diff --exit-code -- Cargo.lock

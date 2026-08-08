@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-const { runCodeWhaleTui } = require("../scripts/run");
+const { runCodeWhale } = require("../scripts/run");
 
-runCodeWhaleTui().catch((error) => {
-  console.error("Failed to start codewhale-tui:", error.message);
+process.stderr.write("codewhale-tui: deprecated alias to `codewhale` (single binary since v0.9.5). Use `codewhale` instead.\n");
+runCodeWhale().catch((error) => {
+  console.error("Failed to start codewhale:", error.message);
   process.exit(1);
 });

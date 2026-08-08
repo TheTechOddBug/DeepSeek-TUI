@@ -1,11 +1,19 @@
 //! One typed, capped, marker-stable ModelContext fragment.
+//!
+//! Caps and identities are unified with `codewhale_core::fragments` — the
+//! single `crates/core` owner for the bounded fragment system (issue #5264).
+//! This crate re-exports the core caps so every injection goes through a
+//! typed fragment with a stable marker and the hard caps
+//! (per-fragment size, 10K-token ceiling, injected-item count) are enforced
+//! in one place.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-/// Default hard byte cap per volatile fragment. Keeps WorldState from
-/// displacing the cache-stable constitution prefix under fanout noise.
-pub const DEFAULT_FRAGMENT_MAX_BYTES: usize = 4 * 1024;
+/// Re-export the core hard caps — single source of truth.
+pub use codewhale_core::fragments::{
+    DEFAULT_FRAGMENT_MAX_BYTES, MAX_FRAGMENT_BYTES, MAX_FRAGMENT_TOKENS, MAX_FRAGMENTS_PER_CONTEXT,
+};
 
 /// Stable identity for a WorldState concern. Markers are public contract —
 /// do not rename without a migration note (prefix-cache + tests pin them).
@@ -17,6 +25,8 @@ pub enum FragmentId {
     AgentTopology,
     SkillsTools,
     TokenBudget,
+    ProjectInstructions,
+    Constitution,
 }
 
 impl FragmentId {
@@ -30,6 +40,8 @@ impl FragmentId {
             Self::AgentTopology => "agent_topology",
             Self::SkillsTools => "skills_tools",
             Self::TokenBudget => "token_budget",
+            Self::ProjectInstructions => "project_instructions",
+            Self::Constitution => "constitution",
         }
     }
 
@@ -43,6 +55,8 @@ impl FragmentId {
             Self::AgentTopology => "<!-- cw:ctx:agent_topology -->",
             Self::SkillsTools => "<!-- cw:ctx:skills_tools -->",
             Self::TokenBudget => "<!-- cw:ctx:token_budget -->",
+            Self::ProjectInstructions => "<!-- cw:ctx:project_instructions -->",
+            Self::Constitution => "<!-- cw:ctx:constitution -->",
         }
     }
 
@@ -56,6 +70,8 @@ impl FragmentId {
             Self::AgentTopology => FragmentRole::AgentTopology,
             Self::SkillsTools => FragmentRole::SkillsTools,
             Self::TokenBudget => FragmentRole::TokenBudget,
+            Self::ProjectInstructions => FragmentRole::ProjectInstructions,
+            Self::Constitution => FragmentRole::Constitution,
         }
     }
 
@@ -69,6 +85,8 @@ impl FragmentId {
             Self::AgentTopology,
             Self::SkillsTools,
             Self::TokenBudget,
+            Self::ProjectInstructions,
+            Self::Constitution,
         ]
     }
 }
@@ -88,6 +106,10 @@ pub enum FragmentRole {
     SkillsTools,
     /// Token budget and compaction status.
     TokenBudget,
+    /// Project instructions (AGENTS.md + imported instruction files).
+    ProjectInstructions,
+    /// Codewhale-specific repo constitution.
+    Constitution,
 }
 
 impl FragmentRole {
@@ -101,6 +123,8 @@ impl FragmentRole {
             Self::AgentTopology => "agent_topology",
             Self::SkillsTools => "skills_tools",
             Self::TokenBudget => "token_budget",
+            Self::ProjectInstructions => "project_instructions",
+            Self::Constitution => "constitution",
         }
     }
 }
@@ -141,16 +165,28 @@ impl ModelContextFragment {
         raw: impl Into<String>,
         max_bytes: usize,
     ) -> Self {
-        let content = enforce_byte_cap(raw.into(), max_bytes);
+        // Clamp to the global 10K-token ceiling so callers cannot opt out.
+        let clamped_max = max_bytes.min(MAX_FRAGMENT_BYTES);
+        let mut content = enforce_byte_cap(raw.into(), clamped_max);
+        // Token-ceiling safety net (4 bytes ≈ 1 token).
+        if content.len().div_ceil(4) > MAX_FRAGMENT_TOKENS {
+            content = enforce_byte_cap(content, MAX_FRAGMENT_BYTES);
+        }
         let content_hash = hash_content(&content);
         Self {
             id,
             role,
             marker: id.marker(),
-            max_bytes,
+            max_bytes: clamped_max,
             content,
             content_hash,
         }
+    }
+
+    /// Return whether `haystack` contains this fragment's stable marker.
+    #[must_use]
+    pub fn matches_text(&self, haystack: &str) -> bool {
+        haystack.contains(self.marker)
     }
 
     /// Compare against a previous fragment of the same id.
@@ -172,7 +208,9 @@ impl ModelContextFragment {
     /// Full render including the stable marker header.
     #[must_use]
     pub fn render_marked(&self) -> String {
-        format!("{}\n{}", self.marker, self.content.trim_end())
+        let rendered = format!("{}\n{}", self.marker, self.content.trim_end());
+        debug_assert!(self.matches_text(&rendered));
+        rendered
     }
 }
 

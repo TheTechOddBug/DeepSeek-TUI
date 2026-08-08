@@ -3853,13 +3853,14 @@ impl App {
 
     /// Whether a virtual transcript cell can open a meaningful `v` detail
     /// view. Thinking cells render their own raw text inline so there is no
-    /// separate "raw" target — only tool / sub-agent cells get the hint.
+    /// separate "raw" target. Error cells always get a full-message target so
+    /// recovery instructions cannot be stranded below a short terminal view.
     #[must_use]
     pub fn cell_has_detail_target(&self, index: usize) -> bool {
         self.tool_detail_record_for_cell(index).is_some()
             || matches!(
                 self.cell_at_virtual_index(index),
-                Some(HistoryCell::Tool(_) | HistoryCell::SubAgent(_))
+                Some(HistoryCell::Error { .. } | HistoryCell::Tool(_) | HistoryCell::SubAgent(_))
             )
     }
 
@@ -3886,6 +3887,21 @@ impl App {
 
         let start = top.min(line_meta.len().saturating_sub(1));
         let end = start.saturating_add(visible).min(line_meta.len());
+        // A visible error is the most urgent detail target. Prefer the newest
+        // visible error over an earlier tool card so Alt+V opens the failure
+        // the user is looking at, even when both occupy the viewport.
+        for meta in line_meta.iter().take(end).skip(start).rev() {
+            let Some((cell_index, _)) = meta.cell_line() else {
+                continue;
+            };
+            let cell_index = self.original_cell_index_for_rendered(cell_index);
+            if matches!(
+                self.cell_at_virtual_index(cell_index),
+                Some(HistoryCell::Error { .. })
+            ) {
+                return Some(cell_index);
+            }
+        }
         for meta in line_meta.iter().take(end).skip(start) {
             let Some((cell_index, _)) = meta.cell_line() else {
                 continue;

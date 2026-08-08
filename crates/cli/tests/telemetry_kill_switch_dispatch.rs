@@ -1,18 +1,15 @@
-//! The kill switch has to reach the process that would emit.
+//! The kill switch has to reach the in-process runtime that would emit.
 //!
-//! The dispatcher itself almost never emits: every interactive and headless
-//! session is delegated to the sibling `codewhale-tui` binary, which re-resolves
-//! telemetry from *its own* environment and config file. So the switch is only
-//! real if the resolved value — not the raw flag — is in that child's
-//! environment. This drives the real `codewhale` binary and reads what the
-//! child actually received.
+//! The single `codewhale` binary resolves dispatcher overrides, states the
+//! telemetry floor in its environment, and then calls `codewhale_tui::run`.
+//! That runtime re-resolves telemetry before it can arm. These tests drive the
+//! real binary through the keyless `features list` command and use the local
+//! dry-run sink as the end-to-end observable: an enabled positive control must
+//! write session events, while a kill switch must create no telemetry state.
 
 #![cfg(unix)]
 
-use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::process::Command;
 
 use codewhale_config::{SetupState, TELEMETRY_NOTICE_VERSION};
@@ -25,46 +22,45 @@ use tempfile::TempDir;
 /// switch ever being consulted.
 #[test]
 fn env_off_beats_cli_on_end_to_end() {
-    // Positive control first: the flag does reach the child, so the assertion
-    // below is about the floor and not about a flag that goes nowhere.
-    let on = dispatch_and_read_child_env(&["--telemetry", "true", "exec", "hi"], None);
-    assert_eq!(
-        on.get("CODEWHALE_TELEMETRY").map(String::as_str),
-        Some("true"),
-        "`--telemetry true` must reach the delegated child at all"
+    // Positive control first: the flag reaches the in-process runtime and
+    // arms its dry-run sink, so the assertion below is about the floor and not
+    // about a command that never crossed the dispatch boundary.
+    let on = dispatch_and_read_telemetry(None);
+    let dry_run = on
+        .dry_run
+        .expect("`--telemetry true` with recorded consent must write the dry-run sink");
+    assert!(
+        dry_run.contains("\"event\":\"session_start\"")
+            && dry_run.contains("\"event\":\"session_end\""),
+        "the real in-process runtime must record a complete session: {dry_run}"
     );
 
-    let off = dispatch_and_read_child_env(&["--telemetry", "true", "exec", "hi"], Some("0"));
-    assert_eq!(
-        off.get("CODEWHALE_TELEMETRY").map(String::as_str),
-        Some("false"),
-        "`CODEWHALE_TELEMETRY=0` must beat `--telemetry true` in the child's environment"
-    );
-    assert_eq!(
-        off.get("DEEPSEEK_TELEMETRY").map(String::as_str),
-        Some("false"),
-        "the legacy alias must carry the same resolved value"
+    let off = dispatch_and_read_telemetry(Some("0"));
+    assert!(
+        !off.telemetry_dir_exists && off.dry_run.is_none(),
+        "`CODEWHALE_TELEMETRY=0` must beat `--telemetry true` before the runtime arms"
     );
 }
 
 /// A value the resolver cannot parse resolves to off, rather than falling
 /// through to the flag.
 #[test]
-fn an_unparseable_telemetry_env_value_reaches_the_child_as_off() {
-    let child = dispatch_and_read_child_env(&["--telemetry", "true", "exec", "hi"], Some("maybe"));
-    assert_eq!(
-        child.get("CODEWHALE_TELEMETRY").map(String::as_str),
-        Some("false"),
-        "a typo in the kill switch must never resolve to on"
+fn an_unparseable_telemetry_env_value_keeps_the_in_process_runtime_off() {
+    let evidence = dispatch_and_read_telemetry(Some("maybe"));
+    assert!(
+        !evidence.telemetry_dir_exists && evidence.dry_run.is_none(),
+        "a typo in the kill switch must never arm the in-process runtime"
     );
 }
 
-/// Run the real dispatcher against a fake sibling TUI that dumps its
-/// environment, and return that environment.
-fn dispatch_and_read_child_env(
-    args: &[&str],
-    telemetry_env: Option<&str>,
-) -> BTreeMap<String, String> {
+struct DispatchEvidence {
+    telemetry_dir_exists: bool,
+    dry_run: Option<String>,
+}
+
+/// Run the real dispatcher into a keyless in-process command and report the
+/// telemetry state it actually left behind.
+fn dispatch_and_read_telemetry(telemetry_env: Option<&str>) -> DispatchEvidence {
     let fixture = TempDir::new().expect("fixture root");
     let home = fixture.path().join("home");
     let codewhale_home = fixture.path().join("codewhale-home");
@@ -81,20 +77,12 @@ fn dispatch_and_read_child_env(
         .expect("write setup state");
 
     let config_path = fixture.path().join("config.toml");
-    fs::write(&config_path, "telemetry = true\n").expect("write config");
-
-    let receipt = fixture.path().join("child-env.txt");
-    let fake_tui = fixture.path().join("fake-codewhale-tui");
     fs::write(
-        &fake_tui,
-        format!("#!/bin/sh\nenv > '{}'\n", receipt.display()),
+        &config_path,
+        // An explicitly empty endpoint is the network-free dry-run sink.
+        "telemetry = true\ntelemetry_endpoint = \"\"\n",
     )
-    .expect("write fake TUI");
-    let mut permissions = fs::metadata(&fake_tui)
-        .expect("fake TUI metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_tui, permissions).expect("make fake TUI executable");
+    .expect("write config");
 
     let mut command = Command::new(codewhale_binary());
     command
@@ -105,56 +93,42 @@ fn dispatch_and_read_child_env(
         .env("USERPROFILE", &home)
         .env("CODEWHALE_HOME", &codewhale_home)
         .env("CODEWHALE_SECRET_BACKEND", "file")
-        .env("CODEWHALE_TUI_BIN", &fake_tui)
         .env(
             "CODEWHALE_RELEASE_BASE_URL",
             "https://example.invalid/releases",
         )
         .arg("--config")
         .arg(&config_path)
-        .args(args);
+        .args(["--telemetry", "true", "features", "list"]);
     if let Some(value) = telemetry_env {
         command.env("CODEWHALE_TELEMETRY", value);
     }
     let output = command.output().expect("run codewhale dispatcher");
-
-    let dumped = fs::read_to_string(&receipt).unwrap_or_else(|error| {
-        panic!(
-            "the delegated child must have run and dumped its environment: {error}\n\
-             stdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-
-    // A dispatcher run that never emits must also never create telemetry state
-    // in the operator's home.
     assert!(
-        !codewhale_home.join("telemetry").exists(),
-        "the dispatcher must not create telemetry state for a delegated command"
+        output.status.success(),
+        "the in-process feature command must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("feature\tstage\tenabled"),
+        "the real in-process feature command must have run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 
-    dumped
-        .lines()
-        .filter_map(|line| {
-            line.split_once('=')
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-        })
-        .collect()
+    let telemetry_dir = codewhale_home.join("telemetry");
+    let dry_run = match fs::read_to_string(telemetry_dir.join("dryrun.jsonl")) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read telemetry dry-run sink: {error}"),
+    };
+    DispatchEvidence {
+        telemetry_dir_exists: telemetry_dir.exists(),
+        dry_run,
+    }
 }
 
-fn codewhale_binary() -> PathBuf {
-    if let Some(path) = option_env!("CARGO_BIN_EXE_codewhale") {
-        return PathBuf::from(path);
-    }
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_codewhale") {
-        return PathBuf::from(path);
-    }
-    let mut path = std::env::current_exe().expect("current test executable path");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.push(format!("codewhale{}", std::env::consts::EXE_SUFFIX));
-    path
+fn codewhale_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_codewhale")
 }

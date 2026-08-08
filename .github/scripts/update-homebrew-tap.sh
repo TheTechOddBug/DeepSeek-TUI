@@ -35,23 +35,19 @@ sha() {
 
 # --- read checksums ---------------------------------------------------
 
-# Canonical dispatcher and TUI
+# One compiled runtime exposed under the two supported command names.
 SHA_COD_MACOS_ARM="$(sha codewhale-macos-arm64)"
 SHA_CODEW_MACOS_ARM="$(sha codew-macos-arm64)"
-SHA_TUI_MACOS_ARM="$(sha codewhale-tui-macos-arm64)"
 SHA_COD_MACOS_X64="$(sha codewhale-macos-x64)"
 SHA_CODEW_MACOS_X64="$(sha codew-macos-x64)"
-SHA_TUI_MACOS_X64="$(sha codewhale-tui-macos-x64)"
 SHA_COD_LINUX_ARM="$(sha codewhale-linux-arm64)"
 SHA_CODEW_LINUX_ARM="$(sha codew-linux-arm64)"
-SHA_TUI_LINUX_ARM="$(sha codewhale-tui-linux-arm64)"
 SHA_COD_LINUX_X64="$(sha codewhale-linux-x64)"
 SHA_CODEW_LINUX_X64="$(sha codew-linux-x64)"
-SHA_TUI_LINUX_X64="$(sha codewhale-tui-linux-x64)"
-readonly SHA_COD_MACOS_ARM SHA_CODEW_MACOS_ARM SHA_TUI_MACOS_ARM
-readonly SHA_COD_MACOS_X64 SHA_CODEW_MACOS_X64 SHA_TUI_MACOS_X64
-readonly SHA_COD_LINUX_ARM SHA_CODEW_LINUX_ARM SHA_TUI_LINUX_ARM
-readonly SHA_COD_LINUX_X64 SHA_CODEW_LINUX_X64 SHA_TUI_LINUX_X64
+readonly SHA_COD_MACOS_ARM SHA_CODEW_MACOS_ARM
+readonly SHA_COD_MACOS_X64 SHA_CODEW_MACOS_X64
+readonly SHA_COD_LINUX_ARM SHA_CODEW_LINUX_ARM
+readonly SHA_COD_LINUX_X64 SHA_CODEW_LINUX_X64
 
 # --- temp dirs --------------------------------------------------------
 
@@ -78,20 +74,12 @@ class DeepseekTui < Formula
         url "${BASE_URL}/codew-macos-arm64", using: :nounzip
         sha256 "${SHA_CODEW_MACOS_ARM}"
       end
-      resource "tui" do
-        url "${BASE_URL}/codewhale-tui-macos-arm64", using: :nounzip
-        sha256 "${SHA_TUI_MACOS_ARM}"
-      end
     else
       url "${BASE_URL}/codewhale-macos-x64", using: :nounzip
       sha256 "${SHA_COD_MACOS_X64}"
       resource "codew" do
         url "${BASE_URL}/codew-macos-x64", using: :nounzip
         sha256 "${SHA_CODEW_MACOS_X64}"
-      end
-      resource "tui" do
-        url "${BASE_URL}/codewhale-tui-macos-x64", using: :nounzip
-        sha256 "${SHA_TUI_MACOS_X64}"
       end
     end
   end
@@ -104,10 +92,6 @@ class DeepseekTui < Formula
         url "${BASE_URL}/codew-linux-arm64", using: :nounzip
         sha256 "${SHA_CODEW_LINUX_ARM}"
       end
-      resource "tui" do
-        url "${BASE_URL}/codewhale-tui-linux-arm64", using: :nounzip
-        sha256 "${SHA_TUI_LINUX_ARM}"
-      end
     else
       url "${BASE_URL}/codewhale-linux-x64", using: :nounzip
       sha256 "${SHA_COD_LINUX_X64}"
@@ -115,23 +99,17 @@ class DeepseekTui < Formula
         url "${BASE_URL}/codew-linux-x64", using: :nounzip
         sha256 "${SHA_CODEW_LINUX_X64}"
       end
-      resource "tui" do
-        url "${BASE_URL}/codewhale-tui-linux-x64", using: :nounzip
-        sha256 "${SHA_TUI_LINUX_X64}"
-      end
     end
   end
 
   def install
     bin.install Dir["*"].first => "codewhale"
     resource("codew").stage { bin.install Dir["*"].first => "codew" }
-    resource("tui").stage { bin.install Dir["*"].first => "codewhale-tui" }
   end
 
   test do
     system "#{bin}/codewhale", "--version"
     system "#{bin}/codew", "--version"
-    system "#{bin}/codewhale-tui", "--version"
   end
 end
 EOF

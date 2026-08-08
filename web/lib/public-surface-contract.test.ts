@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { FACTS } from "./facts.generated";
-import { SNIPPETS } from "./install-binary-snippets";
+import { SNIPPETS, VERIFY } from "./install-binary-snippets";
 import { getChrome, getHome } from "./i18n/dictionaries";
 import { footerProjectLinks } from "./i18n/links";
 
@@ -196,11 +196,7 @@ describe("public surface contracts", () => {
     expect(npmReadme).toMatch(/^- Android arm64 \/ Termux \(preview;/m);
     expect(npmReadme).toContain("requires matching Android assets");
     expect(npmArtifacts).toContain("android: {");
-    for (const binary of [
-      "codewhale-android-arm64",
-      "codew-android-arm64",
-      "codewhale-tui-android-arm64",
-    ]) {
+    for (const binary of ["codewhale-android-arm64", "codew-android-arm64"]) {
       expect(npmArtifacts).toContain(binary);
     }
     // Matched by string prefix rather than by building a RegExp from
@@ -231,24 +227,26 @@ describe("public surface contracts", () => {
     }
   });
 
-  it("distinguishes two Cargo packages from the three installed commands", () => {
+  it("keeps one runtime and channel-specific command names exact", () => {
     const installDoc = text("docs/INSTALL.md");
     const installPage = text("web/app/[locale]/install/page.tsx");
+    const npmReadme = text("npm/codewhale/README.md");
+    const cliCargo = text("crates/cli/Cargo.toml");
+    const cargoBinaryNames = Array.from(
+      cliCargo.matchAll(/\[\[bin\]\]\s+name = "([^"]+)"/g),
+      (match) => match[1],
+    );
 
-    expect(installDoc).toContain("Two Cargo packages are required");
-    expect(installDoc).toContain(
-      "`codewhale-cli` installs the `codewhale` and `codew` commands",
-    );
-    expect(installDoc).toContain(
-      "Download all three matching `codewhale`, `codew`, and `codewhale-tui`",
-    );
-    expect(installPage).toContain(
-      "# Install two Cargo packages; together they provide three commands",
-    );
-    expect(installPage).toContain("# codewhale + codew");
-    expect(installPage).toContain("The two Cargo packages install three commands");
-    expect(installPage).not.toContain("Install both binaries");
-    expect(installDoc).not.toContain("install both binaries from the release tag");
+    expect(matrix.install.binaries).toEqual(["codewhale", "codew"]);
+    expect(cargoBinaryNames).toEqual(["codewhale"]);
+    expect(installDoc).toContain("One Cargo package is required");
+    expect(installDoc).toContain("`codewhale-cli` installs the `codewhale` command");
+    expect(installDoc).toContain("Cargo does\nnot create that alias");
+    expect(installPage).toContain("# Install the compiled runtime as codewhale");
+    expect(installPage).toContain("Cargo installs only");
+    expect(installPage).not.toContain("codewhale-tui");
+    expect(npmReadme).toContain("installs `codewhale` plus the `codew` convenience name");
+    expect(npmReadme).not.toContain("codewhale-tui");
     for (const platform of [
       "macos-arm64",
       "macos-x64",
@@ -259,12 +257,16 @@ describe("public surface contracts", () => {
       expect(SNIPPETS[platform], platform).toContain(
         `sudo mv codew-${platform} /usr/local/bin/codew`,
       );
+      expect(SNIPPETS[platform], platform).not.toContain("codewhale-tui");
+      expect(VERIFY[platform], platform).not.toContain("codewhale-tui");
     }
     for (const arch of ["x64", "arm64"] as const) {
       expect(SNIPPETS[`windows-${arch}`], arch).toContain(`codew-windows-${arch}.exe`);
       expect(SNIPPETS[`windows-${arch}`], arch).toContain(
         'Get-FileHash "$dest\\codew.exe"',
       );
+      expect(SNIPPETS[`windows-${arch}`], arch).not.toContain("codewhale-tui");
+      expect(VERIFY[`windows-${arch}`], arch).not.toContain("codewhale-tui");
     }
   });
 
@@ -293,7 +295,7 @@ done
 [ -n "$output" ] || output=$(basename "$url")
 if [ "$output" = codewhale-artifacts-sha256.txt ]; then
   for platform in macos-arm64 macos-x64 linux-arm64 linux-x64; do
-    for binary in codewhale codew codewhale-tui; do
+    for binary in codewhale codew; do
       printf 'fixture-hash  %s-%s\\n' "$binary" "$platform"
     done
   done > "$output"

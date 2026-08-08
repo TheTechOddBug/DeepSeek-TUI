@@ -4,7 +4,9 @@
 //! model-spawned sub-agents and fleet dispatch (#fleet-roster cutover
 //! (v0.8.67)):
 //!
-//! - built-in members (the default party, always available),
+//! - built-in members (the default party, always available; every canonical
+//!   dispatch posture — worker/scout/planner/reviewer/builder/verifier/
+//!   consultant/custom — is seeded here, #5285),
 //! - `[fleet.profiles]` entries from config.toml,
 //! - personal `$CODEWHALE_HOME/agents/*.toml` profile files,
 //! - workspace `.codewhale/agents/*.toml` profile files.
@@ -331,7 +333,35 @@ impl FleetRoster {
                 "general",
                 FleetSlot::General,
                 FleetLoadout::Inherit,
-                "General-purpose worker with full capabilities.",
+                "Legacy alias of the 'worker' posture: general-purpose worker with full capabilities.",
+                None,
+            ),
+            // The eight canonical dispatch postures are seeded roster members
+            // (#5285). Every `type`/`role` token the Agent tool accepts maps
+            // 1:1 to a named roster profile, so dispatch always resolves
+            // through the roster instead of a parallel hidden enum. `worker`,
+            // `planner`, and `custom` complete the set the roster previously
+            // could not see (scout/builder/reviewer/verifier/consultant were
+            // already seeded).
+            (
+                "worker",
+                FleetSlot::General,
+                FleetLoadout::Inherit,
+                "General-purpose worker: full tool access for multi-step tasks. The unnamed dispatch default.",
+                None,
+            ),
+            (
+                "planner",
+                FleetSlot::Planner,
+                FleetLoadout::Inherit,
+                "Planning: analysis-only for architectural planning; read-only, no shell.",
+                None,
+            ),
+            (
+                "custom",
+                FleetSlot::Custom("custom".to_string()),
+                FleetLoadout::Inherit,
+                "Custom tool access defined at spawn time via allowed_tools; locked down until then.",
                 None,
             ),
         ]
@@ -520,7 +550,10 @@ mod tests {
                 "verifier",
                 "consultant",
                 "synthesizer",
-                "general"
+                "general",
+                "worker",
+                "planner",
+                "custom"
             ]
         );
         for member in &members {
@@ -567,6 +600,40 @@ mod tests {
         assert_eq!(members[7].profile.loadout, FleetLoadout::Inherit);
     }
 
+    /// #5285: there is no dispatch posture the roster cannot see. Every
+    /// canonical `type` value the Agent tool accepts resolves to a seeded
+    /// roster member, so sub-agent dispatch always has a profile to resolve
+    /// through (posture, route, overlay, delegation from one place).
+    #[test]
+    fn every_canonical_dispatch_posture_is_a_seeded_roster_member() {
+        let roster = FleetRoster::built_ins_only();
+        for (posture, expected_slot) in [
+            ("worker", FleetSlot::General),
+            ("scout", FleetSlot::Scout),
+            ("planner", FleetSlot::Planner),
+            ("reviewer", FleetSlot::Reviewer),
+            ("builder", FleetSlot::Implementer),
+            ("verifier", FleetSlot::Verifier),
+            ("consultant", FleetSlot::Custom("consultant".to_string())),
+            ("custom", FleetSlot::Custom("custom".to_string())),
+        ] {
+            let member = roster.get(posture).unwrap_or_else(|| {
+                panic!("dispatch posture {posture:?} must be a seeded roster member")
+            });
+            assert_eq!(
+                member.profile.slot, expected_slot,
+                "seeded posture {posture:?} slot"
+            );
+            assert_eq!(member.origin, ProfileOrigin::BuiltIn, "{posture}");
+            // Seeded postures must not carry a pinned route: they inherit the
+            // session route exactly like the unnamed default so legacy
+            // type-only dispatches keep their model route (#5285).
+            assert!(member.profile.model.is_none(), "{posture}");
+            assert!(member.profile.provider.is_none(), "{posture}");
+            assert_eq!(member.profile.loadout, FleetLoadout::Inherit, "{posture}");
+        }
+    }
+
     #[test]
     fn config_member_overrides_built_in_and_extras_sort_alphabetically() {
         let _env_lock = crate::test_support::lock_test_env();
@@ -598,6 +665,9 @@ mod tests {
                 "consultant",
                 "synthesizer",
                 "general",
+                "worker",
+                "planner",
+                "custom",
                 "alpha",
                 "zeta"
             ],
@@ -861,109 +931,5 @@ mod tests {
 }
 
 #[cfg(test)]
-mod shadow_and_trust_tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn write_profile(dir: &Path, filename: &str, contents: &str) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join(filename), contents).unwrap();
-    }
-
-    #[test]
-    fn workspace_shadow_of_personal_file_is_recorded_and_reported() {
-        // #5098: editing the personal builder.toml changed nothing because a
-        // project copy silently shadowed it. The roster must report that the
-        // shadowed personal file exists and is ignored.
-        let tmp = TempDir::new().unwrap();
-        let personal_dir = tmp.path().join("personal");
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        write_profile(
-            &personal_dir,
-            "builder.toml",
-            "id = \"builder\"\nrole_hint = \"builder\"\nmodel = \"deepseek-v4-flash\"\n",
-        );
-        write_profile(
-            &workspace.join(".codewhale").join("agents"),
-            "builder.toml",
-            "id = \"builder\"\nrole_hint = \"builder\"\nmodel = \"deepseek-v4-pro\"\n",
-        );
-
-        let roster = FleetRoster::load_with_personal_dir(
-            &FleetConfigToml::default(),
-            &workspace,
-            Some(&personal_dir),
-            true,
-        );
-
-        let builder = roster.get("builder").expect("builder member");
-        assert_eq!(builder.origin, ProfileOrigin::Workspace);
-        let shadows: Vec<_> = roster.shadowed_for("builder").collect();
-        // The chain is built-in → personal → workspace; both displacements
-        // are recorded, and the file-on-file one names the ignored personal
-        // copy explicitly.
-        assert_eq!(shadows.len(), 2, "full shadow chain: {shadows:?}");
-        let shadow = shadows
-            .iter()
-            .find(|shadow| shadow.shadowed_origin == ProfileOrigin::Personal)
-            .expect("personal file shadow is recorded");
-        assert!(shadow.shadowed_source.ends_with("builder.toml"));
-        assert_eq!(shadow.winner_origin, ProfileOrigin::Workspace);
-        assert!(
-            shadows
-                .iter()
-                .any(|shadow| shadow.shadowed_origin == ProfileOrigin::BuiltIn),
-            "the built-in displacement is recorded too: {shadows:?}"
-        );
-        assert!(
-            roster.shadowed().iter().any(|s| s.id == "builder"),
-            "roster-level shadow log carries the record"
-        );
-    }
-
-    #[test]
-    fn project_scope_profiles_are_skipped_when_the_layer_is_not_trusted() {
-        // #5098: `load_workspace_agent_profiles_tolerant` applied no trust
-        // check — a cloned repo's .codewhale/agents/*.toml silently joined
-        // the dispatch roster. With project config disabled
-        // (`--no-project-config`), the whole layer stays out.
-        let tmp = TempDir::new().unwrap();
-        let workspace = tmp.path().join("workspace");
-        write_profile(
-            &workspace.join(".codewhale").join("agents"),
-            "builder.toml",
-            "id = \"builder\"\nrole_hint = \"builder\"\nmodel = \"gpt-5.6-luna\"\n",
-        );
-
-        let gated = FleetRoster::load_with_personal_dir(
-            &FleetConfigToml::default(),
-            &workspace,
-            None,
-            false,
-        );
-        let builder = gated.get("builder").expect("built-in builder remains");
-        assert_eq!(
-            builder.origin,
-            ProfileOrigin::BuiltIn,
-            "untrusted project profile must not join the roster"
-        );
-        assert_ne!(
-            builder.profile.model.as_deref(),
-            Some("gpt-5.6-luna"),
-            "foreign project pin must not reach dispatch"
-        );
-
-        let trusted = FleetRoster::load_with_personal_dir(
-            &FleetConfigToml::default(),
-            &workspace,
-            None,
-            true,
-        );
-        assert_eq!(
-            trusted.get("builder").expect("builder").origin,
-            ProfileOrigin::Workspace,
-            "trusted project profile wins as before"
-        );
-    }
-}
+#[path = "tests/roster_shadow_and_trust.rs"]
+mod shadow_and_trust_tests;

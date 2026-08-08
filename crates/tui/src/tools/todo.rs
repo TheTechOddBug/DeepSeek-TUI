@@ -312,6 +312,15 @@ impl ToolSpec for TodoWriteTool {
         vec![ToolCapability::WritesFiles]
     }
 
+    fn is_read_only_for(&self, _input: &serde_json::Value) -> bool {
+        // This mutates only the caller's in-memory progress list. Sub-agent
+        // runtimes allocate a fresh list per child, so it cannot touch the
+        // workspace, Git, remote services, or a parent/sibling's state. Treat
+        // it as bounded agent-owned state for read-only authority envelopes;
+        // keep WritesFiles above for legacy/UI capability grouping.
+        true
+    }
+
     fn approval_requirement(&self) -> ApprovalRequirement {
         ApprovalRequirement::Auto
     }
@@ -420,6 +429,22 @@ fn work_progress_metadata(snapshot: &TodoListSnapshot) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn todo_write_is_bounded_agent_owned_state_for_read_only_envelopes() {
+        let tool = super::TodoWriteTool::new(super::new_shared_todo_list());
+        assert!(crate::tools::spec::ToolSpec::is_read_only_for(
+            &tool,
+            &serde_json::json!({
+                "todos": [{"content": "private evidence note", "status": "pending"}]
+            })
+        ));
+        assert!(
+            crate::tools::spec::ToolSpec::capabilities(&tool)
+                .contains(&crate::tools::spec::ToolCapability::WritesFiles),
+            "legacy capability grouping remains intact"
+        );
+    }
+
     #[test]
     fn work_update_description_teaches_live_upkeep() {
         // 2026-07-23 user report: models wrote the list once and never

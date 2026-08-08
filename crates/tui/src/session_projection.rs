@@ -345,6 +345,7 @@ mod tests {
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
             archived: false,
+            spawn_depth: 0,
         }
     }
 

@@ -20,15 +20,12 @@
 //! (`turnBudget` per-task, resumable after budget-reached). Log when the
 //! backstop fires.
 
-/// Default safety backstop on automatic cross-turn continuation passes for one
-/// goal run (#5052).
+/// Default automatic cross-turn continuation policy for one goal run (#5052).
 ///
-/// This is deliberately generous: the completion gate is the real terminal
-/// stop, and the backstop only exists to halt a pathological loop that never
-/// emits a terminal signal. Override with `[goal] max_continuations` in
-/// config.toml; `0` disables the backstop entirely so only terminal status
-/// ends the run.
-pub const DEFAULT_MAX_GOAL_CONTINUATIONS: u32 = 100;
+/// Goals are unlimited by default: completion, blocked status, or explicit
+/// user control ends the run. Operators who want a circuit breaker can opt in
+/// with `[goal] max_continuations`; `0` keeps the default unlimited behavior.
+pub const DEFAULT_MAX_GOAL_CONTINUATIONS: u32 = 0;
 
 /// Terminal or active state of a persistent goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,9 +242,9 @@ mod tests {
     }
 
     #[test]
-    fn active_under_continuation_limit_without_budget_continues() {
+    fn default_goal_has_no_continuation_limit() {
         let progress = GoalProgress {
-            continuations: DEFAULT_MAX_GOAL_CONTINUATIONS - 1,
+            continuations: 10_000,
             ..GoalProgress::default()
         };
         assert_eq!(
@@ -257,13 +254,15 @@ mod tests {
     }
 
     #[test]
-    fn continuation_limit_stops_unbounded_run() {
+    fn explicit_continuation_limit_stops_run() {
+        let configured_limit = 100;
         let progress = GoalProgress {
-            continuations: DEFAULT_MAX_GOAL_CONTINUATIONS,
+            continuations: configured_limit,
             ..GoalProgress::default()
         };
+        let budget = GoalBudget::unbounded().with_max_continuations(configured_limit);
         assert_eq!(
-            decide_continuation(GoalRunStatus::Active, progress, GoalBudget::unbounded()),
+            decide_continuation(GoalRunStatus::Active, progress, budget),
             ContinuationDecision::Stop(StopReason::ContinuationLimit)
         );
     }
@@ -271,9 +270,9 @@ mod tests {
     #[test]
     fn operate_goal_continues_past_ten_when_budget_remains() {
         // #5052 regression: the old hardcoded cap of 10 must not be a terminal
-        // stop. With budget remaining and no terminal signal, pass 10, 11, and
-        // far beyond keep continuing under the default backstop.
-        for continuations in [10, 11, DEFAULT_MAX_GOAL_CONTINUATIONS - 1] {
+        // stop. With no terminal signal, pass 10, 11, and far beyond keep
+        // continuing because the default has no hidden ceiling.
+        for continuations in [10, 11, 100, 10_000] {
             let progress = GoalProgress {
                 tokens_used: 5_000,
                 time_used_seconds: 300,

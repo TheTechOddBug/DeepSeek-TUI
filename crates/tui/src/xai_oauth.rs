@@ -222,6 +222,33 @@ pub fn codewhale_auth_file_path() -> Result<PathBuf> {
     codewhale_config::legacy_xai_oauth_path()
 }
 
+/// #5243: validate an external Grok CLI credential file *before* consent is
+/// persisted. The old path only lexically normalized the path
+/// (`resolve_external_credential_path`) and deferred the existence/freshness
+/// check to the first request, producing `auth:oauth-consented-select-to-check`
+/// and a second trip to the picker. Grant-time validation fails fast and the
+/// token — whether just minted by device OAuth or already stored — is adopted
+/// automatically without a follow-up `e`.
+#[must_use]
+pub fn external_file_is_fresh(path: &Path) -> bool {
+    // Read without a grant: this is the grant-time check, so no capability
+    // exists yet. Use the same secure reader the runtime uses for owned files
+    // when possible, falling back to a direct read for the external path.
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let file = match parse_auth_file(&raw, path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut file = file;
+    let Some((_, entry)) = select_entry(&mut file) else {
+        return false;
+    };
+    entry_access_token_is_fresh(&entry)
+}
+
 fn configured_owned_auth_file_path(config: &Config) -> Result<Option<PathBuf>> {
     let generation = config
         .provider_config_for(ApiProvider::Xai)

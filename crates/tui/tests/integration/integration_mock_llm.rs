@@ -42,12 +42,6 @@ use futures_util::StreamExt;
 
 // Bring in the production model types verbatim — no other crate sources are
 // needed because the mock is self-contained against `models.rs`.
-#[path = "../src/model_catalog.rs"]
-mod model_catalog;
-
-#[path = "../src/models.rs"]
-#[allow(dead_code)]
-mod models;
 
 // Mirror the real `llm_client` module hierarchy so that `mock.rs`'s
 // `super::{LlmClient, StreamEventBox}` paths resolve. We re-declare a local
@@ -57,8 +51,6 @@ mod models;
 //
 // The helper file lives under `tests/support/` so cargo does not try to
 // compile it as its own test binary.
-#[path = "support/llm_client.rs"]
-mod llm_client;
 
 use crate::llm_client::LlmClient;
 use crate::llm_client::mock::{MockLlmClient, canned};

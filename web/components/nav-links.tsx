@@ -20,14 +20,14 @@ export function NavLinks({
   const pathname = usePathname();
 
   return (
-    <nav className="hidden md:flex items-center gap-7" aria-label={primaryAria}>
+    <nav className="hidden xl:flex items-center gap-5" aria-label={primaryAria}>
       {links.map((l) => {
         const isActive = pathname === l.href || pathname.startsWith(`${l.href}/`);
         return (
-          <Link key={l.href} href={l.href} className="nav-link group" aria-current={isActive ? "page" : undefined}>
-            <span>{l.label}</span>
+          <Link key={l.href} href={l.href} className="nav-link group inline-flex items-baseline" aria-current={isActive ? "page" : undefined}>
+            <span className="leading-none">{l.label}</span>
             {l.secondary && (
-              <span className="font-cjk text-[0.66rem] ml-1.5 text-ink-mute">{l.secondary}</span>
+              <span className="nav-link-secondary hidden 2xl:inline font-cjk text-[0.66rem] leading-none ml-1.5 text-ink-mute">{l.secondary}</span>
             )}
           </Link>
         );

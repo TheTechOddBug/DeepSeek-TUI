@@ -435,6 +435,95 @@ fn status_refreshes_once_on_unauthorized_and_never_displays_tokens() {
 }
 
 #[test]
+fn account_pull_refuses_to_claim_unimplemented_local_import() {
+    let (temp, config) = test_config();
+    let config_path = config.path().to_path_buf();
+    let (secrets, _) = test_secrets();
+    let transport = FakeTransport::new(vec![]);
+    let mut output = Vec::new();
+    let mut key_reader = |_| bail!("unused");
+    let mut opener = |_| true;
+    let mut sleeper = |_| {};
+
+    let error = run_with(
+        command(&["codewhale", "account", "pull"]),
+        "default",
+        "https://api.codewhale.net",
+        &config,
+        &secrets,
+        &secrets,
+        &transport,
+        &mut output,
+        &mut key_reader,
+        &mut opener,
+        &mut sleeper,
+    )
+    .expect_err("non-dry-run pull must fail until settings import exists");
+
+    assert!(error.to_string().contains("import is not available"));
+    assert!(error.to_string().contains("local config was not changed"));
+    assert!(
+        output.is_empty(),
+        "a rejected pull must not print success text"
+    );
+    assert!(
+        transport.requests().is_empty(),
+        "a rejected pull needs no API call"
+    );
+    assert!(
+        !config_path.exists(),
+        "a rejected pull must not create config.toml"
+    );
+    drop(temp);
+}
+
+#[test]
+fn account_pull_dry_run_is_truthful_and_read_only() {
+    let (temp, config) = test_config();
+    let config_path = config.path().to_path_buf();
+    let (secrets, _) = test_secrets();
+    let transport = FakeTransport::new(vec![response(200, account("acct-pull"))]);
+    CloudClient::new(&transport, &secrets, "default", "https://api.codewhale.net")
+        .save_auth(auth("access-secret", "refresh-secret", "acct-pull"))
+        .unwrap();
+    let mut output = Vec::new();
+    let mut key_reader = |_| bail!("unused");
+    let mut opener = |_| true;
+    let mut sleeper = |_| {};
+
+    run_with(
+        command(&["codewhale", "account", "pull", "--dry-run"]),
+        "default",
+        "https://api.codewhale.net",
+        &config,
+        &secrets,
+        &secrets,
+        &transport,
+        &mut output,
+        &mut key_reader,
+        &mut opener,
+        &mut sleeper,
+    )
+    .unwrap();
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Account settings (pull --dry-run):"));
+    assert!(output.contains("Account ID: acct-pull"));
+    assert!(output.contains("remote settings import is not available"));
+    assert!(output.contains("local config unchanged"));
+    assert!(!output.contains("Pulled account document"));
+    assert!(!output.contains("would hydrate"));
+    assert!(!output.contains("access-secret"));
+    assert!(!output.contains("refresh-secret"));
+    assert!(!config_path.exists(), "dry-run must not create config.toml");
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].method == HttpMethod::Get);
+    assert_eq!(requests[0].path, "/api/me");
+    drop(temp);
+}
+
+#[test]
 fn non_terminal_refresh_responses_preserve_the_local_session() {
     for status in [403, 429, 500, 503] {
         let (secrets, _) = test_secrets();

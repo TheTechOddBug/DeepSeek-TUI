@@ -45,13 +45,19 @@ describe("Blue Stage public-surface contract", () => {
     expect(CSS).toMatch(/\.nav-link::after[\s\S]*background: var\(--indigo\)/);
   });
 
-  it("keeps the shared mobile navigation inside a 390px viewport", () => {
+  it("keeps localized navigation controls inside compact viewports", () => {
     const mobile = CSS.split("@media (max-width: 520px)")[1];
 
     expect(mobile).toMatch(/\.site-nav-inner\s*\{\s*gap:\s*0\.5rem/);
     expect(mobile).toMatch(/\.site-nav-actions\s*\{[\s\S]*?min-width:\s*0/);
     expect(mobile).toMatch(
-      /\.site-nav-actions select\s*\{[\s\S]*?width:\s*8rem;[\s\S]*?min-width:\s*0/,
+      /\.site-nav-actions select\s*\{[\s\S]*?width:\s*6\.75rem;[\s\S]*?min-width:\s*0/,
+    );
+    expect(mobile).toMatch(/\.paper-wordmark-tag\s*\{\s*display:\s*none/);
+    expect(CSS).toMatch(/\.site-nav-actions\s*\{[\s\S]*?flex-shrink:\s*0/);
+    expect(CSS).toMatch(/\.site-nav-actions\s*>\s*\*\s*\{\s*flex-shrink:\s*0/);
+    expect(CSS).toMatch(
+      /@media \(max-width: 900px\)[\s\S]*?\.site-github-link,[\s\S]*?\.site-discord-link\s*\{\s*display:\s*none/,
     );
     expect(mobile).not.toMatch(/body:has\(\.product-home\) \.site-nav-actions select/);
   });

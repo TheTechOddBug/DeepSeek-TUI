@@ -146,6 +146,12 @@ pub(crate) fn semantic_truncate_between_affixes(
 }
 
 pub(super) fn history_cell_to_text(cell: &HistoryCell, width: u16) -> String {
+    // Error detail/copy is a diagnostic boundary, not a screenshot of the
+    // live wrapping. Preserve the exact source message so narrow terminals do
+    // not insert newlines into hostnames, env vars, commands, or URLs.
+    if let HistoryCell::Error { message, .. } = cell {
+        return message.clone();
+    }
     cell.transcript_lines(width)
         .into_iter()
         .map(line_to_string)

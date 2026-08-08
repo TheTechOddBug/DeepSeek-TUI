@@ -7,8 +7,8 @@
 #      crate must inherit `version.workspace = true`.
 #   2. Every crate inherits the workspace MSRV through
 #      `rust-version.workspace = true`.
-#   3. `npm/codewhale/package.json` and the root workspace lock entry match
-#      the workspace `version` in the root `Cargo.toml`.
+#   3. Release package manifests and their workspace lock records match the
+#      workspace `version` in the root `Cargo.toml`.
 #      (`npm/deepseek-tui/` still exists only as an unpublished compatibility
 #      notice and must stay private.)
 #   4. Internal `codewhale-*` path dependency pins match the workspace version.
@@ -75,6 +75,24 @@ if [[ "${workspace_version}" != "${lock_npm_version}" ]]; then
   echo "Run: npm install --package-lock-only --ignore-scripts" >&2
   fail=1
 fi
+runtime_sdk_version="$(node -p "require('./npm/runtime-sdk/package.json').version")"
+lock_runtime_sdk_version="$(node -p "require('./package-lock.json').packages?.['npm/runtime-sdk']?.version ?? ''")"
+vscode_version="$(node -p "require('./extensions/vscode/package.json').version")"
+vscode_lock_version="$(node -p "require('./extensions/vscode/package-lock.json').version ?? ''")"
+vscode_lock_workspace_version="$(node -p "require('./extensions/vscode/package-lock.json').packages?.['']?.version ?? ''")"
+for pair in \
+  "npm/runtime-sdk/package.json:${runtime_sdk_version}" \
+  "package-lock.json npm/runtime-sdk:${lock_runtime_sdk_version}" \
+  "extensions/vscode/package.json:${vscode_version}" \
+  "extensions/vscode/package-lock.json:${vscode_lock_version}" \
+  "extensions/vscode/package-lock.json workspace:${vscode_lock_workspace_version}"; do
+  label="${pair%%:*}"
+  actual="${pair#*:}"
+  if [[ "${actual}" != "${workspace_version}" ]]; then
+    echo "::error::${label} version (${actual:-<missing>}) does not match workspace Cargo.toml (${workspace_version})." >&2
+    fail=1
+  fi
+done
 if [[ -f npm/deepseek-tui/package.json ]]; then
   legacy_private="$(node -p "Boolean(require('./npm/deepseek-tui/package.json').private)")"
   legacy_publish_config="$(node -p "Boolean(require('./npm/deepseek-tui/package.json').publishConfig)")"

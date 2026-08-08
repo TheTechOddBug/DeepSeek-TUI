@@ -1,0 +1,97 @@
+# Hmbown.CodeWhale — winget singleton manifest for CodeWhale (single binary)
+# This is a mirror of packaging/winget/Hmbown.CodeWhale.yaml for tooling that expects .winget/.
+# Keep both in sync; the canonical source is packaging/winget/Hmbown.CodeWhale.yaml.
+# See packaging/winget/README.md for update instructions.
+
+PackageIdentifier: Hmbown.CodeWhale
+PackageVersion: 0.9.5
+DefaultLocale: en-US
+ManifestType: singleton
+ManifestVersion: 1.6.0
+
+Publisher: Hmbown
+PublisherUrl: https://github.com/Hmbown
+PublisherSupportUrl: https://github.com/Hmbown/CodeWhale/issues
+PackageName: CodeWhale
+PackageUrl: https://github.com/Hmbown/CodeWhale
+License: MIT
+LicenseUrl: https://github.com/Hmbown/CodeWhale/blob/main/LICENSE
+Copyright: Copyright (c) Hmbown
+ShortDescription: Terminal coding agent for supported hosted and local models
+Description: |
+  CodeWhale is a terminal coding agent that runs on your machine. The v0.9.5 single-binary
+  release ships one `codewhale` binary per target (plus the `codew` shim) across Linux x64 (musl),
+  Linux arm64, Android arm64, macOS x64/arm64, and Windows x64/arm64. See https://github.com/Hmbown/CodeWhale
+  for provider setup, Fleet workflows, and the full install guide.
+Author: Hmbown
+Moniker: codewhale
+Tags:
+  - codewhale
+  - deepseek
+  - cli
+  - tui
+  - terminal
+  - ai
+  - coding-agent
+  - rust
+MinimumOSVersion: 10.0.0.0
+ReleaseNotes: https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.5
+ReleaseNotesUrl: https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.5
+
+Installers:
+  - Architecture: x64
+    InstallerType: nullsoft
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/CodeWhaleSetup.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    ProductCode: CodeWhale
+    UpgradeBehavior: install
+    ReleaseDate: 2026-08-07
+  - Architecture: x64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-x64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-x64/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-x64/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07
+  - Architecture: x64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-x64-portable.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-x64-portable/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-x64-portable/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07
+  - Architecture: arm64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-arm64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-arm64/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-arm64/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07
+  - Architecture: arm64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-arm64-portable.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-arm64-portable/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-arm64-portable/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07

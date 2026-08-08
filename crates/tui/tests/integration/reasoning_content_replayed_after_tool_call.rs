@@ -1,15 +1,5 @@
 use futures_util::StreamExt;
 
-#[path = "../src/model_catalog.rs"]
-mod model_catalog;
-
-#[path = "../src/models.rs"]
-#[allow(dead_code)]
-mod models;
-
-#[path = "support/llm_client.rs"]
-mod llm_client;
-
 use crate::llm_client::LlmClient;
 use crate::llm_client::mock::{MockLlmClient, canned};
 use crate::models::{ContentBlock, Message, MessageRequest};

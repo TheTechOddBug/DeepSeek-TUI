@@ -193,6 +193,50 @@ impl WorldState {
         ));
         self
     }
+
+    #[must_use]
+    pub fn with_project_instructions(mut self, body: impl Into<String>) -> Self {
+        self.upsert(ModelContextFragment::new(
+            FragmentId::ProjectInstructions,
+            FragmentRole::ProjectInstructions,
+            body,
+        ));
+        self
+    }
+
+    /// Enforce the hard caps for this WorldState. Returns an error if the
+    /// fragment count or any fragment's byte/token size exceeds the core
+    /// ceilings (`MAX_FRAGMENT_BYTES` / `MAX_FRAGMENT_TOKENS`).
+    pub fn validate_caps(&self) -> Result<(), String> {
+        use crate::model_context::fragment::{
+            MAX_FRAGMENT_BYTES, MAX_FRAGMENT_TOKENS, MAX_FRAGMENTS_PER_CONTEXT,
+        };
+        if self.fragments.len() > MAX_FRAGMENTS_PER_CONTEXT {
+            return Err(format!(
+                "too many fragments: {} > {}",
+                self.fragments.len(),
+                MAX_FRAGMENTS_PER_CONTEXT
+            ));
+        }
+        for fragment in self.fragments.values() {
+            if fragment.content.len() > MAX_FRAGMENT_BYTES {
+                return Err(format!(
+                    "fragment {:?} exceeds byte ceiling: {} > {}",
+                    fragment.id,
+                    fragment.content.len(),
+                    MAX_FRAGMENT_BYTES
+                ));
+            }
+            let tokens = fragment.content.len().div_ceil(4);
+            if tokens > MAX_FRAGMENT_TOKENS {
+                return Err(format!(
+                    "fragment {:?} exceeds token ceiling: {} > {}",
+                    fragment.id, tokens, MAX_FRAGMENT_TOKENS
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Constitution (cache-stable) + WorldState (volatile) assembly point.

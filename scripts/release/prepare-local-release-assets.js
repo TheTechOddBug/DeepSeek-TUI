@@ -30,21 +30,21 @@ async function main() {
   const buildDir = path.resolve(
     process.argv[3] || path.join("target", "release"),
   );
-  const { codewhale, tui, codew } = detectBinaryNames();
+  const { codewhale, codew } = detectBinaryNames();
   const isWindows = process.platform === "win32";
+  const sourceBinary = path.join(
+    buildDir,
+    isWindows ? "codewhale.exe" : "codewhale",
+  );
 
   const assets = [
     {
-      source: path.join(buildDir, isWindows ? "codewhale.exe" : "codewhale"),
+      source: sourceBinary,
       target: codewhale,
     },
     {
-      source: path.join(buildDir, isWindows ? "codew.exe" : "codew"),
+      source: sourceBinary,
       target: codew,
-    },
-    {
-      source: path.join(buildDir, isWindows ? "codewhale-tui.exe" : "codewhale-tui"),
-      target: tui,
     },
   ];
 
@@ -61,11 +61,7 @@ async function main() {
         continue;
       }
       assets.push({
-        source: assetName.startsWith("codewhale-tui")
-          ? path.join(buildDir, isWindows ? "codewhale-tui.exe" : "codewhale-tui")
-          : assetName.startsWith("codew-")
-            ? path.join(buildDir, isWindows ? "codew.exe" : "codew")
-            : path.join(buildDir, isWindows ? "codewhale.exe" : "codewhale"),
+        source: sourceBinary,
         target: assetName,
       });
     }

@@ -9,6 +9,7 @@ const {
   allAssetNames,
   allReleaseAssetNames,
   BUNDLE_ASSET_NAMES,
+  LEGACY_TUI_BRIDGE_ASSET_NAMES,
 } = require(path.join(repoRoot, "npm", "codewhale", "scripts", "artifacts"));
 
 function read(relativePath) {
@@ -21,10 +22,14 @@ function valuesForKey(source, key) {
 }
 
 const ci = read(".github/workflows/ci.yml");
+const nightly = read(".github/workflows/nightly.yml");
 const candidate = read(".github/workflows/release-candidate.yml");
 const artifacts = read(".github/workflows/release-artifacts.yml");
 const release = read(".github/workflows/release.yml");
+const cnb = read(".cnb.yml");
 const bundles = read("scripts/release/create-release-bundles.sh");
+const archiveInstaller = read("scripts/release/install.sh");
+const cliDispatcher = read("crates/cli/src/lib.rs");
 const runbook = read("docs/RELEASE_RUNBOOK.md");
 
 assert.match(ci, /^  workflow_dispatch:\n    inputs:\n      expected_sha:/m);
@@ -37,6 +42,53 @@ for (const output of ["heavy", "workflow", "mobile", "actions"]) {
 }
 assert.match(manualForceBlock[1], /#EXPECTED_SHA.*-ne 40/s);
 assert.match(manualForceBlock[1], /actual.*EXPECTED_SHA/s);
+assert.match(
+  ci,
+  /run: cargo test -p codewhale-tui --test pty qa_pty::skills_opens_manager_owned_then_compatible -- --ignored --exact/,
+  "CI must run the isolated Skills Manager acceptance from the consolidated PTY target",
+);
+assert.doesNotMatch(ci, /--test qa_pty\b/, "CI must not name the removed qa_pty target");
+
+const expectedNightlyTargets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+].sort();
+assert.deepEqual([...new Set(valuesForKey(nightly, "target"))].sort(), expectedNightlyTargets);
+assert.deepEqual(
+  [
+    ...valuesForKey(nightly, "primary_artifact"),
+    ...valuesForKey(nightly, "alias_artifact"),
+  ].sort(),
+  [
+    "codewhale-linux-x64",
+    "codew-linux-x64",
+    "codewhale-linux-arm64",
+    "codew-linux-arm64",
+    "codewhale-macos-x64",
+    "codew-macos-x64",
+    "codewhale-macos-arm64",
+    "codew-macos-arm64",
+    "codewhale-windows-x64.exe",
+    "codew-windows-x64.exe",
+    "codewhale-windows-arm64.exe",
+    "codew-windows-arm64.exe",
+  ].sort(),
+);
+assert.match(
+  nightly,
+  /cargo build --release --locked --target \$\{\{ matrix\.target \}\} -p codewhale-cli/,
+);
+assert.match(nightly, /startsWith\(matrix\.target, 'x86_64-'\).*runner\.arch == 'X64'/s);
+assert.match(nightly, /startsWith\(matrix\.target, 'aarch64-'\).*runner\.arch == 'ARM64'/s);
+assert.doesNotMatch(nightly, /codewhale-tui/);
+assert.doesNotMatch(nightly, /target\/[^\n]*\/codew(?:\.exe)?/);
+assert.match(nightly, /cp "\$\{bin_path\}" "\$\{dir\}\/\$\{artifact\}"/);
+assert.match(nightly, /cmp -s[\s\S]*nightly-primary[\s\S]*nightly-alias/);
+assert.equal((nightly.match(/retention-days: 14/g) || []).length, 2);
 
 assert.match(candidate, /^  workflow_dispatch:\n    inputs:\n      expected_sha:/m);
 assert.doesNotMatch(candidate, /^  (push|pull_request|schedule):/m);
@@ -118,10 +170,18 @@ const builtAssetNames = [
 assert.equal(builtAssetNames.length, 21);
 assert.deepEqual(
   [...new Set(builtAssetNames)].sort(),
-  allAssetNames().filter((name) => name !== "codewhale.bat").sort(),
+  [
+    ...allAssetNames().filter((name) => name !== "codewhale.bat"),
+    ...LEGACY_TUI_BRIDGE_ASSET_NAMES,
+  ].sort(),
+);
+assert.match(
+  artifacts,
+  /stage_binary "\$\{\{ matrix\.cli_binary \}\}" "\$\{\{ matrix\.tui_artifact \}\}"/,
+  "legacy TUI bridge assets must be staged from the one compiled codewhale binary",
 );
 const bundleInvocations = [...bundles.matchAll(
-  /^bundle (\S+) \\\n\s+\S+ \S+ \S+ (tar\.gz|zip) (""|portable)$/gm,
+  /^bundle (\S+) \\\n\s+\S+ \S+ (tar\.gz|zip) (""|portable)$/gm,
 )].map((match) => {
   const variant = match[3] === "portable" ? "-portable" : "";
   return `codewhale-${match[1]}${variant}.${match[2]}`;
@@ -154,4 +214,42 @@ assert.match(runbook, /34/);
 assert.match(runbook, /does not create a tag/i);
 assert.match(runbook, /explicit.*approval/i);
 
-console.log("Release workflow contracts OK: exact-head full CI and 7-target/34-asset non-publishing candidate.");
+const cnbPreflight = cnb.match(
+  /\.linux_release_preflight: &linux_release_preflight([\s\S]*?)\nmain:/,
+);
+assert.ok(cnbPreflight, "CNB must retain a dedicated release preflight");
+const cnbBuild = cnbPreflight[1].indexOf(
+  "cargo build --jobs 2 --release --locked -p codewhale-cli",
+);
+const cnbAlias = cnbPreflight[1].indexOf(
+  "cp target/release/codewhale target/release/codew",
+);
+const cnbSmoke = cnbPreflight[1].indexOf("node scripts/release/npm-wrapper-smoke.js");
+assert.ok(cnbBuild >= 0, "CNB release preflight must build the consolidated runtime");
+assert.ok(cnbAlias > cnbBuild, "CNB release preflight must materialize codew after the build");
+assert.ok(cnbSmoke > cnbAlias, "CNB release preflight must materialize codew before smoke");
+
+assert.doesNotMatch(
+  archiveInstaller,
+  /cargo install codewhale --locked/,
+  "glibc recovery must name the published codewhale-cli crate",
+);
+assert.equal(
+  (archiveInstaller.match(/cargo install codewhale-cli --locked/g) || []).length,
+  2,
+  "both glibc recovery branches must name codewhale-cli",
+);
+assert.match(
+  archiveInstaller,
+  /legacy_tui="\$BIN_DIR\/codewhale-tui"[\s\S]*install_binary "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
+  "archive upgrades must refresh the retired TUI path from consolidated bytes",
+);
+assert.doesNotMatch(
+  cliDispatcher,
+  /codewhale_config::auto_model::classify/,
+  "the CLI dispatcher must leave auto routing to the provider-aware runtime",
+);
+
+console.log(
+  "Workflow contracts OK: 6-target/12-asset single-runtime nightly and exact-head 7-target/34-asset release candidate.",
+);

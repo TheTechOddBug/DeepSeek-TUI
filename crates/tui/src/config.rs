@@ -1985,13 +1985,13 @@ pub struct ToolsConfig {
 /// Persistent-goal loop controls (`[goal]` table in config.toml, #5052).
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 pub struct GoalConfig {
-    /// Safety backstop on automatic goal continuation passes. The completion
-    /// gate and token/time budgets are the real terminal stops; this only
-    /// halts a pathological loop that never emits a terminal signal.
+    /// Optional safety backstop on automatic goal continuation passes.
+    /// Goals are unlimited by default; token/time budgets are telemetry only.
     ///
     /// `None` uses the built-in default
-    /// ([`crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS`]); `0` disables
-    /// the backstop entirely so only budget/terminal stops end the run.
+    /// ([`crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS`], currently `0`);
+    /// `0` disables the backstop entirely so only terminal status or user
+    /// control ends the run.
     #[serde(default)]
     pub max_continuations: Option<u32>,
 }
@@ -2610,9 +2610,9 @@ pub struct Config {
     #[serde(default)]
     pub search: Option<SearchConfig>,
 
-    /// Persistent-goal loop controls (#5052). When absent, the continuation
-    /// backstop falls back to
-    /// [`crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS`].
+    /// Persistent-goal loop controls (#5052). When absent, goals have no
+    /// continuation ceiling. Users can opt into one with
+    /// `[goal] max_continuations`.
     #[serde(default)]
     pub goal: Option<GoalConfig>,
 
@@ -6206,9 +6206,9 @@ impl Config {
     }
 
     /// Effective safety backstop on automatic goal continuation passes
-    /// (#5052). `[goal] max_continuations` overrides the built-in default;
-    /// `0` disables the backstop so only completion/blocked or token/time
-    /// budget exhaustion stop an operate-mode goal run.
+    /// (#5052). Goals are unlimited by default. `[goal] max_continuations`
+    /// opts into a ceiling; `0` disables it so only terminal status or user
+    /// control stops an operate-mode goal run.
     #[must_use]
     pub fn goal_max_continuations(&self) -> u32 {
         self.goal
@@ -6908,6 +6908,7 @@ reasoning_effort = "auto"
 # Startup update check
 [update]
 check_for_updates = true
+# check_interval_hours = 1
 # update_uri = "https://internal.mirror.example/codewhale/releases/latest"
 "#
     );

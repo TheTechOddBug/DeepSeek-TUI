@@ -25,23 +25,20 @@ git -C "${fixture}" -c commit.gpgsign=false commit --quiet -m "fixture"
 source_sha="$(git -C "${fixture}" rev-parse HEAD)"
 
 make_binary() {
-  local name="$1"
-  cat >"${src_dir}/${name}" <<EOF
+  cat >"${src_dir}/codewhale" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "\${1:-}" == "--version" ]]; then
-  printf '%s\n' '${name} 0.9.1 (${source_sha})'
-  printf '%s\n' '${name}' >>"\${DOGFOOD_TEST_MARKER}"
+  printf '%s\n' 'codewhale 0.9.1 (${source_sha})'
+  printf '%s\n' "\${0##*/}" >>"\${DOGFOOD_TEST_MARKER}"
   exit 0
 fi
 exit 2
 EOF
-  chmod +x "${src_dir}/${name}"
+  chmod +x "${src_dir}/codewhale"
 }
 
-make_binary codewhale
-make_binary codew
-make_binary codewhale-tui
+make_binary
 
 # Reproduce the old dogfood state: codew was a symlink to the dispatcher.
 printf 'old dispatcher\n' >"${dest_dir}/codewhale"
@@ -54,10 +51,8 @@ set -euo pipefail
 case "${2:-}" in
   "command -v codewhale") printf '%s\n' "${DOGFOOD_TEST_DEST}/codewhale" ;;
   "command -v codew") printf '%s\n' "${DOGFOOD_TEST_DEST}/codew" ;;
-  "command -v codewhale-tui") printf '%s\n' "${DOGFOOD_TEST_DEST}/codewhale-tui" ;;
   "codewhale --version") exec "${DOGFOOD_TEST_DEST}/codewhale" --version ;;
   "codew --version") exec "${DOGFOOD_TEST_DEST}/codew" --version ;;
-  "codewhale-tui --version") exec "${DOGFOOD_TEST_DEST}/codewhale-tui" --version ;;
   *) exit 2 ;;
 esac
 EOF
@@ -71,8 +66,8 @@ CODEWHALE_INSTALL_DIRS="${dest_dir}" \
 CODEWHALE_DOGFOOD_RECEIPT_DIR="${receipt_dir}" \
   "${fixture}/scripts/release/install-dogfood.sh" "${src_dir}" >/dev/null
 
-for name in codewhale codew codewhale-tui; do
-  cmp -s "${src_dir}/${name}" "${dest_dir}/${name}" || {
+for name in codewhale codew; do
+  cmp -s "${src_dir}/codewhale" "${dest_dir}/${name}" || {
     echo "installed ${name} differs from the built fixture" >&2
     exit 1
   }
@@ -83,8 +78,8 @@ if [[ -L "${dest_dir}/codew" ]]; then
   exit 1
 fi
 
-[[ "$(grep -c '^codew$' "${marker}")" -ge 2 ]] || {
-  echo "native codew was not exercised before and after installation" >&2
+[[ "$(grep -c '^codew$' "${marker}")" -ge 1 ]] || {
+  echo "the installed codew command name was not exercised" >&2
   exit 1
 }
 

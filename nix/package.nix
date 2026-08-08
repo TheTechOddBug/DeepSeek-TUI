@@ -64,9 +64,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   cargoBuildFlags = [
     "--package"
     "codewhale-cli"
-    "--package"
-    "codewhale-tui"
-  ];
+  ];  # single binary — tui crate is a library, not a shipped binary (v0.9.5+)
   cargoTestFlags = finalAttrs.cargoBuildFlags ++ [
     "--lib"
     "--bins"

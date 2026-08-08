@@ -20,26 +20,22 @@
 
 use std::fs;
 
-#[path = "../src/core/tool_parser.rs"]
-#[allow(dead_code)]
-mod tool_parser;
-
 // `engine.rs` was decomposed into submodules under `core/engine/`. The
 // protocol-scrubbing strings the tests below assert on are now spread
 // across `engine.rs` and several `engine/*.rs` files. We compile-time
 // include each so a contributor moving a marker into a sibling submodule
 // does not silently break these regression checks.
 const ENGINE_SOURCES: &[&str] = &[
-    include_str!("../src/core/engine.rs"),
-    include_str!("../src/core/engine/streaming.rs"),
-    include_str!("../src/core/engine/turn_loop.rs"),
-    include_str!("../src/core/engine/dispatch.rs"),
-    include_str!("../src/core/engine/tool_setup.rs"),
-    include_str!("../src/core/engine/tool_execution.rs"),
-    include_str!("../src/core/engine/tool_catalog.rs"),
-    include_str!("../src/core/engine/context.rs"),
-    include_str!("../src/core/engine/approval.rs"),
-    include_str!("../src/core/engine/lsp_hooks.rs"),
+    include_str!("../../src/core/engine.rs"),
+    include_str!("../../src/core/engine/streaming.rs"),
+    include_str!("../../src/core/engine/turn_loop.rs"),
+    include_str!("../../src/core/engine/dispatch.rs"),
+    include_str!("../../src/core/engine/tool_setup.rs"),
+    include_str!("../../src/core/engine/tool_execution.rs"),
+    include_str!("../../src/core/engine/tool_catalog.rs"),
+    include_str!("../../src/core/engine/context.rs"),
+    include_str!("../../src/core/engine/approval.rs"),
+    include_str!("../../src/core/engine/lsp_hooks.rs"),
 ];
 
 fn any_engine_source_contains(needle: &str) -> bool {
@@ -112,7 +108,7 @@ fn engine_emits_compact_fake_wrapper_notice() {
 
 #[test]
 fn legacy_parser_extracts_bracket_tool_call() {
-    let result = tool_parser::parse_tool_calls(
+    let result = crate::tool_parser::parse_tool_calls(
         "intro [TOOL_CALL]\n{\"tool\":\"x\",\"args\":{}}\n[/TOOL_CALL]",
     );
     assert_eq!(result.tool_calls.len(), 1);
@@ -122,7 +118,7 @@ fn legacy_parser_extracts_bracket_tool_call() {
 
 #[test]
 fn legacy_parser_extracts_invoke_block() {
-    let result = tool_parser::parse_tool_calls(
+    let result = crate::tool_parser::parse_tool_calls(
         "before <invoke name=\"do_thing\"><parameter name=\"k\">v</parameter></invoke> after",
     );
     assert_eq!(result.tool_calls.len(), 1);
@@ -137,7 +133,7 @@ fn legacy_parser_does_not_execute_function_calls_wrapper() {
     // strips it from visible text and the model is expected to use the API
     // tool channel instead).
     let raw = "narrative <function_calls>\n{\"name\":\"x\",\"input\":{}}\n</function_calls> end";
-    let result = tool_parser::parse_tool_calls(raw);
+    let result = crate::tool_parser::parse_tool_calls(raw);
     assert!(
         result.tool_calls.is_empty(),
         "function_calls wrapper must not be parsed as a real tool call: {:?}",
@@ -150,17 +146,17 @@ fn legacy_parser_marker_helper_flags_fake_wrappers_without_enabling_execution() 
     // `has_tool_call_markers` now also flags forged wrappers so the engine can
     // scrub them from visible text and keep reasoning-placeholder bookkeeping.
     // The parser still must not turn those wrappers into executable calls.
-    assert!(tool_parser::has_tool_call_markers(
+    assert!(crate::tool_parser::has_tool_call_markers(
         "noise [TOOL_CALL]x[/TOOL_CALL]"
     ));
-    assert!(tool_parser::has_tool_call_markers(
+    assert!(crate::tool_parser::has_tool_call_markers(
         "noise <invoke name=\"x\"></invoke>"
     ));
-    assert!(tool_parser::has_tool_call_markers(
+    assert!(crate::tool_parser::has_tool_call_markers(
         "noise <function_calls>{}</function_calls>"
     ));
     assert!(
-        tool_parser::parse_tool_calls("noise <function_calls>{}</function_calls>")
+        crate::tool_parser::parse_tool_calls("noise <function_calls>{}</function_calls>")
             .tool_calls
             .is_empty()
     );

@@ -6,6 +6,7 @@
 //! module keeps registry construction, user-command precedence, and the
 //! fall-through behaviour.
 
+pub mod discovery;
 mod groups;
 pub mod traits;
 pub mod user_commands;
@@ -14,6 +15,10 @@ pub mod user_registry;
 #[cfg(test)]
 #[path = "epic_dispatch_acceptance.rs"]
 mod epic_dispatch_acceptance;
+
+#[cfg(test)]
+#[path = "epic_discovery_acceptance.rs"]
+mod epic_discovery_acceptance;
 
 use std::sync::OnceLock;
 

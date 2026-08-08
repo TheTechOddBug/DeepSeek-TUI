@@ -8,25 +8,38 @@ single reproducible receipt. No API keys or live providers are required.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 
 
-def run_metric(test_name: str, marker: str) -> dict:
-    cmd = [
+METRIC_TEST_MODULE = "core::engine::tests"
+
+
+def metric_test_name(test_name: str) -> str:
+    return f"{METRIC_TEST_MODULE}::{test_name}"
+
+
+def metric_command(test_name: str) -> list[str]:
+    exact_test_name = metric_test_name(test_name)
+    return [
         "cargo",
         "test",
         "--locked",
         "-p",
         "codewhale-tui",
-        "--bin",
-        "codewhale-tui",
-        test_name,
+        "--lib",
+        exact_test_name,
         "--",
         "--ignored",
+        "--exact",
         "--nocapture",
         "--test-threads=1",
     ]
+
+
+def run_metric(test_name: str, marker: str) -> dict:
+    cmd = metric_command(test_name)
     proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
     sys.stderr.write(proc.stderr)
     if proc.returncode != 0:
@@ -34,12 +47,20 @@ def run_metric(test_name: str, marker: str) -> dict:
         proc.check_returncode()
 
     combined = proc.stdout.splitlines() + proc.stderr.splitlines()
+    if re.search(r"\brunning\s+0\s+tests?\b", "\n".join(combined)):
+        sys.stdout.write(proc.stdout)
+        raise RuntimeError(
+            f"exact library metric test {metric_test_name(test_name)} ran zero tests"
+        )
     for line in combined:
         if marker in line:
             return json.loads(line.split(marker, 1)[1])
 
     sys.stdout.write(proc.stdout)
-    raise RuntimeError(f"missing {marker} marker")
+    raise RuntimeError(
+        f"missing {marker.rstrip()} marker from exact library metric test "
+        f"{metric_test_name(test_name)}"
+    )
 
 
 def main() -> int:

@@ -370,7 +370,7 @@ mark.search-highlight {
   min-height: 4.25rem;
   align-items: center;
   justify-content: space-between;
-  gap: 2rem;
+  gap: 1.5rem;
   margin-inline: auto;
 }
 
@@ -423,8 +423,11 @@ mark.search-highlight {
 }
 
 .paper-wordmark {
+  flex: 1 1 auto;
   gap: 0.75rem;
+  max-width: 15rem;
   min-width: 0;
+  overflow: hidden;
 }
 
 .paper-wordmark-text {
@@ -487,9 +490,12 @@ mark.search-highlight {
 
 .site-nav-actions {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 0.65rem;
 }
+
+.site-nav-actions > * { flex-shrink: 0; }
 
 .site-github-link {
   display: inline-flex;
@@ -504,6 +510,22 @@ mark.search-highlight {
 }
 
 .site-github-link:hover { border-color: var(--ink); }
+
+.site-discord-link {
+  display: inline-flex;
+  min-height: 2.25rem;
+  align-items: center;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  color: var(--ink);
+}
+
+.site-discord-link:hover { border-color: var(--ink); }
+
+.brand-mark { width: 1rem; height: 1rem; display: block; }
+
+.paper-star-badge .brand-mark { margin-right: 0.3rem; }
 
 .nav-link {
   font-family: var(--font-body), "IBM Plex Sans", system-ui, sans-serif;
@@ -927,7 +949,8 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 
 @media (max-width: 900px) {
   .site-nav-inner { gap: 1rem; }
-  .site-github-link { display: none; }
+  .site-github-link,
+  .site-discord-link { display: none; }
   .site-footer-main { grid-template-columns: 1fr; gap: 2.5rem; }
   .site-footer-meta { grid-template-columns: 1fr; gap: 0.7rem; }
 }
@@ -2470,8 +2493,16 @@ html[lang="ko"] .ocean-column h2 {
   }
 
   .site-nav-actions select {
-    width: 8rem;
+    width: 6.75rem;
     min-width: 0;
+  }
+
+  .paper-wordmark {
+    max-width: 9.75rem;
+  }
+
+  .paper-wordmark-tag {
+    display: none;
   }
 
   .product-hero-grid {
@@ -2527,6 +2558,13 @@ html[lang="ko"] .ocean-column h2 {
 
   .product-community nav {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 1536px) {
+  .site-nav-inner,
+  .paper-issue-inner {
+    width: min(100% - 2.5rem, 92rem);
   }
 }
 

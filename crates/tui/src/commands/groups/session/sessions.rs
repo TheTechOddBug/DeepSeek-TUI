@@ -8,7 +8,7 @@ use super::CommandResult;
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "sessions",
-    aliases: &["resume"],
+    aliases: &[],
     usage: "/sessions [show|open <id>|archive <id>|unarchive <id>|prune <days>]",
     description_id: MessageId::CmdSessionsDescription,
 };

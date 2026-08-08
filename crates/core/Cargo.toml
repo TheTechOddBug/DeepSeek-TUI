@@ -10,14 +10,17 @@ description = "Core runtime boundaries for Codewhale"
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-codewhale-agent = { path = "../agent", version = "0.9.4" }
-codewhale-config = { path = "../config", version = "0.9.4" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.4" }
-codewhale-hooks = { path = "../hooks", version = "0.9.4" }
-codewhale-mcp = { path = "../mcp", version = "0.9.4" }
-codewhale-protocol = { path = "../protocol", version = "0.9.4" }
-codewhale-state = { path = "../state", version = "0.9.4" }
-codewhale-tools = { path = "../tools", version = "0.9.4" }
+serde.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+codewhale-agent = { path = "../agent", version = "0.9.5" }
+codewhale-config = { path = "../config", version = "0.9.5" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.5" }
+codewhale-hooks = { path = "../hooks", version = "0.9.5" }
+codewhale-mcp = { path = "../mcp", version = "0.9.5" }
+codewhale-protocol = { path = "../protocol", version = "0.9.5" }
+codewhale-state = { path = "../state", version = "0.9.5" }
+codewhale-tools = { path = "../tools", version = "0.9.5" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
@@ -25,4 +28,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

@@ -561,7 +561,13 @@ impl FleetRole {
             Self::Consultant => CONSULTANT_AGENT_INTRO,
             Self::Custom => CUSTOM_AGENT_INTRO,
         };
-        format!("{role_intro}{SUBAGENT_OUTPUT_FORMAT}")
+        match self {
+            Self::Scout => format!(
+                "{role_intro}{}",
+                crate::prompts::text::SUBAGENT_SCOUT_OUTPUT_FORMAT
+            ),
+            _ => format!("{role_intro}{SUBAGENT_OUTPUT_FORMAT}"),
+        }
     }
 }
 
@@ -1289,7 +1295,7 @@ fn default_subagent_artifacts(run_id: &str) -> Vec<AgentRunArtifactRef> {
             kind: "transcript".to_string(),
             name: "transcript_handle".to_string(),
             target: format!("agent:{run_id}"),
-            description: "Open loads the complete private chat artifact; use the bounded transcript_handle with handle_read for slices and artifact metadata."
+            description: "Open loads the complete private chat artifact, including the child's agent-owned todo_write working notes; use the bounded transcript_handle with handle_read for slices and artifact metadata."
                 .to_string(),
         },
         AgentRunArtifactRef {
@@ -11504,7 +11510,12 @@ fn apply_spawn_profile(
     // they do *not* resolve to a member).
     let mut resolved_from_role = false;
     let profile_id = request.profile.as_deref().or_else(|| {
-        if !request.agent_type_named || request.agent_type == FleetRole::Worker {
+        // #5285: every *named* `type` dispatch resolves through the roster —
+        // including worker/planner/custom, which are now seeded roster
+        // members. Only the fully-unnamed default (no type/role/profile) skips
+        // roster resolution, so there is no dispatch posture the roster cannot
+        // see and no parallel hidden enum.
+        if !request.agent_type_named {
             return None;
         }
         let role = request.assignment.role.as_deref()?;
@@ -11545,8 +11556,22 @@ fn apply_spawn_profile(
     // *matches* the profile's pinned model is accepted as redundant and
     // ignored, so a caller that used `type: "builder"` with the same model the
     // profile already pins is helped through instead of being rejected.
+    //
+    // #5285: worker/planner/custom became roster members with this change.
+    // Before the collapse they were not roster members at all, so a named
+    // `type: worker|planner|custom` dispatch never resolved a profile and any
+    // `model`/`model_strength` the caller supplied parsed freely. Seeding them
+    // must not newly reject those previously-valid calls, so a type-resolved
+    // member that does NOT pin a concrete route keeps its legacy model
+    // options. Only a member that actually binds a provider/model (or an
+    // explicitly-named `profile:` member outside the General slot) is
+    // route-bound and rejects overrides.
     let is_general_slot = matches!(member.profile.slot, codewhale_config::FleetSlot::General);
-    if !is_general_slot {
+    let route_permissive = is_general_slot
+        || (resolved_from_role
+            && member.profile.model.is_none()
+            && member.profile.provider.is_none());
+    if !route_permissive {
         if let Some(requested) = request.model.as_deref() {
             if let Some(pinned) = member.profile.model.as_deref() {
                 if requested.trim().eq_ignore_ascii_case(pinned.trim()) {
@@ -11557,7 +11582,7 @@ fn apply_spawn_profile(
                         "fleet profile '{}' pins model '{}', but the caller requested '{}'. \
                          Named agents use exactly their configured model, route, and posture. \
                          Remove 'model' to use the profile pin, or dispatch without a profile \
-                         (type: 'worker'/'general') to use 'model'.",
+                         (type: 'worker'/'general'/'planner'/'custom') to use 'model'.",
                         member.id, pinned, requested
                     )));
                 }
@@ -11566,7 +11591,7 @@ fn apply_spawn_profile(
                     "fleet profile '{}' binds a pre-configured route; 'model' may not be set for \
                      named fleet roles. Named agents use exactly their configured model, route, and \
                      posture — the dispatching model cannot override them. Remove 'model', or dispatch \
-                     with type: 'worker'/'general' (the only role with model options).",
+                     with type: 'worker'/'general'/'planner'/'custom' (the postures with model options).",
                     member.id
                 )));
             }
@@ -11576,7 +11601,8 @@ fn apply_spawn_profile(
                 "fleet profile '{}' binds a pre-configured route; 'model_strength' may not be \
                  set for named fleet roles. Named agents use exactly their configured model, \
                  route, and posture — the dispatching model cannot override them. Remove \
-                 'model_strength', or dispatch with type: 'worker'/'general' (the only role with model options).",
+                 'model_strength', or dispatch with type: 'worker'/'general'/'planner'/'custom' \
+                 (the postures with model options).",
                 member.id
             )));
         }
@@ -11650,6 +11676,9 @@ fn resolve_roster_member<'a>(
         "implementer" | "implement" | "implementation" => Some("builder"),
         "release_lead" | "release-lead" | "releaselead" => Some("manager"),
         "scout" | "explore" | "explorer" | "exploration" => Some("scout"),
+        // #5285: `general`/`default` are legacy spellings of the canonical
+        // `worker` posture, which is now the seeded roster member.
+        "general" | "default" => Some("worker"),
         _ => None,
     };
     alias.and_then(|id| roster.get(id))
@@ -12503,10 +12532,9 @@ fn routine_agent_progress_can_preserve_event_headroom(status: AgentWorkerStatus)
 /// - Read (`Auto`) tools are always allowed.
 /// - Write/edit/patch (`Suggest`) tools require a write-capable posture, so the
 ///   read-only roles (`explore`/`review`/`plan`/`verifier`) are denied.
-/// - Shell (`Required`) tools require a `Full` shell posture, so only
-///   `verifier`/`implementer`/`general` may shell out; `explore`/`review`
-///   (read-only shell) and `plan` (no shell) are denied because read-only-shell
-///   enforcement is not yet wired at the exec layer.
+/// - Shell (`Required`) tools require a `Full` shell posture. Scout/reviewer
+///   calls that the Bash spec proves read-only are `Auto`, so they take the
+///   read branch instead; arbitrary commands remain outside their envelope.
 ///
 /// `custom` passes this role-only check. Its explicit allowlist, bounded write
 /// authority, and parent-intersected runtime profile jointly form the actual
@@ -12652,18 +12680,28 @@ impl SubAgentToolRegistry {
         // into the allowlist the registry actually consults, the child still
         // sees and can call the parent's full surface — the profile says one
         // thing and the runtime does another.
-        let allowed_tools =
-            intersect_explicit_tool_scope(&runtime.worker_profile.tools, explicit_allowed_tools);
-        let context = runtime.context.clone();
         let coordination_manager = Arc::clone(&runtime.manager);
         let mut surface_options = runtime.agent_tool_surface_options.clone();
-        surface_options.shell_policy = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
+        let parent_shell = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
+        let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
+        if matches!(&agent_type, FleetRole::Scout | FleetRole::Reviewer)
+            && child_shell.allows_shell()
+        {
+            child_shell = ShellPolicy::ReadOnly;
+        }
+        let mut effective_profile = runtime.worker_profile.clone();
+        effective_profile.shell = child_shell;
+        let allowed_tools =
+            intersect_explicit_tool_scope(&effective_profile.tools, explicit_allowed_tools);
+        surface_options.shell_policy = child_shell;
+        let context = runtime.context.clone().with_shell_policy(child_shell);
         // This registry executes as the admitted child named by
         // `owner_agent_id`. Coordination tools derive their hierarchy caller
         // from `parent_agent_id`, so stamp the same identity here even for
         // test/restore constructors whose runtime snapshot predates admission.
         let mut child_runtime = runtime.clone();
         child_runtime.parent_agent_id = Some(owner_agent_id.clone());
+        child_runtime.worker_profile = effective_profile.clone();
         let mut registry = ToolRegistryBuilder::new().with_full_agent_surface_options(
             Some(runtime.client.clone()),
             runtime.model.clone(),
@@ -12688,11 +12726,11 @@ impl SubAgentToolRegistry {
 
         Self {
             allowed_tools,
-            disallowed_tools: runtime.worker_profile.denied_tools.clone(),
+            disallowed_tools: effective_profile.denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,
             agent_type,
-            runtime_profile: runtime.worker_profile,
+            runtime_profile: effective_profile,
             can_spawn_child,
             owner_agent_id,
             owner_agent_name,
@@ -12809,7 +12847,12 @@ impl SubAgentToolRegistry {
 
     fn is_action_allowed(&self, family: &str, action: &str) -> bool {
         let alias = Self::legacy_action_alias(family, action);
-        if self.is_tool_denied(family) || alias.is_some_and(|name| self.is_tool_denied(name)) {
+        let bounded_recon_bash = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+            && family.eq_ignore_ascii_case("Bash")
+            && action == "run";
+        if self.is_tool_denied(family)
+            || !bounded_recon_bash && alias.is_some_and(|name| self.is_tool_denied(name))
+        {
             return false;
         }
         match &self.allowed_tools {
@@ -12841,6 +12884,24 @@ impl SubAgentToolRegistry {
                     })
             }
         }
+    }
+
+    /// Recon is a positive evidence profile: every unlisted process, plugin,
+    /// mutation, build, and coordination surface stays absent and refused.
+    /// Verifier separately keeps bounded Run while losing arbitrary shell.
+    fn role_blocks_unhardened_process_tool(&self, name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        let recon = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+            && lower != "agent"
+            && !crate::tools::registry::readonly_evidence_tool_name(name);
+        let raw_shell = lower == "bash"
+            || lower.starts_with("exec_shell")
+            || matches!(
+                lower.as_str(),
+                "exec_wait" | "exec_interact" | "task_shell_start" | "task_shell_wait"
+            )
+            || lower.starts_with("terminal/");
+        recon || matches!(&self.agent_type, FleetRole::Verifier) && raw_shell
     }
 
     /// Whether this child's posture removes the network.
@@ -12942,6 +13003,14 @@ impl SubAgentToolRegistry {
         }
     }
 
+    /// Concrete safe call used to decide catalog visibility for tools whose
+    /// approval is input-sensitive. Dispatch still evaluates the model's real
+    /// input through the same posture and envelope checks.
+    fn visibility_representative_input(&self, name: &str) -> Option<Value> {
+        (name == "Bash" && matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer))
+            .then(|| json!({"action": "run", "command": "pwd"}))
+    }
+
     fn tools_for_model(&self, agent_type: &FleetRole) -> Vec<Tool> {
         let _ = agent_type;
         let api_tools = self.registry.to_api_tools();
@@ -12974,10 +13043,15 @@ impl SubAgentToolRegistry {
             // them in the function-calling schema (defense-in-depth with the
             // `is_tool_allowed` / `execute` guards).
             .filter(|tool| !self.is_tool_denied(&tool.name))
+            .filter(|tool| !self.role_blocks_unhardened_process_tool(&tool.name))
             // #3217: hide tools the role posture forbids so the model never
             // even sees write/edit/patch (read-only roles) or shell (no-shell
             // roles). Defense-in-depth with the `execute` guard below.
-            .filter(|tool| tool.name == "File" || self.posture_permits_tool(&tool.name, None))
+            .filter(|tool| {
+                let representative = self.visibility_representative_input(&tool.name);
+                tool.name == "File"
+                    || self.posture_permits_tool(&tool.name, representative.as_ref())
+            })
             // The envelope's visibility half. An action family survives here on
             // the strength of any one permitted action and has its `action`
             // enum pruned below; a plain tool the envelope refuses outright is
@@ -12986,7 +13060,10 @@ impl SubAgentToolRegistry {
                 if is_action_family(&tool.name) {
                     return true;
                 }
-                self.envelope_permits(&tool.name, &json!({}))
+                let representative = self
+                    .visibility_representative_input(&tool.name)
+                    .unwrap_or_else(|| json!({}));
+                self.envelope_permits(&tool.name, &representative)
             })
             .collect::<Vec<_>>();
 
@@ -13007,9 +13084,18 @@ impl SubAgentToolRegistry {
                                 ApprovalRequirement::Suggest,
                             ))
                         || matches!(action, "read" | "list" | "search_name" | "search_content");
+                    let evidence_action =
+                        !matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+                            || tool.name != "Web"
+                            || matches!(action, "search" | "fetch");
+                    let mut representative = self
+                        .visibility_representative_input(&tool.name)
+                        .unwrap_or_else(|| json!({}));
+                    representative["action"] = json!(action);
                     posture_allows
+                        && evidence_action
                         && self.is_action_allowed(&tool.name, action)
-                        && self.envelope_permits(&tool.name, &json!({"action": action}))
+                        && self.envelope_permits(&tool.name, &representative)
                 });
             }
         }
@@ -13033,7 +13119,20 @@ impl SubAgentToolRegistry {
     }
 
     async fn execute(&self, _agent_id: &str, name: &str, input: Value) -> Result<String> {
+        if self.role_blocks_unhardened_process_tool(name) {
+            return Err(anyhow!(
+                "Tool {name} is not available to this read-only worker because its process path does not share the hardened evidence boundary. Use File read/search, classifier-bounded Bash reads, or the verifier's bounded Run tool instead."
+            ));
+        }
         let action = input.get("action").and_then(Value::as_str);
+        if matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+            && name == "Web"
+            && !matches!(action, Some("search" | "fetch"))
+        {
+            return Err(anyhow!(
+                "Tool Web is limited to search/fetch in the read-only evidence profile"
+            ));
+        }
         let family_action_allowed = if !Self::ACTION_ALIASES
             .iter()
             .any(|(family, _, _)| *family == name)
@@ -13288,7 +13387,12 @@ fn carries_network_url(input: &Value) -> bool {
 /// written. It fails closed and names the posture, so the refusal reads as a
 /// contract rather than a malfunction.
 fn reject_network_reaching_input(name: &str, input: &Value) -> Result<()> {
-    if !carries_network_url(input) {
+    let github_shell_read = matches!(name, "Bash" | "exec_shell")
+        && input
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(crate::command_safety::is_github_readonly_command);
+    if !github_shell_read && !carries_network_url(input) {
         return Ok(());
     }
     Err(anyhow!(
@@ -13686,7 +13790,7 @@ use crate::prompts::text::SUBAGENT_OUTPUT_FORMAT;
 const GENERAL_AGENT_INTRO: &str = concat!(
     "You are a trusted Fleet worker. Your job is to complete the one task you were given, end-to-end, and report back concisely.\n",
     "Stay inside the assigned scope; put adjacent work under RISKS/BLOCKERS.\n",
-    "For genuinely multi-step work, track progress with `work_update`; skip it for short, focused tasks.\n",
+    "For genuinely multi-step work, track progress with `todo_write`; skip it for short, focused tasks.\n",
     "**Stop quickly on failure**: if the same tool call fails 2 times in a row, stop retrying and return what you have so far with a one-line note explaining what's missing. Do not loop on impossible queries (e.g. external API unreachable, rate-limited, or returning empty).\n",
     "For builder or repair-style work, keep going within the assigned scope; checkpoint before broadening the task or after repeated failures instead of forcing a tiny tool-call cap.\n\n"
 );
@@ -13695,7 +13799,8 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
     "You are a trusted Fleet scout (role: `scout`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
     "Default to `EFFORT: quick`: aim for about 3-5 tool calls unless the brief explicitly asks for more.\n",
     "Orient first: confirm the workspace/project root, read relevant AGENTS.md/README guidance when the tree is unfamiliar, then search only the likely scope.\n",
-    "Use `File` with actions `list`, `search_name`, `search_content`, and `read`; use RLM only for long inputs or many semantic slices, not basic path discovery.\n",
+    "Use `File` for bounded reads and `Bash` action `run` for the advertised direct-argv evidence subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, unknown flags, and shell control actions are unavailable.\n",
+    "Use your private `todo_write` list as editable working notes when useful; it is agent-owned state, not permission to write project files. Those tool calls remain in the complete transcript artifact returned to the parent.\n",
     "Honor QUESTION, SCOPE, ALREADY_KNOWN, and STOP_CONDITION. Do not repeat ALREADY_KNOWN work unless evidence contradicts it; do not broaden once QUESTION is answered.\n",
     "Your value is compressed reconnaissance: cite `path:line-range` for each finding and stop once evidence is sufficient. Return partial findings if the next step would be speculative or duplicative.\n",
     "CHANGES will almost always be \"None.\" for a scout.\n\n"
@@ -13704,13 +13809,15 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
 const PLAN_AGENT_INTRO: &str = concat!(
     "You are a trusted Fleet planner (role: `planner`). Your job is to produce a grounded, prioritized plan, not patches.\n",
     "Read enough code to avoid guessing; each step names its artifact and verification.\n",
-    "Use work_update for concrete To-do progress; explain key trade-offs in the plan you return.\n",
+    "Use todo_write for concrete To-do progress; explain key trade-offs in the plan you return.\n",
     "CHANGES should list plan artifacts only, not future speculative edits.\n\n"
 );
 
 const REVIEW_AGENT_INTRO: &str = concat!(
     "You are an adversarial Fleet reviewer (role: `reviewer`). Assume the change is broken until the evidence proves otherwise: actively try to refute the claims made about it, and stay strictly read-only.\n",
     "Read the diff/files, grep sibling patterns/tests, hunt regressions, missing tests, unhandled edge cases, and quiet behavior changes, then order EVIDENCE by severity.\n",
+    "Use `File` for bounded reads and `Bash` action `run` only for the advertised direct-argv navigation/rg, safe Git, and read-only GitHub evidence subset; builds, tests, writes, unknown flags, and shell control actions are unavailable.\n",
+    "Use your private `todo_write` list as editable working notes when useful; it is agent-owned state, not permission to write project files. Those tool calls remain in the complete transcript artifact returned to the parent.\n",
     "Use BLOCKER/MAJOR/MINOR/NIT and include path:line-range plus suggested fix.\n",
     "You may use more tool calls than quick exploration, but stop after decisive evidence instead of widening the review forever.\n",
     "If nothing survives your attack, say plainly in SUMMARY that no MAJOR+ issues exist — a clean verdict earned adversarially is a real result, not a failure.\n",

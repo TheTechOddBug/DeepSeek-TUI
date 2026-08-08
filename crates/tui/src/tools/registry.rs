@@ -228,13 +228,34 @@ impl ToolRegistry {
     }
 
     fn build_api_tools(&self) -> Vec<Tool> {
+        let read_only_authority = self.context.tool_authority.as_deref().filter(|authority| {
+            authority.authority == super::spec::ToolMutationAuthority::ReadOnly
+        });
+        let evidence_only = read_only_authority.is_some();
+        let evidence_network = self
+            .context
+            .tool_authority
+            .as_ref()
+            .is_none_or(|authority| authority.network_access == Some(true));
         let mut tools: Vec<&Arc<dyn ToolSpec>> = self.tools.values().collect();
         tools.sort_by(|a, b| a.name().cmp(b.name()));
         tools
             .into_iter()
             .filter(|tool| tool.model_visible())
+            .filter(|tool| {
+                read_only_authority.is_none_or(|authority| {
+                    readonly_evidence_tool_name(tool.name())
+                        || (tool.name() == "Run"
+                            && authority.verification
+                                == super::spec::ToolVerificationAuthority::Bounded)
+                })
+            })
+            .filter(|tool| evidence_network || !matches!(tool.name(), "Web" | "web.run"))
             .map(|tool| {
                 let mut schema = tool.input_schema();
+                if evidence_only {
+                    project_readonly_evidence_schema(tool.name(), &mut schema);
+                }
                 schema_sanitize::sanitize(&mut schema);
                 schema_canonicalize::canonicalize_schema(&mut schema);
                 Tool {
@@ -436,6 +457,53 @@ impl ToolRegistry {
     }
 }
 
+/// The complete model-visible and dispatchable surface for a machine or role
+/// whose contract is evidence collection without project/process mutation.
+pub(crate) fn readonly_evidence_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "File"
+            | "Bash"
+            | "Web"
+            | "web.run"
+            | "load_skill"
+            | "handle_read"
+            | "retrieve_tool_result"
+            | "todo_write"
+    )
+}
+
+fn project_readonly_evidence_schema(name: &str, schema: &mut Value) {
+    if name == "Bash" {
+        *schema = super::shell::readonly_bash_input_schema();
+        return;
+    }
+    if name == "Run" {
+        // The shared classifier remains authoritative for `args`; the schema
+        // removes the only field that can name verifier programs.
+        if let Some(properties) = schema["properties"].as_object_mut() {
+            properties.remove("commands");
+        }
+        return;
+    }
+    let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() else {
+        return;
+    };
+    match name {
+        "File" => actions.retain(|action| {
+            action.as_str().is_some_and(|action| {
+                matches!(action, "read" | "list" | "search_name" | "search_content")
+            })
+        }),
+        "Web" => actions.retain(|action| {
+            action
+                .as_str()
+                .is_some_and(|action| matches!(action, "search" | "fetch"))
+        }),
+        _ => {}
+    }
+}
+
 fn enforce_tool_authority(
     name: &str,
     input: &Value,
@@ -445,8 +513,65 @@ fn enforce_tool_authority(
     let Some(authority) = context.tool_authority.as_ref() else {
         return Ok(());
     };
+    let evidence_only = authority.authority == super::spec::ToolMutationAuthority::ReadOnly;
+    let bounded_verifier = evidence_only
+        && name == "Run"
+        && authority.verification == super::spec::ToolVerificationAuthority::Bounded;
+    if evidence_only && !readonly_evidence_tool_name(name) && !bounded_verifier {
+        return Err(ToolError::permission_denied(format!(
+            "worker '{}' cannot run {name}: it is outside the read-only evidence tool profile",
+            authority.owner
+        )));
+    }
+    if evidence_only && matches!(name, "Web" | "web.run") && authority.network_access != Some(true)
+    {
+        return Err(ToolError::permission_denied(format!(
+            "worker '{}' cannot run {name}: its authority envelope does not grant network access",
+            authority.owner
+        )));
+    }
     let capabilities = tool.capabilities();
-    if matches!(name, "Bash" | "exec_shell" | "Run") {
+    if matches!(name, "Bash" | "exec_shell") {
+        if tool.is_read_only_for(input) {
+            if authority.shell != crate::tools::spec::ToolShellAuthority::ReadOnly {
+                return Err(ToolError::permission_denied(format!(
+                    "worker '{}' cannot run {name}: its machine-readable authority envelope does not grant read-only shell access",
+                    authority.owner
+                )));
+            }
+            let networked_read = input
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(crate::command_safety::is_github_readonly_command);
+            if networked_read && authority.network_access != Some(true) {
+                return Err(ToolError::permission_denied(format!(
+                    "worker '{}' cannot use read-only GitHub CLI access: its machine-readable authority envelope does not grant network access",
+                    authority.owner
+                )));
+            }
+            return Ok(());
+        }
+        return Err(ToolError::permission_denied(format!(
+            "worker '{}' cannot run {name}: arbitrary command execution is outside its machine-readable authority envelope",
+            authority.owner
+        )));
+    }
+    if name == "Run" {
+        if bounded_verifier {
+            use crate::tools::execution_envelope::{VerificationBound, classify_verification};
+
+            let canonical = crate::tools::canonical_action::canonical_action_alias(name, input);
+            if matches!(
+                classify_verification(canonical, input),
+                Some(VerificationBound::Default | VerificationBound::Filter)
+            ) {
+                return Ok(());
+            }
+            return Err(ToolError::permission_denied(format!(
+                "worker '{}' cannot run unbounded verification arguments or commands",
+                authority.owner
+            )));
+        }
         return Err(ToolError::permission_denied(format!(
             "worker '{}' cannot run {name}: arbitrary command execution is outside its machine-readable authority envelope",
             authority.owner
@@ -613,6 +738,13 @@ impl ToolRegistryBuilder {
         use super::shell::BashTool;
         self.with_tool(Arc::new(BashTool::new("Bash")))
             .with_terminal_tools()
+    }
+
+    /// Include only the foreground, direct-argv read-only shell surface.
+    #[must_use]
+    pub fn with_read_only_shell_tool(self) -> Self {
+        use super::shell::BashTool;
+        self.with_tool(Arc::new(BashTool::read_only("Bash")))
     }
 
     /// Include the stateful PTY terminal tools. Like `exec_shell`, these are
@@ -997,7 +1129,7 @@ impl ToolRegistryBuilder {
     #[must_use]
     pub fn with_registry_mcp_sync_tool(mut self) -> Self {
         self.tools
-            .push(Arc::new(super::mcp_registry::McpSyncRegistry));
+            .push(Arc::new(super::mcp_registry::McpSyncRegistry::new()));
         self
     }
 
@@ -1040,10 +1172,12 @@ impl ToolRegistryBuilder {
             .with_image_ocr_tools()
             .with_finance_tool();
 
-        if shell_policy.allows_shell() {
-            builder.with_shell_tools().with_runtime_task_shell_tools()
-        } else {
-            builder
+        match shell_policy {
+            crate::worker_profile::ShellPolicy::Full => {
+                builder.with_shell_tools().with_runtime_task_shell_tools()
+            }
+            crate::worker_profile::ShellPolicy::ReadOnly => builder.with_read_only_shell_tool(),
+            crate::worker_profile::ShellPolicy::None => builder,
         }
     }
 
@@ -1338,12 +1472,15 @@ mod tests {
 
     use crate::config::ToolOverride;
     use crate::tools::ToolRegistryBuilder;
+    use crate::tools::shell::BashTool;
     use crate::tools::spec::{
         ApprovalRequirement, ToolAuthorityEnvelope, ToolCapability, ToolContext, ToolError,
         ToolMutationAuthority, ToolResult, ToolSpec, required_str,
     };
 
-    use super::{ToolRegistry, mcp_result_to_tool_result, mcp_tool_adapter_for_test};
+    use super::{
+        ToolRegistry, enforce_tool_authority, mcp_result_to_tool_result, mcp_tool_adapter_for_test,
+    };
 
     #[test]
     fn mcp_iserror_result_maps_to_tool_error_preserving_text() {
@@ -1867,6 +2004,8 @@ mod tests {
                     owner: "fleet-worker-1".to_string(),
                     authority: ToolMutationAuthority::ScopedWrite,
                     network_access: None,
+                    shell: crate::tools::spec::ToolShellAuthority::None,
+                    verification: crate::tools::spec::ToolVerificationAuthority::None,
                     writable_roots: vec!["src".to_string()],
                     writable_files: Vec::new(),
                     coordination_contracts: Vec::new(),
@@ -1875,6 +2014,94 @@ mod tests {
                 .expect("test authority"),
             )
             .expect("test context authority")
+    }
+
+    fn readonly_scout_context(workspace: &std::path::Path, network_access: bool) -> ToolContext {
+        ToolContext::new(workspace.to_path_buf())
+            .with_tool_authority(ToolAuthorityEnvelope {
+                schema_version: 1,
+                owner: "scout-1".to_string(),
+                authority: ToolMutationAuthority::ReadOnly,
+                network_access: Some(network_access),
+                shell: crate::tools::spec::ToolShellAuthority::ReadOnly,
+                verification: crate::tools::spec::ToolVerificationAuthority::None,
+                writable_roots: Vec::new(),
+                writable_files: Vec::new(),
+                coordination_contracts: Vec::new(),
+            })
+            .expect("read-only Scout authority")
+    }
+
+    fn readonly_verifier_context(workspace: &std::path::Path) -> ToolContext {
+        ToolContext::new(workspace.to_path_buf())
+            .with_tool_authority(ToolAuthorityEnvelope {
+                schema_version: 1,
+                owner: "verifier-1".to_string(),
+                authority: ToolMutationAuthority::ReadOnly,
+                network_access: Some(true),
+                shell: crate::tools::spec::ToolShellAuthority::None,
+                verification: crate::tools::spec::ToolVerificationAuthority::Bounded,
+                writable_roots: Vec::new(),
+                writable_files: Vec::new(),
+                coordination_contracts: Vec::new(),
+            })
+            .expect("bounded verifier authority")
+    }
+
+    #[test]
+    fn machine_verifier_catalog_and_dispatch_add_only_bounded_run() {
+        let tmp = tempdir().expect("tempdir");
+        let registry = ToolRegistryBuilder::new()
+            .with_agent_tools_policy(crate::worker_profile::ShellPolicy::None)
+            .with_web_tools()
+            .with_todo_tool(crate::tools::todo::new_shared_todo_list())
+            .build(readonly_verifier_context(tmp.path()));
+        let tools = registry.to_api_tools();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "File",
+                "Run",
+                "Web",
+                "handle_read",
+                "load_skill",
+                "retrieve_tool_result",
+                "todo_write",
+                "web.run",
+            ]
+        );
+        let run = registry.get("Run").expect("bounded Run registered");
+        assert!(
+            tools
+                .iter()
+                .find(|tool| tool.name == "Run")
+                .unwrap()
+                .input_schema["properties"]
+                .get("commands")
+                .is_none(),
+            "the catalog must not advertise operator-supplied verifier programs"
+        );
+        enforce_tool_authority(
+            "Run",
+            &json!({"action": "tests", "args": "-p codewhale-tui ordinary_scout"}),
+            run.as_ref(),
+            registry.context(),
+        )
+        .expect("pure test selection fits bounded verifier authority");
+        for input in [
+            json!({"action": "tests", "args": "--manifest-path ../other/Cargo.toml"}),
+            json!({"action": "verifiers", "commands": [{"name": "escape", "program": "sh"}]}),
+        ] {
+            let error = enforce_tool_authority("Run", &input, run.as_ref(), registry.context())
+                .expect_err("unbounded verification must remain refused")
+                .to_string();
+            assert!(error.contains("unbounded verification"), "{error}");
+        }
+        assert!(!registry.contains("Bash"), "Verifier never gains raw shell");
     }
 
     #[tokio::test]
@@ -1912,19 +2139,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fleet_authority_denies_bash_even_when_command_classifier_calls_it_read_only() {
+    async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         let tmp = tempdir().expect("tempdir");
         std::fs::create_dir(tmp.path().join("src")).expect("src");
         let registry = ToolRegistryBuilder::new()
             .with_shell_tools()
-            .build(scoped_context(tmp.path()));
+            .build(readonly_scout_context(tmp.path(), true));
 
-        let error = registry
-            .execute_full("Bash", json!({"action": "run", "command": "git status"}))
+        let shell = BashTool::new("Bash");
+        for command in [
+            "pwd",
+            "git status --short",
+            "rg needle src",
+            "gh issue list --limit 10",
+            "gh issue view 5287 --json title,state",
+        ] {
+            enforce_tool_authority(
+                "Bash",
+                &json!({"action": "run", "command": command}),
+                &shell,
+                registry.context(),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{command} should fit read-only Scout authority: {error}")
+            });
+        }
+
+        let result = registry
+            .execute_full("Bash", json!({"action": "run", "command": "pwd"}))
             .await
-            .expect_err("Bash remains unprovable under a file scope")
+            .expect("bounded read-only Bash survives machine authority");
+        assert!(result.success, "{}", result.content);
+
+        for command in [
+            "touch src/no.txt",
+            "git checkout -- src/lib.rs",
+            "git push origin main",
+            "gh issue close 5287",
+            "gh issue edit 5287 --title changed",
+            "gh issue create --title nope --body nope",
+            "gh issue view 5287 > issue.txt",
+            "gh issue view 5287 &",
+            "bash -lc 'git status'",
+        ] {
+            let error = registry
+                .execute_full("Bash", json!({"action": "run", "command": command}))
+                .await
+                .expect_err("mutating Bash remains outside machine authority")
+                .to_string();
+            assert!(error.contains("arbitrary command execution"), "{error}");
+        }
+        assert!(!tmp.path().join("src/no.txt").exists());
+
+        let no_shell = scoped_context(tmp.path());
+        let error = enforce_tool_authority(
+            "Bash",
+            &json!({"action": "run", "command": "pwd"}),
+            &shell,
+            &no_shell,
+        )
+        .expect_err("mutation authority must not imply shell authority")
+        .to_string();
+        assert!(error.contains("does not grant read-only shell"), "{error}");
+    }
+
+    #[test]
+    fn fleet_authority_intersects_readonly_github_bash_with_network_ceiling() {
+        let tmp = tempdir().expect("tempdir");
+        let shell = BashTool::new("Bash");
+        let input = json!({"action": "run", "command": "gh issue view 5287"});
+        let networked = ToolContext::new(tmp.path().to_path_buf())
+            .with_tool_authority(ToolAuthorityEnvelope {
+                schema_version: 1,
+                owner: "scout".to_string(),
+                authority: ToolMutationAuthority::ReadOnly,
+                network_access: Some(true),
+                shell: crate::tools::spec::ToolShellAuthority::ReadOnly,
+                verification: crate::tools::spec::ToolVerificationAuthority::None,
+                writable_roots: Vec::new(),
+                writable_files: Vec::new(),
+                coordination_contracts: Vec::new(),
+            })
+            .expect("networked scout");
+        enforce_tool_authority("Bash", &input, &shell, &networked)
+            .expect("networked scout may inspect GitHub");
+
+        let offline = ToolContext::new(tmp.path().to_path_buf())
+            .with_tool_authority(ToolAuthorityEnvelope {
+                schema_version: 1,
+                owner: "offline-scout".to_string(),
+                authority: ToolMutationAuthority::ReadOnly,
+                network_access: Some(false),
+                shell: crate::tools::spec::ToolShellAuthority::ReadOnly,
+                verification: crate::tools::spec::ToolVerificationAuthority::None,
+                writable_roots: Vec::new(),
+                writable_files: Vec::new(),
+                coordination_contracts: Vec::new(),
+            })
+            .expect("offline scout");
+        let error = enforce_tool_authority("Bash", &input, &shell, &offline)
+            .expect_err("network denial must win")
             .to_string();
-        assert!(error.contains("arbitrary command execution"), "{error}");
+        assert!(error.contains("does not grant network access"), "{error}");
     }
 
     #[tokio::test]
@@ -2321,7 +2637,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_tools_with_shell_policy_readonly_includes_shell_tools() {
+    fn agent_tools_with_shell_policy_readonly_exposes_only_run_only_bash() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
 
@@ -2331,8 +2647,83 @@ mod tests {
 
         assert!(registry.contains("Bash"));
         assert!(!registry.contains("exec_shell"));
-        assert!(registry.contains("task_shell_start"));
-        assert!(registry.contains("task_shell_wait"));
+        assert!(!registry.contains("task_shell_start"));
+        assert!(!registry.contains("task_shell_wait"));
+        assert!(
+            registry
+                .names()
+                .into_iter()
+                .all(|name| !name.starts_with("terminal/"))
+        );
+        let bash = registry
+            .to_api_tools()
+            .into_iter()
+            .find(|tool| tool.name == "Bash")
+            .expect("read-only Bash catalog");
+        assert_eq!(
+            bash.input_schema["properties"]["action"]["enum"],
+            json!(["run"])
+        );
+        for hidden in ["background", "tty", "stdin", "task_id", "wait"] {
+            assert!(bash.input_schema["properties"].get(hidden).is_none());
+        }
+    }
+
+    #[test]
+    fn machine_readonly_catalog_is_exactly_the_evidence_profile() {
+        let tmp = tempdir().expect("tempdir");
+        let registry = ToolRegistryBuilder::new()
+            .with_agent_tools_policy(crate::worker_profile::ShellPolicy::ReadOnly)
+            .with_web_tools()
+            .with_todo_tool(crate::tools::todo::new_shared_todo_list())
+            .build(readonly_scout_context(tmp.path(), true));
+        let tools = registry.to_api_tools();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "Bash",
+                "File",
+                "Web",
+                "handle_read",
+                "load_skill",
+                "retrieve_tool_result",
+                "todo_write",
+                "web.run",
+            ]
+        );
+        let file = tools.iter().find(|tool| tool.name == "File").unwrap();
+        assert_eq!(
+            file.input_schema["properties"]["action"]["enum"],
+            json!(["read", "list", "search_name", "search_content"])
+        );
+        let web = tools.iter().find(|tool| tool.name == "Web").unwrap();
+        assert_eq!(
+            web.input_schema["properties"]["action"]["enum"],
+            json!(["search", "fetch"])
+        );
+        let lsp = registry
+            .get("lsp")
+            .expect("registered but catalog-hidden lsp");
+        let error = enforce_tool_authority("lsp", &json!({}), lsp.as_ref(), registry.context())
+            .expect_err("machine read-only dispatch uses the same positive profile")
+            .to_string();
+        assert!(
+            error.contains("outside the read-only evidence tool profile"),
+            "{error}"
+        );
+        let offline = ToolRegistryBuilder::new()
+            .with_web_tools()
+            .build(readonly_scout_context(tmp.path(), false));
+        assert!(
+            offline
+                .to_api_tools()
+                .iter()
+                .all(|tool| !matches!(tool.name.as_str(), "Web" | "web.run"))
+        );
     }
 
     #[test]

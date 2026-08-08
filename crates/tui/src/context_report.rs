@@ -828,14 +828,20 @@ pub fn format_context_report(report: &PromptSourceMap) -> String {
     );
     match (report.context_window_tokens, report.budget_used_percent) {
         (Some(window), Some(percent)) => {
+            let source = report
+                .context_window_source
+                .as_deref()
+                .unwrap_or("fallback");
+            let source_label = if source == "fallback" {
+                "fallback (unknown model — using 128K default; set `providers.<name>.context_window` if this model serves a larger window)"
+            } else {
+                source
+            };
             let _ = writeln!(
                 out,
                 "Window: {window} tokens ({percent:.1}% used, {}; source: {})",
                 pressure_label(Some(percent)),
-                report
-                    .context_window_source
-                    .as_deref()
-                    .unwrap_or("fallback")
+                source_label
             );
         }
         _ => {

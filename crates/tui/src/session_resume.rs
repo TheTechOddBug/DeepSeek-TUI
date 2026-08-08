@@ -277,7 +277,11 @@ fn candidate_ids(
 /// An auto-created, never-used session is not something to resume into.
 /// Mirrors the filter `get_latest_session_for_workspace` applies.
 fn is_empty_placeholder(metadata: &crate::session_manager::SessionMetadata) -> bool {
-    metadata.message_count == 0 && metadata.title.trim().eq_ignore_ascii_case("New Session")
+    metadata.message_count == 0
+        && metadata
+            .title
+            .trim()
+            .eq_ignore_ascii_case(crate::session_manager::DEFAULT_SESSION_TITLE)
 }
 
 fn plural_sessions(count: usize) -> &'static str {

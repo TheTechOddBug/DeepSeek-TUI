@@ -5,6 +5,20 @@ const CHECKSUM_MANIFEST = "codewhale-artifacts-sha256.txt";
 const BUNDLE_CHECKSUM_MANIFEST = "codewhale-bundles-sha256.txt";
 const WINDOWS_INSTALLER_ASSET = "CodeWhaleSetup.exe";
 
+// v0.9.5 bridge: already-shipped v0.9.4 clients require these names before
+// they will advertise or install a newer release. They contain byte-identical
+// copies of the consolidated `codewhale` runtime; current installers do not
+// expose them as a third command.
+const LEGACY_TUI_BRIDGE_ASSET_NAMES = [
+  "codewhale-tui-linux-x64",
+  "codewhale-tui-linux-arm64",
+  "codewhale-tui-android-arm64",
+  "codewhale-tui-macos-x64",
+  "codewhale-tui-macos-arm64",
+  "codewhale-tui-windows-x64.exe",
+  "codewhale-tui-windows-arm64.exe",
+];
+
 const CNB_BINARY_ASSET_NAMES = [
   "codewhale-linux-x64",
   "codew-linux-x64",
@@ -29,19 +43,19 @@ const BUNDLE_ASSET_NAMES = [
 
 const ASSET_MATRIX = {
   linux: {
-    x64: ["codewhale-linux-x64", "codewhale-tui-linux-x64", "codew-linux-x64"],
-    arm64: ["codewhale-linux-arm64", "codewhale-tui-linux-arm64", "codew-linux-arm64"],
+    x64: ["codewhale-linux-x64", "codew-linux-x64"],
+    arm64: ["codewhale-linux-arm64", "codew-linux-arm64"],
   },
   android: {
-    arm64: ["codewhale-android-arm64", "codewhale-tui-android-arm64", "codew-android-arm64"],
+    arm64: ["codewhale-android-arm64", "codew-android-arm64"],
   },
   darwin: {
-    x64: ["codewhale-macos-x64", "codewhale-tui-macos-x64", "codew-macos-x64"],
-    arm64: ["codewhale-macos-arm64", "codewhale-tui-macos-arm64", "codew-macos-arm64"],
+    x64: ["codewhale-macos-x64", "codew-macos-x64"],
+    arm64: ["codewhale-macos-arm64", "codew-macos-arm64"],
   },
   win32: {
-    x64: ["codewhale-windows-x64.exe", "codewhale-tui-windows-x64.exe", "codew-windows-x64.exe", "codewhale.bat"],
-    arm64: ["codewhale-windows-arm64.exe", "codewhale-tui-windows-arm64.exe", "codew-windows-arm64.exe"],
+    x64: ["codewhale-windows-x64.exe", "codew-windows-x64.exe", "codewhale.bat"],
+    arm64: ["codewhale-windows-arm64.exe", "codew-windows-arm64.exe"],
   },
 };
 
@@ -77,29 +91,26 @@ function detectBinaryNames() {
     platform,
     arch,
     codewhale: pair[0],
-    tui: pair[1],
-    codew: pair[2],
+    codew: pair[1],
   };
 }
 
 function unsupportedBuildHint() {
   return [
     "No prebuilt binary is available for this platform/architecture combo.",
-    "You can still run codewhale by building from source with Cargo:",
+    "You can still run codewhale by building from source with Cargo (single binary):",
     "",
     "  # Requires Rust 1.88+ (https://rustup.rs)",
     "  cargo install codewhale-cli --locked   # provides `codewhale` and `codew`",
-    "  cargo install codewhale-tui --locked   # provides `codewhale-tui`",
     "",
     "Or build from a checkout:",
     "",
     "  git clone https://github.com/Hmbown/CodeWhale.git",
     "  cd CodeWhale",
-    "  cargo install --path crates/cli --locked",
-    "  cargo install --path crates/tui --locked",
+    "  cargo install --path crates/cli --locked   # single binary",
     "",
     "See https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md",
-    "for cross-compilation, mirror, and Linux ARM64 specifics.",
+    "for cross-compilation, mirror, Linux ARM64, FreeBSD, and winget specifics.",
   ].join("\n");
 }
 
@@ -187,6 +198,7 @@ function allAssetNames() {
 function allReleaseAssetNames() {
   return [
     ...allAssetNames(),
+    ...LEGACY_TUI_BRIDGE_ASSET_NAMES,
     ...BUNDLE_ASSET_NAMES,
     WINDOWS_INSTALLER_ASSET,
     BUNDLE_CHECKSUM_MANIFEST,
@@ -211,6 +223,7 @@ module.exports = {
   checksumManifestUrl,
   detectBinaryNames,
   executableName,
+  LEGACY_TUI_BRIDGE_ASSET_NAMES,
   releaseAssetUrl,
   releaseBaseUrl,
   releaseBinaryDirectory,

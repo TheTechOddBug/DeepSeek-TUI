@@ -6,10 +6,6 @@
 
 use ratatui::style::Color;
 
-#[path = "../src/palette/mod.rs"]
-#[allow(dead_code)]
-mod palette;
-
 // Local stand-in for the binary crate's `src/test_support.rs`.
 //
 // `palette_audit` `#[path]`-includes `src/palette/mod.rs`, which transitively
@@ -129,50 +125,53 @@ fn assert_min_contrast(label: &str, foreground: Color, background: Color, min_ra
 #[test]
 fn verify_status_success_uses_success_token() {
     assert_eq!(
-        palette::STATUS_SUCCESS,
+        crate::palette::STATUS_SUCCESS,
         Color::Rgb(
-            palette::WHALE_SUCCESS_RGB.0,
-            palette::WHALE_SUCCESS_RGB.1,
-            palette::WHALE_SUCCESS_RGB.2
+            crate::palette::WHALE_SUCCESS_RGB.0,
+            crate::palette::WHALE_SUCCESS_RGB.1,
+            crate::palette::WHALE_SUCCESS_RGB.2
         ),
         "STATUS_SUCCESS should use the current success token"
     );
     assert_ne!(
-        palette::STATUS_SUCCESS,
-        palette::WHALE_ACCENT_PRIMARY,
+        crate::palette::STATUS_SUCCESS,
+        crate::palette::WHALE_ACCENT_PRIMARY,
         "STATUS_SUCCESS should not regress to the primary accent"
     );
 }
 
 #[test]
 fn whale_roles_are_pinned_and_non_colliding() {
-    assert_eq!(palette::WHALE_BG_RGB, (3, 7, 13));
-    assert_eq!(palette::WHALE_PANEL_RGB, (14, 23, 41));
-    assert_eq!(palette::WHALE_ELEVATED_RGB, (24, 39, 66));
-    assert_eq!(palette::WHALE_ACTION_RGB, (106, 174, 242));
-    assert_eq!(palette::WHALE_ACCENT_SECONDARY_RGB, (79, 209, 197));
-    assert_eq!(palette::WHALE_HUMAN_RGB, (246, 196, 83));
-    assert_eq!(palette::WHALE_WARNING_RGB, (255, 122, 89));
-    assert_eq!(palette::WHALE_ERROR_RGB, (255, 134, 178));
-    assert_eq!(palette::WHALE_MODE_AGENT_RGB, (118, 181, 245));
-    assert_eq!(palette::WHALE_MODE_YOLO_RGB, (255, 112, 160));
-    assert_eq!(palette::WHALE_MODE_PLAN_RGB, (185, 220, 236));
-    assert_eq!(palette::WHALE_MODE_OPERATE_RGB, (173, 136, 255));
-    assert_eq!(palette::LIGHT_SUCCESS_FG_RGB, (20, 118, 61));
-    assert_eq!(palette::LIGHT_MODE_AGENT_RGB, (50, 95, 216));
-    assert_eq!(palette::LIGHT_MODE_PLAN_RGB, (52, 92, 128));
-    assert_eq!(palette::LIGHT_OPERATE_RGB, (112, 71, 184));
-    assert_eq!(palette::LIGHT_MODE_YOLO_RGB, (181, 35, 90));
-    assert_eq!(palette::LIGHT_USER_BODY, palette::LIGHT_SUCCESS_FG);
+    assert_eq!(crate::palette::WHALE_BG_RGB, (3, 7, 13));
+    assert_eq!(crate::palette::WHALE_PANEL_RGB, (14, 23, 41));
+    assert_eq!(crate::palette::WHALE_ELEVATED_RGB, (24, 39, 66));
+    assert_eq!(crate::palette::WHALE_ACTION_RGB, (106, 174, 242));
+    assert_eq!(crate::palette::WHALE_ACCENT_SECONDARY_RGB, (79, 209, 197));
+    assert_eq!(crate::palette::WHALE_HUMAN_RGB, (246, 196, 83));
+    assert_eq!(crate::palette::WHALE_WARNING_RGB, (255, 122, 89));
+    assert_eq!(crate::palette::WHALE_ERROR_RGB, (255, 134, 178));
+    assert_eq!(crate::palette::WHALE_MODE_AGENT_RGB, (118, 181, 245));
+    assert_eq!(crate::palette::WHALE_MODE_YOLO_RGB, (255, 112, 160));
+    assert_eq!(crate::palette::WHALE_MODE_PLAN_RGB, (185, 220, 236));
+    assert_eq!(crate::palette::WHALE_MODE_OPERATE_RGB, (173, 136, 255));
+    assert_eq!(crate::palette::LIGHT_SUCCESS_FG_RGB, (20, 118, 61));
+    assert_eq!(crate::palette::LIGHT_MODE_AGENT_RGB, (50, 95, 216));
+    assert_eq!(crate::palette::LIGHT_MODE_PLAN_RGB, (52, 92, 128));
+    assert_eq!(crate::palette::LIGHT_OPERATE_RGB, (112, 71, 184));
+    assert_eq!(crate::palette::LIGHT_MODE_YOLO_RGB, (181, 35, 90));
+    assert_eq!(
+        crate::palette::LIGHT_USER_BODY,
+        crate::palette::LIGHT_SUCCESS_FG
+    );
 
-    let ui = palette::UI_THEME;
-    assert_eq!(ui.accent_primary, palette::WHALE_ACTION);
-    assert_eq!(ui.info, palette::WHALE_ACTION);
-    assert_eq!(ui.status_working, palette::WHALE_LIVE);
-    assert_eq!(ui.accent_action, palette::WHALE_HUMAN);
-    assert_eq!(ui.warning, palette::STATUS_WARNING);
-    assert_eq!(ui.error_fg, palette::WHALE_ERROR);
-    assert_eq!(ui.mode_operate, palette::MODE_OPERATE);
+    let ui = crate::palette::UI_THEME;
+    assert_eq!(ui.accent_primary, crate::palette::WHALE_ACTION);
+    assert_eq!(ui.info, crate::palette::WHALE_ACTION);
+    assert_eq!(ui.status_working, crate::palette::WHALE_LIVE);
+    assert_eq!(ui.accent_action, crate::palette::WHALE_HUMAN);
+    assert_eq!(ui.warning, crate::palette::STATUS_WARNING);
+    assert_eq!(ui.error_fg, crate::palette::WHALE_ERROR);
+    assert_eq!(ui.mode_operate, crate::palette::MODE_OPERATE);
     assert_ne!(
         ui.mode_plan, ui.accent_action,
         "Plan is structural; Signal Gold is reserved for human attention"
@@ -188,18 +187,18 @@ fn whale_roles_are_pinned_and_non_colliding() {
     );
 
     let foreground_domains = [
-        ("action", palette::WHALE_ACTION),
-        ("live", palette::WHALE_LIVE),
-        ("human", palette::WHALE_HUMAN),
-        ("success", palette::STATUS_SUCCESS),
-        ("warning", palette::STATUS_WARNING),
-        ("danger", palette::WHALE_ERROR),
-        ("agent mode", palette::MODE_AGENT),
-        ("full-access mode", palette::MODE_YOLO),
-        ("plan mode", palette::MODE_PLAN),
-        ("operate mode", palette::MODE_OPERATE),
-        ("reasoning", palette::TEXT_REASONING),
-        ("diff added", palette::DIFF_ADDED),
+        ("action", crate::palette::WHALE_ACTION),
+        ("live", crate::palette::WHALE_LIVE),
+        ("human", crate::palette::WHALE_HUMAN),
+        ("success", crate::palette::STATUS_SUCCESS),
+        ("warning", crate::palette::STATUS_WARNING),
+        ("danger", crate::palette::WHALE_ERROR),
+        ("agent mode", crate::palette::MODE_AGENT),
+        ("full-access mode", crate::palette::MODE_YOLO),
+        ("plan mode", crate::palette::MODE_PLAN),
+        ("operate mode", crate::palette::MODE_OPERATE),
+        ("reasoning", crate::palette::TEXT_REASONING),
+        ("diff added", crate::palette::DIFF_ADDED),
     ];
     for (index, (left_name, left)) in foreground_domains.iter().enumerate() {
         for (right_name, right) in foreground_domains.iter().skip(index + 1) {
@@ -211,20 +210,20 @@ fn whale_roles_are_pinned_and_non_colliding() {
     }
 
     let background_domains = [
-        ("base", palette::WHALE_BG),
-        ("panel", palette::WHALE_PANEL),
-        ("composer", palette::WHALE_COMPOSER),
-        ("elevated", palette::SURFACE_ELEVATED),
-        ("tool", palette::SURFACE_TOOL),
-        ("tool active", palette::SURFACE_TOOL_ACTIVE),
-        ("reasoning", palette::SURFACE_REASONING),
-        ("reasoning tint", palette::SURFACE_REASONING_TINT),
-        ("reasoning active", palette::SURFACE_REASONING_ACTIVE),
-        ("success", palette::SURFACE_SUCCESS),
-        ("error", palette::SURFACE_ERROR),
-        ("selection", palette::SELECTION_BG),
-        ("diff added", palette::DIFF_ADDED_BG),
-        ("diff deleted", palette::DIFF_DELETED_BG),
+        ("base", crate::palette::WHALE_BG),
+        ("panel", crate::palette::WHALE_PANEL),
+        ("composer", crate::palette::WHALE_COMPOSER),
+        ("elevated", crate::palette::SURFACE_ELEVATED),
+        ("tool", crate::palette::SURFACE_TOOL),
+        ("tool active", crate::palette::SURFACE_TOOL_ACTIVE),
+        ("reasoning", crate::palette::SURFACE_REASONING),
+        ("reasoning tint", crate::palette::SURFACE_REASONING_TINT),
+        ("reasoning active", crate::palette::SURFACE_REASONING_ACTIVE),
+        ("success", crate::palette::SURFACE_SUCCESS),
+        ("error", crate::palette::SURFACE_ERROR),
+        ("selection", crate::palette::SELECTION_BG),
+        ("diff added", crate::palette::DIFF_ADDED_BG),
+        ("diff deleted", crate::palette::DIFF_DELETED_BG),
     ];
     for (index, (left_name, left)) in background_domains.iter().enumerate() {
         for (right_name, right) in background_domains.iter().skip(index + 1) {
@@ -242,85 +241,90 @@ fn contrast_guardrails_for_key_ui_pairs() {
 
     assert_min_contrast(
         "TEXT_BODY on WHALE_BG",
-        palette::TEXT_BODY,
-        palette::WHALE_BG,
+        crate::palette::TEXT_BODY,
+        crate::palette::WHALE_BG,
         min_readable,
     );
     assert_min_contrast(
         "TEXT_SECONDARY on WHALE_BG",
-        palette::TEXT_SECONDARY,
-        palette::WHALE_BG,
+        crate::palette::TEXT_SECONDARY,
+        crate::palette::WHALE_BG,
         min_readable,
     );
     assert_min_contrast(
         "TEXT_HINT on WHALE_BG",
-        palette::TEXT_HINT,
-        palette::WHALE_BG,
+        crate::palette::TEXT_HINT,
+        crate::palette::WHALE_BG,
         min_readable,
     );
     assert_min_contrast(
         "STATUS_WARNING on WHALE_BG",
-        palette::STATUS_WARNING,
-        palette::WHALE_BG,
+        crate::palette::STATUS_WARNING,
+        crate::palette::WHALE_BG,
         min_readable,
     );
     assert_min_contrast(
         "STATUS_ERROR on WHALE_BG",
-        palette::STATUS_ERROR,
-        palette::WHALE_BG,
+        crate::palette::STATUS_ERROR,
+        crate::palette::WHALE_BG,
         min_readable,
     );
     assert_min_contrast(
         "SELECTION_TEXT on SELECTION_BG",
-        palette::SELECTION_TEXT,
-        palette::SELECTION_BG,
+        crate::palette::SELECTION_TEXT,
+        crate::palette::SELECTION_BG,
         min_readable,
     );
     assert_min_contrast(
         "TEXT_PRIMARY on SURFACE_ELEVATED",
-        palette::TEXT_PRIMARY,
-        palette::SURFACE_ELEVATED,
+        crate::palette::TEXT_PRIMARY,
+        crate::palette::SURFACE_ELEVATED,
         min_readable,
     );
     for (label, foreground) in [
-        ("action", palette::UI_THEME.accent_primary),
-        ("live", palette::UI_THEME.status_working),
-        ("human", palette::UI_THEME.accent_action),
-        ("warning", palette::UI_THEME.warning),
-        ("danger", palette::UI_THEME.error_fg),
-        ("act mode", palette::UI_THEME.mode_agent),
-        ("plan mode", palette::UI_THEME.mode_plan),
-        ("operate", palette::UI_THEME.mode_operate),
-        ("full-access mode", palette::UI_THEME.mode_yolo),
-        ("success", palette::UI_THEME.success),
+        ("action", crate::palette::UI_THEME.accent_primary),
+        ("live", crate::palette::UI_THEME.status_working),
+        ("human", crate::palette::UI_THEME.accent_action),
+        ("warning", crate::palette::UI_THEME.warning),
+        ("danger", crate::palette::UI_THEME.error_fg),
+        ("act mode", crate::palette::UI_THEME.mode_agent),
+        ("plan mode", crate::palette::UI_THEME.mode_plan),
+        ("operate", crate::palette::UI_THEME.mode_operate),
+        ("full-access mode", crate::palette::UI_THEME.mode_yolo),
+        ("success", crate::palette::UI_THEME.success),
     ] {
-        assert_min_contrast(label, foreground, palette::SURFACE_ELEVATED, min_readable);
+        assert_min_contrast(
+            label,
+            foreground,
+            crate::palette::SURFACE_ELEVATED,
+            min_readable,
+        );
     }
     let light_foregrounds = [
-        ("body", palette::LIGHT_UI_THEME.text_body),
-        ("soft", palette::LIGHT_UI_THEME.text_soft),
-        ("muted", palette::LIGHT_UI_THEME.text_muted),
-        ("hint", palette::LIGHT_UI_THEME.text_hint),
-        ("action", palette::LIGHT_UI_THEME.accent_primary),
-        ("live", palette::LIGHT_UI_THEME.status_working),
-        ("human", palette::LIGHT_UI_THEME.accent_action),
-        ("warning", palette::LIGHT_UI_THEME.warning),
-        ("danger", palette::LIGHT_UI_THEME.error_fg),
-        ("act mode", palette::LIGHT_UI_THEME.mode_agent),
-        ("plan mode", palette::LIGHT_UI_THEME.mode_plan),
-        ("operate", palette::LIGHT_UI_THEME.mode_operate),
-        ("full-access mode", palette::LIGHT_UI_THEME.mode_yolo),
-        ("success", palette::LIGHT_UI_THEME.success),
-        ("user", palette::LIGHT_USER_BODY),
+        ("body", crate::palette::LIGHT_UI_THEME.text_body),
+        ("soft", crate::palette::LIGHT_UI_THEME.text_soft),
+        ("muted", crate::palette::LIGHT_UI_THEME.text_muted),
+        ("hint", crate::palette::LIGHT_UI_THEME.text_hint),
+        ("action", crate::palette::LIGHT_UI_THEME.accent_primary),
+        ("live", crate::palette::LIGHT_UI_THEME.status_working),
+        ("human", crate::palette::LIGHT_UI_THEME.accent_action),
+        ("warning", crate::palette::LIGHT_UI_THEME.warning),
+        ("danger", crate::palette::LIGHT_UI_THEME.error_fg),
+        ("act mode", crate::palette::LIGHT_UI_THEME.mode_agent),
+        ("plan mode", crate::palette::LIGHT_UI_THEME.mode_plan),
+        ("operate", crate::palette::LIGHT_UI_THEME.mode_operate),
+        ("full-access mode", crate::palette::LIGHT_UI_THEME.mode_yolo),
+        ("success", crate::palette::LIGHT_UI_THEME.success),
+        ("user", crate::palette::LIGHT_USER_BODY),
     ];
     for (background_name, background) in [
-        ("surface", palette::LIGHT_SURFACE),
-        ("panel", palette::LIGHT_PANEL),
-        ("raised", palette::LIGHT_ELEVATED),
-        ("selection", palette::LIGHT_SELECTION_BG),
-        ("reasoning", palette::LIGHT_REASONING),
-        ("success tint", palette::LIGHT_SUCCESS),
-        ("error tint", palette::LIGHT_ERROR),
+        ("surface", crate::palette::LIGHT_SURFACE),
+        ("panel", crate::palette::LIGHT_PANEL),
+        ("raised", crate::palette::LIGHT_ELEVATED),
+        ("selection", crate::palette::LIGHT_SELECTION_BG),
+        ("reasoning", crate::palette::LIGHT_REASONING),
+        ("success tint", crate::palette::LIGHT_SUCCESS),
+        ("error tint", crate::palette::LIGHT_ERROR),
     ] {
         for (foreground_name, foreground) in light_foregrounds {
             assert_min_contrast(
@@ -333,14 +337,14 @@ fn contrast_guardrails_for_key_ui_pairs() {
     }
     assert_min_contrast(
         "light user row on raised",
-        palette::LIGHT_USER_BODY,
-        palette::LIGHT_ELEVATED,
+        crate::palette::LIGHT_USER_BODY,
+        crate::palette::LIGHT_ELEVATED,
         min_readable,
     );
     assert_min_contrast(
         "light work-surface success hover on raised",
-        palette::LIGHT_UI_THEME.success,
-        palette::LIGHT_UI_THEME.elevated_bg,
+        crate::palette::LIGHT_UI_THEME.success,
+        crate::palette::LIGHT_UI_THEME.elevated_bg,
         min_readable,
     );
 }

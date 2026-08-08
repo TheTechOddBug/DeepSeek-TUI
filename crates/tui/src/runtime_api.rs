@@ -331,6 +331,101 @@ struct SetSkillEnabledResponse {
     enabled: bool,
 }
 
+// ─── Skill lifecycle request/response types ────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct InstallSkillRequest {
+    /// Remote source spec: `github:owner/repo`, `https://…`, or a registry name.
+    source: String,
+    /// `"project"` or `"global"` (default: `"global"`).
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSkillRequest {
+    /// `"project"`, `"global"`, or `null` (auto-detect).
+    #[serde(default)]
+    scope: Option<String>,
+    /// Digest the caller observed before requesting the update. The mutation
+    /// will fail if the on-disk digest has changed since.
+    #[serde(default)]
+    expected_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UninstallSkillQuery {
+    /// `"project"`, `"global"`, or `null` (auto-detect).
+    #[serde(default)]
+    scope: Option<String>,
+    /// Digest the caller observed. The mutation will fail if it has drifted.
+    #[serde(default)]
+    expected_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustSkillRequest {
+    /// `"project"`, `"global"`, or `null` (auto-detect).
+    #[serde(default)]
+    scope: Option<String>,
+    /// Digest the caller reviewed. The mutation will fail if it has drifted.
+    #[serde(default)]
+    expected_digest: Option<String>,
+}
+
+/// Scope query parameter used by the audit endpoint.
+#[derive(Debug, Deserialize, Default)]
+struct SkillScopeQuery {
+    /// `"project"` or `"global"` to restrict to one root.
+    scope: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillMutationReceiptResponse {
+    /// Skill name as recorded by the mutation.
+    name: String,
+    /// Human-readable action performed: `"installed"`, `"updated"`, `"removed"`,
+    /// `"trusted"`, `"no_change"`, etc.
+    outcome: &'static str,
+    /// Resolved install scope: `"project"` or `"global"`.
+    scope: String,
+    /// Display path of the skill package (may be redacted for plugin snapshots).
+    safe_target_path: String,
+    /// Trust advisory note, present only for `"trusted"` outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trust_note: Option<&'static str>,
+}
+
+/// Read-only audit receipt for a single installed skill.
+#[derive(Debug, Serialize)]
+struct SkillAuditEntry {
+    name: String,
+    safe_display_path: String,
+    source_kind: String,
+    scope: String,
+    digest: SkillAuditDigest,
+    trust: String,
+    integrity: String,
+    available_actions: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillAuditDigest {
+    state: String,
+    /// Hex digest value; absent when the digest is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillAuditResponse {
+    /// `true` when multiple owned copies with the same name exist. The
+    /// caller should re-request with an explicit `scope` parameter.
+    ambiguous: bool,
+    skills: Vec<SkillAuditEntry>,
+}
+
 #[derive(Debug, Deserialize)]
 struct DecideApprovalBody {
     decision: String,
@@ -401,6 +496,10 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         fleet_event_replay: true,
         fleet_event_stream: true,
         fleet_local_target: true,
+        thread_goals: true,
+        memory: true,
+        mcp_server_management: true,
+        skill_lifecycle: true,
     }
 }
 
@@ -452,6 +551,140 @@ struct McpToolEntry {
 #[derive(Debug, Serialize)]
 struct McpToolsResponse {
     tools: Vec<McpToolEntry>,
+}
+
+/// Request body for `POST /v1/apps/mcp/servers` (create) and
+/// `PATCH /v1/apps/mcp/servers/{name}` (update).
+///
+/// Either `command` **or** `url` must be set on create. On update, only
+/// supplied fields are applied; absent fields leave the existing value in
+/// place.
+#[derive(Debug, Deserialize)]
+struct McpServerWriteRequest {
+    /// stdio command binary (e.g. `"npx"`).
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    command: Option<Option<String>>,
+    /// Arguments for the stdio command.
+    args: Option<Vec<String>>,
+    /// Environment variables injected into the stdio child process.
+    /// Values are stored as-is; use `${VAR}` syntax to reference environment
+    /// variables at runtime instead of embedding secrets here.
+    env: Option<std::collections::HashMap<String, String>>,
+    /// HTTP(S) endpoint for streamable-HTTP or SSE MCP servers.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    url: Option<Option<String>>,
+    /// Explicit transport override (`"sse"` or `"streamable_http"`).
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    transport: Option<Option<String>>,
+    /// Override the server-level connect timeout in seconds.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    connect_timeout: Option<Option<u64>>,
+    /// Override the server-level execute timeout in seconds.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    execute_timeout: Option<Option<u64>>,
+    /// Override the server-level read timeout in seconds.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    read_timeout: Option<Option<u64>>,
+    /// Whether the server is enabled. Defaults to `true` on create.
+    enabled: Option<bool>,
+    /// Whether a connection failure for this server is fatal.
+    required: Option<bool>,
+    /// Allowlist of tool names to expose (empty = expose all).
+    enabled_tools: Option<Vec<String>>,
+    /// Denylist of tool names to hide.
+    disabled_tools: Option<Vec<String>>,
+    /// Variable names whose runtime values are injected as HTTP headers.
+    /// The key in this map is the HTTP header name; the value is the
+    /// environment variable whose value supplies the header value at
+    /// request time. Credentials remain in the environment, not on disk.
+    env_headers: Option<std::collections::HashMap<String, String>>,
+    /// Environment variable that contains a bearer token for URL-based servers.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    bearer_token_env_var: Option<Option<String>>,
+    /// OAuth scopes requested during `codewhale mcp login`.
+    scopes: Option<Vec<String>>,
+    /// RFC 8707 resource parameter for the OAuth authorization URL.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    oauth_resource: Option<Option<String>>,
+}
+
+/// Preserve the difference between an omitted PATCH field and an explicit
+/// `null`: serde only calls this decoder when the field is present.
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// Response returned by MCP server management endpoints.
+///
+/// Sensitive fields (`headers`, `env_headers`, `bearer_token_env_var`,
+/// `env`, OAuth client secrets) are intentionally omitted or redacted so
+/// the API never echoes credentials back to callers.
+#[derive(Debug, Serialize)]
+struct McpServerDetail {
+    name: String,
+    enabled: bool,
+    required: bool,
+    command: Option<String>,
+    args: Vec<String>,
+    /// Environment variable names injected into the process.
+    /// Values are **not** returned — callers see only the keys.
+    env_keys: Vec<String>,
+    url: Option<String>,
+    transport: Option<String>,
+    connect_timeout: Option<u64>,
+    execute_timeout: Option<u64>,
+    read_timeout: Option<u64>,
+    enabled_tools: Vec<String>,
+    disabled_tools: Vec<String>,
+    /// HTTP header names that are read from environment variables.
+    /// The corresponding environment variable values are **not** returned.
+    env_header_keys: Vec<String>,
+    /// Whether a `bearer_token_env_var` is configured (value not returned).
+    has_bearer_token_env_var: bool,
+    scopes: Vec<String>,
+    oauth_resource: Option<String>,
+    /// Live connection state from the in-memory pool (if the pool is active).
+    connected: bool,
+}
+
+impl McpServerDetail {
+    fn from_config(name: &str, cfg: &crate::mcp::McpServerConfig, connected: bool) -> Self {
+        let mut env_keys: Vec<String> = cfg.env.keys().cloned().collect();
+        env_keys.sort();
+        let mut env_header_keys: Vec<String> = cfg.env_headers.keys().cloned().collect();
+        env_header_keys.sort();
+        Self {
+            name: name.to_string(),
+            enabled: cfg.is_enabled(),
+            required: cfg.required,
+            command: cfg.command.clone(),
+            args: cfg.args.clone(),
+            env_keys,
+            url: cfg.url.clone(),
+            transport: cfg.transport.clone(),
+            connect_timeout: cfg.connect_timeout,
+            execute_timeout: cfg.execute_timeout,
+            read_timeout: cfg.read_timeout,
+            enabled_tools: cfg.enabled_tools.clone(),
+            disabled_tools: cfg.disabled_tools.clone(),
+            env_header_keys,
+            has_bearer_token_env_var: cfg.bearer_token_env_var.is_some(),
+            scopes: cfg.scopes.clone(),
+            oauth_resource: cfg.oauth_resource.clone(),
+            connected,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct McpServerActionReceipt {
+    name: String,
+    action: &'static str,
+    ok: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -714,6 +947,18 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             get(replay_fleet_events),
         )
         .route("/v1/fleet/runs/{run_id}/stop", post(stop_fleet_run))
+        .route(
+            "/v1/fleet/runs/{run_id}/receipts",
+            get(list_fleet_run_receipts),
+        )
+        .route(
+            "/v1/fleet/runs/{run_id}/receipts/{task_id}",
+            get(get_fleet_run_receipt),
+        )
+        .route(
+            "/v1/fleet/runs/{run_id}/receipts/{task_id}/evidence",
+            get(inspect_fleet_run_receipt_evidence),
+        )
         .route("/v1/fleet/workers/{worker_id}", get(get_fleet_worker))
         .route(
             "/v1/fleet/workers/{worker_id}/interrupt",
@@ -751,6 +996,14 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         )
         .route("/v1/threads/{id}/compact", post(compact_thread))
         .route("/v1/threads/{id}/events", get(stream_thread_events))
+        .route(
+            "/v1/threads/{id}/goal",
+            get(get_thread_goal)
+                .put(upsert_thread_goal)
+                .delete(delete_thread_goal),
+        )
+        .route("/v1/threads/{id}/goal/complete", post(complete_thread_goal))
+        .route("/v1/threads/{id}/goal/block", post(block_thread_goal))
         .route("/v1/approvals/{approval_id}", post(decide_approval))
         .route(
             "/v1/user-input/{thread_id}/{input_id}",
@@ -760,8 +1013,36 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/tasks/{id}", get(get_task))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/skills", get(list_skills))
-        .route("/v1/skills/{name}", post(set_skill_enabled))
-        .route("/v1/apps/mcp/servers", get(list_mcp_servers))
+        .route(
+            "/v1/skills/{name}",
+            post(set_skill_enabled).delete(uninstall_skill_api),
+        )
+        .route(
+            "/v1/apps/mcp/servers",
+            get(list_mcp_servers).post(create_mcp_server),
+        )
+        .route(
+            "/v1/apps/mcp/servers/{name}",
+            get(get_mcp_server)
+                .patch(update_mcp_server)
+                .delete(delete_mcp_server),
+        )
+        .route(
+            "/v1/apps/mcp/servers/{name}/enable",
+            post(enable_mcp_server),
+        )
+        .route(
+            "/v1/apps/mcp/servers/{name}/disable",
+            post(disable_mcp_server),
+        )
+        .route(
+            "/v1/apps/mcp/servers/{name}/reconnect",
+            post(reconnect_mcp_server),
+        )
+        .route("/v1/skills/install", post(install_skill_api))
+        .route("/v1/skills/{name}/update", post(update_skill_api))
+        .route("/v1/skills/{name}/trust", post(trust_skill_api))
+        .route("/v1/skills/{name}/audit", get(audit_skill_api))
         .route("/v1/apps/mcp/tools", get(list_mcp_tools))
         .route(
             "/v1/automations",
@@ -785,6 +1066,13 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/providers/{id}/switch", post(switch_provider))
         .route("/v1/config", get(get_config).post(set_config))
         .route("/v1/config/reload", post(reload_config))
+        .route(
+            "/v1/memory",
+            get(list_memory)
+                .post(create_memory_entry)
+                .delete(clear_memory),
+        )
+        .route("/v1/memory/{id}", get(get_memory_entry))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_runtime_token,
@@ -1701,6 +1989,108 @@ async fn stop_fleet_run(
     })))
 }
 
+/// Maximum bytes read from a receipt evidence file for the inspection endpoint.
+const MAX_RECEIPT_EVIDENCE_READ_BYTES: u64 = 65_536;
+
+async fn list_fleet_run_receipts(
+    State(state): State<RuntimeApiState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let manager = open_fleet_manager(&state)?;
+    let ledger_state = manager
+        .rebuild_state()
+        .map_err(|err| ApiError::internal(format!("Failed to rebuild fleet state: {err}")))?;
+    if !ledger_state.runs.contains_key(&run_id) {
+        return Err(ApiError::not_found(format!(
+            "fleet run '{run_id}' not found"
+        )));
+    }
+    let run_id_parsed = FleetRunId::from(run_id.clone());
+    let receipts: Vec<Value> = ledger_state
+        .receipts
+        .values()
+        .filter(|r| r.run_id == run_id_parsed)
+        .map(fleet_receipt_json)
+        .collect();
+    Ok(Json(json!({
+        "run_id": run_id,
+        "receipts": receipts,
+    })))
+}
+
+async fn get_fleet_run_receipt(
+    State(state): State<RuntimeApiState>,
+    Path((run_id, task_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let manager = open_fleet_manager(&state)?;
+    let ledger_state = manager
+        .rebuild_state()
+        .map_err(|err| ApiError::internal(format!("Failed to rebuild fleet state: {err}")))?;
+    let key = format!("{run_id}:{task_id}");
+    let receipt = ledger_state.receipts.get(&key).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "no receipt found for run '{run_id}' task '{task_id}'"
+        ))
+    })?;
+    Ok(Json(fleet_receipt_json(receipt)))
+}
+
+async fn inspect_fleet_run_receipt_evidence(
+    State(state): State<RuntimeApiState>,
+    Path((run_id, task_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let manager = open_fleet_manager(&state)?;
+    let ledger_state = manager
+        .rebuild_state()
+        .map_err(|err| ApiError::internal(format!("Failed to rebuild fleet state: {err}")))?;
+    let key = format!("{run_id}:{task_id}");
+    let receipt = ledger_state.receipts.get(&key).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "no receipt found for run '{run_id}' task '{task_id}'"
+        ))
+    })?;
+    // Locate the most recent Receipt-kind artifact.
+    let receipt_artifact = receipt
+        .artifacts
+        .iter()
+        .rfind(|a| a.kind == FleetArtifactKind::Receipt)
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "no verifier evidence file for run '{run_id}' task '{task_id}'"
+            ))
+        })?;
+    let abs_path = state.workspace.join(&receipt_artifact.path);
+    let metadata = std::fs::metadata(&abs_path).map_err(|err| {
+        ApiError::not_found(format!(
+            "evidence file not readable for run '{run_id}' task '{task_id}': {err}"
+        ))
+    })?;
+    let size_bytes = metadata.len();
+    let truncated = size_bytes > MAX_RECEIPT_EVIDENCE_READ_BYTES;
+    let raw = {
+        use std::io::Read;
+        let file = std::fs::File::open(&abs_path)
+            .map_err(|err| ApiError::internal(format!("Failed to open evidence file: {err}")))?;
+        let mut buf = Vec::new();
+        file.take(MAX_RECEIPT_EVIDENCE_READ_BYTES)
+            .read_to_end(&mut buf)
+            .map_err(|err| ApiError::internal(format!("Failed to read evidence file: {err}")))?;
+        buf
+    };
+    // Parse as JSON if possible; fall back to a raw string representation.
+    let content: Value = serde_json::from_slice(&raw)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&raw).into_owned()));
+    Ok(Json(json!({
+        "run_id": run_id,
+        "task_id": task_id,
+        "path": receipt_artifact.path,
+        "checksum": receipt_artifact.checksum,
+        "size_bytes": size_bytes,
+        "truncated": truncated,
+        "content": content,
+    })))
+}
+
 fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError> {
     let (exec_config, fleet_config, session_model, route_config) = {
         let config = state.config.read();
@@ -1849,6 +2239,62 @@ fn fleet_artifact_json(artifact: &codewhale_protocol::fleet::FleetArtifactRef) -
         "checksum": artifact.checksum.clone(),
         "mime_type": artifact.mime_type.clone(),
         "size_bytes": artifact.size_bytes,
+    })
+}
+
+fn fleet_receipt_json(receipt: &codewhale_protocol::fleet::FleetReceipt) -> Value {
+    use codewhale_protocol::fleet::{FleetTaskFailureKind, FleetTaskResult};
+
+    let result_label = match receipt.result {
+        FleetTaskResult::Pass => "pass",
+        FleetTaskResult::Partial => "partial",
+        FleetTaskResult::Fail => "fail",
+        FleetTaskResult::Skip => "skip",
+        FleetTaskResult::Timeout => "timeout",
+    };
+    let (failure_kind_label, failure_class, retry_eligible) = match receipt.failure_kind.as_ref() {
+        Some(FleetTaskFailureKind::Transport) => (
+            Some("transport"),
+            Some("Infrastructure or network failure during task transport"),
+            true,
+        ),
+        Some(FleetTaskFailureKind::Task) => (
+            Some("task"),
+            Some("Task logic exited unsuccessfully"),
+            false,
+        ),
+        Some(FleetTaskFailureKind::Verifier) => (
+            Some("verifier"),
+            Some("Verifier rejected the task output; manual review or code change required"),
+            false,
+        ),
+        None => (None, None, false),
+    };
+    let evidence_available = receipt
+        .artifacts
+        .iter()
+        .any(|a| a.kind == FleetArtifactKind::Receipt);
+    let score_json = receipt.score.as_ref().map(|s| {
+        json!({
+            "value": s.value,
+            "max": s.max,
+            "notes": s.notes,
+        })
+    });
+    json!({
+        "run_id": receipt.run_id.0.clone(),
+        "task_id": receipt.task_id.clone(),
+        "worker_id": receipt.worker_id.clone(),
+        "attempt": receipt.attempt,
+        "terminal_seq": receipt.terminal_seq,
+        "completed_at": receipt.completed_at.clone(),
+        "result": result_label,
+        "failure_kind": failure_kind_label,
+        "failure_class": failure_class,
+        "retry_eligible": retry_eligible,
+        "score": score_json,
+        "artifacts": receipt.artifacts.iter().map(fleet_artifact_json).collect::<Vec<_>>(),
+        "evidence_available": evidence_available,
     })
 }
 
@@ -2065,6 +2511,415 @@ async fn set_skill_enabled(
     Ok(Json(SetSkillEnabledResponse {
         name,
         enabled: req.enabled,
+    }))
+}
+
+// ─── Skill lifecycle helpers ────────────────────────────────────────────────
+
+/// Build a [`crate::skills::mutation::MutationContext`] from the current
+/// server state. Reads the network policy and installer settings directly
+/// from the config already held in `state`.
+fn mutation_context_settings(
+    state: &RuntimeApiState,
+) -> (
+    crate::network_policy::NetworkPolicy,
+    u64,
+    String,
+    Option<PathBuf>,
+) {
+    use crate::skills::install::{DEFAULT_MAX_SIZE_BYTES, DEFAULT_REGISTRY_URL};
+    let config = state.config.read();
+    let network = config
+        .network
+        .clone()
+        .map(|p| p.into_runtime())
+        .unwrap_or_default();
+    let skills_cfg = config.skills.as_ref();
+    let max_size = skills_cfg
+        .and_then(|s| s.max_install_size_bytes)
+        .unwrap_or(DEFAULT_MAX_SIZE_BYTES);
+    let registry_url = skills_cfg
+        .and_then(|s| s.registry_url.clone())
+        .unwrap_or_else(|| DEFAULT_REGISTRY_URL.to_string());
+    let configured_skills_dir = config.skills_dir.as_ref().map(PathBuf::from);
+    (network, max_size, registry_url, configured_skills_dir)
+}
+
+fn parse_api_scope(
+    scope: Option<&str>,
+) -> Result<Option<crate::skills::mutation::SkillTargetScope>, ApiError> {
+    match scope {
+        None => Ok(None),
+        Some("project") => Ok(Some(crate::skills::mutation::SkillTargetScope::Project)),
+        Some("global") => Ok(Some(crate::skills::mutation::SkillTargetScope::Global)),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "invalid scope '{other}'; expected \"project\" or \"global\""
+        ))),
+    }
+}
+
+fn receipt_to_response(
+    receipt: &crate::skills::mutation::SkillMutationReceipt,
+) -> SkillMutationReceiptResponse {
+    use crate::skills::mutation::SkillMutationOutcome;
+    use crate::skills::roots::SkillScope;
+
+    const TRUST_NOTE: &str = "The .trusted marker is advisory and digest-bound; \
+         it records your review intent but does not sandbox or auto-authorize scripts.";
+
+    let outcome: &'static str = match &receipt.outcome {
+        SkillMutationOutcome::Installed => "installed",
+        SkillMutationOutcome::Updated => "updated",
+        SkillMutationOutcome::NoChange => "no_change",
+        SkillMutationOutcome::Removed => "removed",
+        SkillMutationOutcome::Trusted => "trusted",
+        SkillMutationOutcome::Imported => "imported",
+        SkillMutationOutcome::AlreadyPresent => "already_present",
+        // NeedsApproval / NetworkDenied are returned as ApiError::forbidden
+        // before reaching this conversion; they should not appear here.
+        SkillMutationOutcome::NeedsApproval(_) => "needs_approval",
+        SkillMutationOutcome::NetworkDenied(_) => "network_denied",
+    };
+    let scope = match receipt.scope {
+        SkillScope::Project => "project".to_string(),
+        SkillScope::Global => "global".to_string(),
+        SkillScope::Logical => "logical".to_string(),
+    };
+    let trust_note = if receipt.outcome == SkillMutationOutcome::Trusted {
+        Some(TRUST_NOTE)
+    } else {
+        None
+    };
+    SkillMutationReceiptResponse {
+        name: receipt.name.clone(),
+        outcome,
+        scope,
+        safe_target_path: receipt.safe_target_path.clone(),
+        trust_note,
+    }
+}
+
+fn outcome_is_policy_error(outcome: &crate::skills::mutation::SkillMutationOutcome) -> bool {
+    matches!(
+        outcome,
+        crate::skills::mutation::SkillMutationOutcome::NeedsApproval(_)
+            | crate::skills::mutation::SkillMutationOutcome::NetworkDenied(_)
+    )
+}
+
+fn policy_error_message(outcome: &crate::skills::mutation::SkillMutationOutcome) -> String {
+    match outcome {
+        crate::skills::mutation::SkillMutationOutcome::NeedsApproval(host) => format!(
+            "network access to '{host}' requires explicit approval; \
+             approve the host in your network policy before installing this skill"
+        ),
+        crate::skills::mutation::SkillMutationOutcome::NetworkDenied(host) => {
+            format!("network access to '{host}' was denied by the active network policy")
+        }
+        _ => "operation denied by policy".to_string(),
+    }
+}
+
+// ─── POST /v1/skills/install ────────────────────────────────────────────────
+
+async fn install_skill_api(
+    State(state): State<RuntimeApiState>,
+    Json(req): Json<InstallSkillRequest>,
+) -> Result<(StatusCode, Json<SkillMutationReceiptResponse>), ApiError> {
+    use crate::skills::install::InstallSource;
+    use crate::skills::mutation::{MutationContext, SkillMutationRequest, SkillTargetScope};
+
+    let source = InstallSource::parse(&req.source)
+        .map_err(|err| ApiError::bad_request(format!("invalid install source: {err}")))?;
+    let target = parse_api_scope(req.scope.as_deref())?.unwrap_or(SkillTargetScope::Global);
+
+    let (network, max_size, registry_url, configured_skills_dir) =
+        mutation_context_settings(&state);
+    let home = crate::config::effective_home_dir();
+    let workspace = state.workspace.clone();
+
+    let receipt = crate::skills::mutation::execute(
+        SkillMutationRequest::InstallRemote { source, target },
+        &MutationContext {
+            workspace: &workspace,
+            home: home.as_deref(),
+            configured_skills_dir: configured_skills_dir.as_deref(),
+            network: &network,
+            max_size,
+            registry_url: &registry_url,
+        },
+    )
+    .await
+    .map_err(|err| ApiError::bad_request(format!("install failed: {err:#}")))?;
+
+    if outcome_is_policy_error(&receipt.outcome) {
+        return Err(ApiError::forbidden(policy_error_message(&receipt.outcome)));
+    }
+
+    let status = if receipt.outcome == crate::skills::mutation::SkillMutationOutcome::Installed {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(receipt_to_response(&receipt))))
+}
+
+// ─── POST /v1/skills/{name}/update ─────────────────────────────────────────
+
+async fn update_skill_api(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateSkillRequest>,
+) -> Result<Json<SkillMutationReceiptResponse>, ApiError> {
+    use crate::skills::mutation::{MutationContext, SkillMutationRequest};
+
+    let scope = parse_api_scope(req.scope.as_deref())?;
+    let (network, max_size, registry_url, configured_skills_dir) =
+        mutation_context_settings(&state);
+    let home = crate::config::effective_home_dir();
+    let workspace = state.workspace.clone();
+
+    let receipt = crate::skills::mutation::execute(
+        SkillMutationRequest::UpdateByName {
+            name: name.clone(),
+            scope,
+            expected_digest: req.expected_digest,
+        },
+        &MutationContext {
+            workspace: &workspace,
+            home: home.as_deref(),
+            configured_skills_dir: configured_skills_dir.as_deref(),
+            network: &network,
+            max_size,
+            registry_url: &registry_url,
+        },
+    )
+    .await
+    .map_err(|err| {
+        let msg = err.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(format!("update failed: {err:#}"))
+        } else {
+            ApiError::bad_request(format!("update failed: {err:#}"))
+        }
+    })?;
+
+    if outcome_is_policy_error(&receipt.outcome) {
+        return Err(ApiError::forbidden(policy_error_message(&receipt.outcome)));
+    }
+
+    Ok(Json(receipt_to_response(&receipt)))
+}
+
+// ─── DELETE /v1/skills/{name} (uninstall) ──────────────────────────────────
+
+async fn uninstall_skill_api(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+    Query(query): Query<UninstallSkillQuery>,
+) -> Result<Json<SkillMutationReceiptResponse>, ApiError> {
+    use crate::skills::mutation::{MutationContext, SkillMutationRequest};
+
+    let scope = parse_api_scope(query.scope.as_deref())?;
+    let (network, max_size, registry_url, configured_skills_dir) =
+        mutation_context_settings(&state);
+    let home = crate::config::effective_home_dir();
+
+    let receipt = crate::skills::mutation::execute_sync(
+        SkillMutationRequest::RemoveByName {
+            name: name.clone(),
+            scope,
+            expected_digest: query.expected_digest,
+        },
+        &MutationContext {
+            workspace: &state.workspace,
+            home: home.as_deref(),
+            configured_skills_dir: configured_skills_dir.as_deref(),
+            network: &network,
+            max_size,
+            registry_url: &registry_url,
+        },
+    )
+    .map_err(|err| {
+        let msg = err.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(format!("uninstall failed: {err:#}"))
+        } else {
+            ApiError::bad_request(format!("uninstall failed: {err:#}"))
+        }
+    })?;
+
+    Ok(Json(receipt_to_response(&receipt)))
+}
+
+// ─── POST /v1/skills/{name}/trust ──────────────────────────────────────────
+
+async fn trust_skill_api(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+    Json(req): Json<TrustSkillRequest>,
+) -> Result<Json<SkillMutationReceiptResponse>, ApiError> {
+    use crate::skills::mutation::{MutationContext, SkillMutationRequest};
+
+    let scope = parse_api_scope(req.scope.as_deref())?;
+    let (network, max_size, registry_url, configured_skills_dir) =
+        mutation_context_settings(&state);
+    let home = crate::config::effective_home_dir();
+
+    let receipt = crate::skills::mutation::execute_sync(
+        SkillMutationRequest::TrustByName {
+            name: name.clone(),
+            scope,
+            expected_digest: req.expected_digest,
+        },
+        &MutationContext {
+            workspace: &state.workspace,
+            home: home.as_deref(),
+            configured_skills_dir: configured_skills_dir.as_deref(),
+            network: &network,
+            max_size,
+            registry_url: &registry_url,
+        },
+    )
+    .map_err(|err| {
+        let msg = err.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(format!("trust failed: {err:#}"))
+        } else {
+            ApiError::bad_request(format!("trust failed: {err:#}"))
+        }
+    })?;
+
+    Ok(Json(receipt_to_response(&receipt)))
+}
+
+// ─── GET /v1/skills/{name}/audit ───────────────────────────────────────────
+
+async fn audit_skill_api(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+    Query(query): Query<SkillScopeQuery>,
+) -> Result<Json<SkillAuditResponse>, ApiError> {
+    use crate::skills::audit::{
+        AuditedSkill, DigestState, IntegrityState, SkillActionKind, SkillAuditMode,
+        SkillAuditWarning, SkillSourceKind, TrustState, scan_with_configured,
+    };
+    use crate::skills::roots::SkillRootKind;
+
+    let scope_filter = parse_api_scope(query.scope.as_deref())?;
+    let home = crate::config::effective_home_dir();
+    let configured_skills_dir = {
+        let config = state.config.read();
+        config.skills_dir.as_ref().map(PathBuf::from)
+    };
+    let canonical = crate::skills::normalize_skill_name_for_lookup(&name);
+
+    let snap = scan_with_configured(
+        &state.workspace,
+        home.as_deref(),
+        configured_skills_dir.as_deref(),
+        SkillAuditMode::Compatible,
+        None,
+    );
+
+    let mut matches: Vec<&AuditedSkill> = snap
+        .skills
+        .iter()
+        .filter(|s| s.id.canonical_name == canonical)
+        .collect();
+
+    if let Some(scope) = scope_filter {
+        let want = match scope {
+            crate::skills::mutation::SkillTargetScope::Project => SkillRootKind::CodeWhaleProject,
+            crate::skills::mutation::SkillTargetScope::Global => SkillRootKind::CodeWhaleGlobal,
+        };
+        matches.retain(|s| s.root.kind == want);
+    }
+
+    if matches.is_empty() {
+        return Err(ApiError::not_found(format!(
+            "skill '{name}' not found in any audited root"
+        )));
+    }
+
+    let ambiguous = matches.len() > 1;
+    let entries = matches
+        .into_iter()
+        .map(|skill| {
+            let source_kind = match skill.source_kind {
+                SkillSourceKind::CodeWhaleManaged => "codewhale_managed",
+                SkillSourceKind::CodeWhaleManual => "codewhale_manual",
+                SkillSourceKind::CompatibleExternal => "compatible_external",
+                SkillSourceKind::BuiltIn => "built_in",
+                SkillSourceKind::ReviewedPluginSnapshot => "reviewed_plugin_snapshot",
+                SkillSourceKind::RegistryCache => "registry_cache",
+            };
+            let scope_str = match skill.root.kind {
+                SkillRootKind::CodeWhaleProject => "project",
+                SkillRootKind::CodeWhaleGlobal => "global",
+                _ => "other",
+            };
+            let digest = match &skill.digest {
+                DigestState::Known(v) => SkillAuditDigest {
+                    state: "known".to_string(),
+                    value: Some(v.clone()),
+                },
+                DigestState::Unknown(reason) => SkillAuditDigest {
+                    state: format!("unknown:{reason:?}").to_ascii_lowercase(),
+                    value: None,
+                },
+            };
+            let trust = match &skill.trust {
+                TrustState::TrustedForDigest(_) => "trusted_for_digest",
+                TrustState::TrustStale => "trust_stale",
+                TrustState::LegacyAdvisory => "legacy_advisory",
+                TrustState::Untrusted => "untrusted",
+                TrustState::NotApplicable => "not_applicable",
+                TrustState::Unknown => "unknown",
+            };
+            let integrity = match &skill.integrity {
+                IntegrityState::Healthy => "healthy",
+                IntegrityState::LocalContentDrift => "local_content_drift",
+                IntegrityState::BrokenManagedInstall => "broken_managed_install",
+                IntegrityState::LegacyMetadataUnknown => "legacy_metadata_unknown",
+                IntegrityState::Unknown => "unknown",
+            };
+            let available_actions = skill
+                .available_actions
+                .iter()
+                .map(|a| match a {
+                    SkillActionKind::Install => "install",
+                    SkillActionKind::Import => "import",
+                    SkillActionKind::Update => "update",
+                    SkillActionKind::Remove => "remove",
+                    SkillActionKind::Trust => "trust",
+                })
+                .map(str::to_string)
+                .collect();
+            let warnings = skill
+                .warnings
+                .iter()
+                .map(|w| match w {
+                    SkillAuditWarning::Message(m) => m.clone(),
+                })
+                .collect();
+            SkillAuditEntry {
+                name: skill.name.clone(),
+                safe_display_path: skill.safe_display_path.clone(),
+                source_kind: source_kind.to_string(),
+                scope: scope_str.to_string(),
+                digest,
+                trust: trust.to_string(),
+                integrity: integrity.to_string(),
+                available_actions,
+                warnings,
+            }
+        })
+        .collect();
+
+    Ok(Json(SkillAuditResponse {
+        ambiguous,
+        skills: entries,
     }))
 }
 
@@ -2318,6 +3173,364 @@ async fn list_mcp_tools(
     tools.sort_by(|a, b| a.server.cmp(&b.server).then_with(|| a.name.cmp(&b.name)));
 
     Ok(Json(McpToolsResponse { tools }))
+}
+
+/// `GET /v1/apps/mcp/servers/{name}` — fetch a single server's redacted config.
+async fn get_mcp_server(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpServerDetail>, ApiError> {
+    let mcp_config_path = state.config.read().mcp_config_path();
+    let plugin_registry = state
+        .plugin_discovery
+        .registry_for_workspace(&state.workspace);
+    let config = crate::mcp::load_config_with_workspace_and_plugins(
+        &mcp_config_path,
+        &state.workspace,
+        plugin_registry.as_ref(),
+    )
+    .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+
+    let server_cfg = config
+        .servers
+        .get(&name)
+        .ok_or_else(|| ApiError::not_found(format!("MCP server '{name}' not found")))?;
+
+    let connected = {
+        let pool_slot = state.mcp_pool.lock().await;
+        pool_slot.as_ref().is_some_and(|pool_handle| {
+            pool_handle
+                .try_lock()
+                .is_ok_and(|p| p.connected_servers().contains(&name.as_str()))
+        })
+    };
+
+    Ok(Json(McpServerDetail::from_config(
+        &name, server_cfg, connected,
+    )))
+}
+
+/// `POST /v1/apps/mcp/servers` — add a new server to the persistent config.
+///
+/// Body: JSON object with all `McpServerWriteRequest` fields **plus** a
+/// required top-level `"name"` string that will be the server key.
+async fn create_mcp_server(
+    State(state): State<RuntimeApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<McpServerDetail>), ApiError> {
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("'name' is required"))?
+        .to_string();
+
+    if name.trim().is_empty() {
+        return Err(ApiError::bad_request("'name' must not be empty"));
+    }
+
+    let req: McpServerWriteRequest = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))?;
+
+    if req.command.as_ref().and_then(Option::as_ref).is_none()
+        && req.url.as_ref().and_then(Option::as_ref).is_none()
+    {
+        return Err(ApiError::bad_request(
+            "Either 'command' or 'url' is required to create an MCP server",
+        ));
+    }
+
+    if let Some(Some(transport)) = &req.transport {
+        crate::mcp::validate_mcp_transport(Some(transport.as_str()))
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+
+    let mcp_config_path = state.config.read().mcp_config_path();
+
+    // Build the config entry from the request.
+    let new_cfg = mcp_server_config_from_write_request(req, None);
+
+    // Persist to the global MCP config.
+    {
+        let mut cfg = crate::mcp::load_config(&mcp_config_path)
+            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+        if cfg.servers.contains_key(&name) {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!("MCP server '{name}' already exists"),
+            });
+        }
+        cfg.servers.insert(name.clone(), new_cfg.clone());
+        crate::mcp::save_config(&mcp_config_path, &cfg)
+            .map_err(|e| ApiError::internal(format!("Failed to save MCP config: {e}")))?;
+    }
+
+    // Invalidate the in-memory pool so the next tool call reloads from disk.
+    {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        *pool_slot = None;
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(McpServerDetail::from_config(&name, &new_cfg, false)),
+    ))
+}
+
+/// `PATCH /v1/apps/mcp/servers/{name}` — update an existing server's config.
+async fn update_mcp_server(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+    Json(req): Json<McpServerWriteRequest>,
+) -> Result<Json<McpServerDetail>, ApiError> {
+    if let Some(Some(transport)) = &req.transport {
+        crate::mcp::validate_mcp_transport(Some(transport.as_str()))
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+
+    let mcp_config_path = state.config.read().mcp_config_path();
+
+    let updated_cfg = {
+        let mut cfg = crate::mcp::load_config(&mcp_config_path)
+            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+        let existing = cfg
+            .servers
+            .get_mut(&name)
+            .ok_or_else(|| ApiError::not_found(format!("MCP server '{name}' not found")))?;
+        apply_write_request_to_config(req, existing);
+        if existing.command.is_none() && existing.url.is_none() {
+            return Err(ApiError::bad_request(
+                "Either 'command' or 'url' must remain configured for an MCP server",
+            ));
+        }
+        let updated = existing.clone();
+        crate::mcp::save_config(&mcp_config_path, &cfg)
+            .map_err(|e| ApiError::internal(format!("Failed to save MCP config: {e}")))?;
+        updated
+    };
+
+    // Invalidate the in-memory pool.
+    {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        *pool_slot = None;
+    }
+
+    Ok(Json(McpServerDetail::from_config(
+        &name,
+        &updated_cfg,
+        false,
+    )))
+}
+
+/// `DELETE /v1/apps/mcp/servers/{name}` — remove a server from the persistent config.
+async fn delete_mcp_server(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpServerActionReceipt>, ApiError> {
+    let mcp_config_path = state.config.read().mcp_config_path();
+
+    crate::mcp::remove_server_config(&mcp_config_path, &name).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal(msg)
+        }
+    })?;
+
+    // Invalidate the in-memory pool.
+    {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        *pool_slot = None;
+    }
+
+    Ok(Json(McpServerActionReceipt {
+        name,
+        action: "deleted",
+        ok: true,
+    }))
+}
+
+/// `POST /v1/apps/mcp/servers/{name}/enable` — enable a configured server.
+async fn enable_mcp_server(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpServerActionReceipt>, ApiError> {
+    let mcp_config_path = state.config.read().mcp_config_path();
+
+    crate::mcp::set_server_enabled(&mcp_config_path, &name, true).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal(msg)
+        }
+    })?;
+
+    // Invalidate the in-memory pool so the enabled server participates next time.
+    {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        *pool_slot = None;
+    }
+
+    Ok(Json(McpServerActionReceipt {
+        name,
+        action: "enabled",
+        ok: true,
+    }))
+}
+
+/// `POST /v1/apps/mcp/servers/{name}/disable` — disable a configured server.
+async fn disable_mcp_server(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpServerActionReceipt>, ApiError> {
+    let mcp_config_path = state.config.read().mcp_config_path();
+
+    crate::mcp::set_server_enabled(&mcp_config_path, &name, false).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal(msg)
+        }
+    })?;
+
+    // Invalidate the in-memory pool so the disabled server is excluded next time.
+    {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        *pool_slot = None;
+    }
+
+    Ok(Json(McpServerActionReceipt {
+        name,
+        action: "disabled",
+        ok: true,
+    }))
+}
+
+/// `POST /v1/apps/mcp/servers/{name}/reconnect` — drop the cached pool entry
+/// for this server so it re-initializes on the next call that needs tools.
+async fn reconnect_mcp_server(
+    State(state): State<RuntimeApiState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpServerActionReceipt>, ApiError> {
+    // Verify the server exists in the config.
+    let mcp_config_path = state.config.read().mcp_config_path();
+    let plugin_registry = state
+        .plugin_discovery
+        .registry_for_workspace(&state.workspace);
+    let config = crate::mcp::load_config_with_workspace_and_plugins(
+        &mcp_config_path,
+        &state.workspace,
+        plugin_registry.as_ref(),
+    )
+    .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+
+    if !config.servers.contains_key(&name) {
+        return Err(ApiError::not_found(format!(
+            "MCP server '{name}' not found"
+        )));
+    }
+
+    // Drop the whole pool so the next connect_all call recreates all
+    // connections from the current on-disk config.
+    {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        *pool_slot = None;
+    }
+
+    Ok(Json(McpServerActionReceipt {
+        name,
+        action: "reconnect_scheduled",
+        ok: true,
+    }))
+}
+
+/// Build a fresh [`McpServerConfig`] from a create request.
+fn mcp_server_config_from_write_request(
+    req: McpServerWriteRequest,
+    _existing: Option<&crate::mcp::McpServerConfig>,
+) -> crate::mcp::McpServerConfig {
+    let enabled = req.enabled.unwrap_or(true);
+    crate::mcp::McpServerConfig {
+        command: req.command.flatten(),
+        args: req.args.unwrap_or_default(),
+        env: req.env.unwrap_or_default(),
+        cwd: None,
+        url: req.url.flatten(),
+        transport: req.transport.flatten(),
+        connect_timeout: req.connect_timeout.flatten(),
+        execute_timeout: req.execute_timeout.flatten(),
+        read_timeout: req.read_timeout.flatten(),
+        disabled: !enabled,
+        enabled,
+        required: req.required.unwrap_or(false),
+        enabled_tools: req.enabled_tools.unwrap_or_default(),
+        disabled_tools: req.disabled_tools.unwrap_or_default(),
+        headers: std::collections::HashMap::new(),
+        env_headers: req.env_headers.unwrap_or_default(),
+        bearer_token_env_var: req.bearer_token_env_var.flatten(),
+        scopes: req.scopes.unwrap_or_default(),
+        oauth: None,
+        oauth_resource: req.oauth_resource.flatten(),
+        reviewed_plugin: None,
+    }
+}
+
+/// Apply a partial update from a PATCH request onto an existing config entry.
+fn apply_write_request_to_config(
+    req: McpServerWriteRequest,
+    cfg: &mut crate::mcp::McpServerConfig,
+) {
+    if let Some(v) = req.command {
+        cfg.command = v;
+    }
+    if let Some(v) = req.args {
+        cfg.args = v;
+    }
+    if let Some(v) = req.env {
+        cfg.env = v;
+    }
+    if let Some(v) = req.url {
+        cfg.url = v;
+    }
+    if let Some(v) = req.transport {
+        cfg.transport = v;
+    }
+    if let Some(v) = req.connect_timeout {
+        cfg.connect_timeout = v;
+    }
+    if let Some(v) = req.execute_timeout {
+        cfg.execute_timeout = v;
+    }
+    if let Some(v) = req.read_timeout {
+        cfg.read_timeout = v;
+    }
+    if let Some(v) = req.enabled {
+        cfg.enabled = v;
+        cfg.disabled = !v;
+    }
+    if let Some(v) = req.required {
+        cfg.required = v;
+    }
+    if let Some(v) = req.enabled_tools {
+        cfg.enabled_tools = v;
+    }
+    if let Some(v) = req.disabled_tools {
+        cfg.disabled_tools = v;
+    }
+    if let Some(v) = req.env_headers {
+        cfg.env_headers = v;
+    }
+    if let Some(v) = req.bearer_token_env_var {
+        cfg.bearer_token_env_var = v;
+    }
+    if let Some(v) = req.scopes {
+        cfg.scopes = v;
+    }
+    if let Some(v) = req.oauth_resource {
+        cfg.oauth_resource = v;
+    }
 }
 
 async fn list_automations(
@@ -2799,6 +4012,200 @@ async fn compact_thread(
         StatusCode::ACCEPTED,
         Json(StartTurnResponse { thread, turn }),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Thread goal endpoints
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/threads/{id}/goal` — return the persistent goal for a thread, or
+/// 404 if the thread has no goal.
+async fn get_thread_goal(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<codewhale_protocol::ThreadGoal>, ApiError> {
+    // Verify the thread exists so we can return a clean 404 for unknown threads.
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    let goal = state
+        .runtime_threads
+        .get_goal(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found(format!("thread '{id}' has no goal")))?;
+    Ok(Json(goal))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpsertThreadGoalRequest {
+    objective: String,
+    #[serde(default)]
+    token_budget: Option<i64>,
+}
+
+/// `PUT /v1/threads/{id}/goal` — create or replace the persistent goal for a
+/// thread. Only `Active` goals may be created through this route; lifecycle
+/// transitions (`complete`, `block`) have dedicated action endpoints.
+async fn upsert_thread_goal(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpsertThreadGoalRequest>,
+) -> Result<(StatusCode, Json<codewhale_protocol::ThreadGoal>), ApiError> {
+    if req.objective.trim().is_empty() {
+        return Err(ApiError::bad_request("objective must not be blank"));
+    }
+    // Verify the thread exists.
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    let now = chrono::Utc::now().timestamp();
+    let existing = state
+        .runtime_threads
+        .get_goal(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let is_new = existing.is_none();
+    let goal = codewhale_protocol::ThreadGoal {
+        thread_id: id.clone(),
+        goal_id: format!("goal-{}", uuid::Uuid::new_v4()),
+        objective: req.objective.clone(),
+        status: codewhale_protocol::ThreadGoalStatus::Active,
+        token_budget: req.token_budget,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        continuation_count: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .runtime_threads
+        .save_goal(goal.clone())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let status_code = if is_new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    // Emit a replayable goal-updated event so SSE subscribers can react.
+    let _ = state
+        .runtime_threads
+        .emit_goal_updated_event(&id, goal.clone())
+        .await;
+    Ok((status_code, Json(goal)))
+}
+
+/// `DELETE /v1/threads/{id}/goal` — remove the persistent goal from a thread.
+/// Returns 204 No Content on success, 404 if there was no goal.
+async fn delete_thread_goal(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    let deleted = state
+        .runtime_threads
+        .remove_goal(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !deleted {
+        return Err(ApiError::not_found(format!("thread '{id}' has no goal")));
+    }
+    let _ = state.runtime_threads.emit_goal_cleared_event(&id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/threads/{id}/goal/complete` — transition the goal to `Complete`.
+/// Only valid from a non-terminal status; returns 409 Conflict if the goal is
+/// already in a terminal state, and 404 if the thread has no goal.
+async fn complete_thread_goal(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<codewhale_protocol::ThreadGoal>, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    let goal = state
+        .runtime_threads
+        .get_goal(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found(format!("thread '{id}' has no goal")))?;
+    if matches!(goal.status, codewhale_protocol::ThreadGoalStatus::Complete) {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("goal for thread '{id}' is already complete"),
+        });
+    }
+    let now = chrono::Utc::now().timestamp();
+    let updated = codewhale_protocol::ThreadGoal {
+        status: codewhale_protocol::ThreadGoalStatus::Complete,
+        updated_at: now,
+        ..goal
+    };
+    state
+        .runtime_threads
+        .save_goal(updated.clone())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state
+        .runtime_threads
+        .emit_goal_updated_event(&id, updated.clone())
+        .await;
+    Ok(Json(updated))
+}
+
+/// `POST /v1/threads/{id}/goal/block` — transition the goal to `Blocked`.
+/// Rejects transitions from terminal states (returns 409).
+async fn block_thread_goal(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<codewhale_protocol::ThreadGoal>, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    let goal = state
+        .runtime_threads
+        .get_goal(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found(format!("thread '{id}' has no goal")))?;
+    if matches!(goal.status, codewhale_protocol::ThreadGoalStatus::Complete) {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "goal for thread '{id}' is already complete; cannot transition to blocked"
+            ),
+        });
+    }
+    let now = chrono::Utc::now().timestamp();
+    let updated = codewhale_protocol::ThreadGoal {
+        status: codewhale_protocol::ThreadGoalStatus::Blocked,
+        updated_at: now,
+        ..goal
+    };
+    state
+        .runtime_threads
+        .save_goal(updated.clone())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state
+        .runtime_threads
+        .emit_goal_updated_event(&id, updated.clone())
+        .await;
+    Ok(Json(updated))
 }
 
 async fn list_tasks(
@@ -4450,6 +5857,293 @@ async fn reload_config(
     }))
 }
 
+// ── Memory inspection and lifecycle endpoints ──
+
+/// Maximum summary length returned per entry. Bounds the API surface so raw
+/// private text cannot exfiltrate through JSON responses.
+const MEMORY_SUMMARY_MAX_CHARS: usize = 300;
+/// Default result cap for `GET /v1/memory`.
+const MEMORY_LIST_DEFAULT_LIMIT: usize = 50;
+/// Hard ceiling — protects against oversized responses.
+const MEMORY_LIST_MAX_LIMIT: usize = 200;
+
+/// Typed, redacted projection of a single native memory entry.
+///
+/// Raw file-system paths are never exposed; `scope` and `workspace_id` (a
+/// SHA-256 digest of the repository origin URL, not a local path) give
+/// managed clients enough provenance to reason about each entry.
+#[derive(Debug, Serialize)]
+struct MemoryEntryRecord {
+    /// SQLite row id. Stable across reindexes unless the source Markdown
+    /// file is cleared and rewritten.
+    id: i64,
+    /// `"global"` or `"workspace"`.
+    scope: &'static str,
+    /// SHA-256 digest of the repository origin URL for workspace-scoped
+    /// entries; `null` for global entries.
+    workspace_id: Option<String>,
+    /// Bounded plain-text summary (max `MEMORY_SUMMARY_MAX_CHARS` chars).
+    /// Truncated with `…` when the source text is longer. Never contains
+    /// raw prompt or turn content.
+    summary: String,
+    /// `true` when the source Markdown file has been modified since the
+    /// entry was last indexed.
+    stale: bool,
+    /// 1-based start line in the source Markdown file.
+    line_start: usize,
+    /// 1-based end line in the source Markdown file.
+    line_end: usize,
+    /// `"active"` or `"stale"` (human-readable alias for `stale`).
+    status: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMemoryQuery {
+    /// Filter by scope: `"global"`, `"workspace"`, or `"all"` (default).
+    scope: Option<String>,
+    /// FTS search query (max 256 chars). When absent all entries for the
+    /// requested scope are returned in insertion order.
+    q: Option<String>,
+    /// Maximum entries to return (default 50, max 200).
+    limit: Option<usize>,
+}
+
+/// Request body for `POST /v1/memory`.
+#[derive(Debug, Deserialize)]
+struct CreateMemoryRequest {
+    /// The memory note text (max 64 KiB after normalisation).
+    text: String,
+    /// `"global"` (default) or `"workspace"`.
+    #[serde(default)]
+    scope: String,
+}
+
+/// Query params for `DELETE /v1/memory`.
+#[derive(Debug, Deserialize)]
+struct ClearMemoryQuery {
+    /// One of `"global"`, `"workspace"`, or `"all"`. Required.
+    scope: String,
+}
+
+/// Build a `NativeMemoryStore` rooted at the same location the TUI uses.
+/// Mirrors `native_store()` in `commands/groups/memory/memory.rs`.
+fn native_store_for_state(state: &RuntimeApiState) -> crate::native_memory::NativeMemoryStore {
+    let memory_path = state.config.read().memory_path();
+    if let Some(store) = crate::native_memory::NativeMemoryStore::from_global_path(&memory_path) {
+        return store;
+    }
+    let root = memory_path
+        .parent()
+        .unwrap_or_else(|| FsPath::new("."))
+        .join("memory");
+    crate::native_memory::NativeMemoryStore::new(root)
+}
+
+/// Derive a scope label from a source path relative to the store root.
+/// Returns `"global"`, `"workspace"`, or `"unknown"`.
+fn scope_label_for_source(source: &FsPath, store_root: &FsPath) -> &'static str {
+    let Ok(rel) = source.strip_prefix(store_root) else {
+        return "unknown";
+    };
+    match rel.components().next().and_then(|c| c.as_os_str().to_str()) {
+        Some("global") => "global",
+        Some("workspace") => "workspace",
+        _ => "unknown",
+    }
+}
+
+/// Extract the workspace_id component from a workspace-scoped source path.
+fn workspace_id_for_source(source: &FsPath, store_root: &FsPath) -> Option<String> {
+    let rel = source.strip_prefix(store_root).ok()?;
+    let mut comps = rel.components();
+    if comps.next()?.as_os_str().to_str()? != "workspace" {
+        return None;
+    }
+    Some(comps.next()?.as_os_str().to_str()?.to_string())
+}
+
+/// Convert a `MemoryHit` into a redacted, bounded `MemoryEntryRecord`.
+fn memory_hit_to_record(
+    hit: crate::native_memory::MemoryHit,
+    store_root: &FsPath,
+) -> MemoryEntryRecord {
+    let scope = scope_label_for_source(&hit.source, store_root);
+    let workspace_id = workspace_id_for_source(&hit.source, store_root);
+    let summary = truncate_text(&hit.text, MEMORY_SUMMARY_MAX_CHARS);
+    let status = if hit.stale { "stale" } else { "active" };
+    MemoryEntryRecord {
+        id: hit.id,
+        scope,
+        workspace_id,
+        summary,
+        stale: hit.stale,
+        line_start: hit.line_start,
+        line_end: hit.line_end,
+        status,
+    }
+}
+
+/// Resolve a scope query parameter into a `MemoryScope` filter and an
+/// optional workspace_id.  `"all"` / absent → `(None, None)`.
+fn resolve_memory_scope(
+    scope_param: &Option<String>,
+    workspace: &FsPath,
+) -> Result<(Option<crate::native_memory::MemoryScope>, Option<String>), ApiError> {
+    match scope_param.as_deref().unwrap_or("all").trim() {
+        "all" | "" => Ok((None, None)),
+        "global" => Ok((Some(crate::native_memory::MemoryScope::Global), None)),
+        "workspace" => {
+            let workspace_id = crate::native_memory::NativeMemoryStore::workspace_id(workspace)
+                .map_err(|e| ApiError::internal(format!("resolve workspace id: {e}")))?;
+            Ok((
+                Some(crate::native_memory::MemoryScope::Workspace),
+                workspace_id,
+            ))
+        }
+        other => Err(ApiError::bad_request(format!(
+            "Invalid scope '{other}': expected one of all, global, workspace"
+        ))),
+    }
+}
+
+/// `GET /v1/memory` — list memory entries with optional scope and FTS
+/// filtering.
+///
+/// Query params:
+/// - `scope` — `"global"`, `"workspace"`, or `"all"` (default)
+/// - `q` — FTS search query (max 256 chars; omit to list all)
+/// - `limit` — max results (default 50, max 200)
+async fn list_memory(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<ListMemoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = match query.limit.unwrap_or(MEMORY_LIST_DEFAULT_LIMIT) {
+        0 => {
+            return Err(ApiError::bad_request("limit must be at least 1"));
+        }
+        n if n > MEMORY_LIST_MAX_LIMIT => {
+            return Err(ApiError::bad_request(format!(
+                "limit must be at most {MEMORY_LIST_MAX_LIMIT}; got {n}"
+            )));
+        }
+        n => n,
+    };
+
+    let store = native_store_for_state(&state);
+    let root = store.root().to_path_buf();
+    let (scope_filter, workspace_id) = resolve_memory_scope(&query.scope, &state.workspace)?;
+
+    let hits = if let Some(ref q) = query.q {
+        let q = q.trim();
+        if q.is_empty() || q.chars().count() > 256 {
+            return Err(ApiError::bad_request("q must be 1–256 characters"));
+        }
+        match scope_filter {
+            None => store.search(q, limit),
+            Some(crate::native_memory::MemoryScope::Global) => store.search(q, limit).map(|h| {
+                h.into_iter()
+                    .filter(|h| scope_label_for_source(&h.source, &root) == "global")
+                    .collect()
+            }),
+            Some(crate::native_memory::MemoryScope::Workspace) => store
+                .search_for_workspace(&state.workspace, q, limit)
+                .map(|h| {
+                    h.into_iter()
+                        .filter(|h| scope_label_for_source(&h.source, &root) == "workspace")
+                        .collect()
+                }),
+        }
+    } else {
+        store.list_all(scope_filter, workspace_id.as_deref(), limit)
+    }
+    .map_err(|e| ApiError::internal(format!("memory list error: {e}")))?;
+
+    let entries: Vec<MemoryEntryRecord> = hits
+        .into_iter()
+        .map(|h| memory_hit_to_record(h, &root))
+        .collect();
+    let total = entries.len();
+    Ok(Json(json!({ "entries": entries, "total": total })))
+}
+
+/// `GET /v1/memory/{id}` — inspect a single memory entry.
+///
+/// The lookup is scoped to global memory plus the current repository's
+/// workspace memory; numeric IDs from a different machine or repository
+/// will not resolve.
+async fn get_memory_entry(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    let store = native_store_for_state(&state);
+    let root = store.root().to_path_buf();
+    let hit = store
+        .get_for_workspace(&state.workspace, id)
+        .map_err(|e| ApiError::internal(format!("memory lookup error: {e}")))?
+        .ok_or_else(|| ApiError::not_found(format!("memory entry '{id}' not found")))?;
+    let entry = memory_hit_to_record(hit, &root);
+    Ok(Json(json!({ "entry": entry })))
+}
+
+/// `POST /v1/memory` — append a new memory entry.
+///
+/// The note is treated as user data (lower authority than instructions).
+/// Requires the standard Runtime auth token when auth is configured.
+async fn create_memory_entry(
+    State(state): State<RuntimeApiState>,
+    Json(req): Json<CreateMemoryRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let scope_str = if req.scope.is_empty() {
+        "global"
+    } else {
+        req.scope.as_str()
+    };
+    let scope = match scope_str.trim() {
+        "global" => crate::native_memory::MemoryScope::Global,
+        "workspace" => crate::native_memory::MemoryScope::Workspace,
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "Invalid scope '{other}': expected 'global' or 'workspace'"
+            )));
+        }
+    };
+    let workspace_id = if scope == crate::native_memory::MemoryScope::Workspace {
+        let id = crate::native_memory::NativeMemoryStore::workspace_id(&state.workspace)
+            .map_err(|e| ApiError::internal(format!("resolve workspace id: {e}")))?
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "workspace scope requires a git repository with a remote origin",
+                )
+            })?;
+        Some(id)
+    } else {
+        None
+    };
+    let store = native_store_for_state(&state);
+    let root = store.root().to_path_buf();
+    let hit = store
+        .remember(scope, workspace_id.as_deref(), &req.text)
+        .map_err(|e| ApiError::bad_request(format!("memory create error: {e}")))?;
+    let entry = memory_hit_to_record(hit, &root);
+    Ok((StatusCode::CREATED, Json(json!({ "entry": entry }))))
+}
+
+/// `DELETE /v1/memory` — clear all memory entries for the given scope.
+///
+/// The `scope` query parameter is required: `"global"`, `"workspace"`, or
+/// `"all"`.  This is a destructive, non-reversible operation.
+async fn clear_memory(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<ClearMemoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (scope_filter, workspace_id) = resolve_memory_scope(&Some(query.scope), &state.workspace)?;
+    let store = native_store_for_state(&state);
+    store
+        .delete_all(scope_filter, workspace_id.as_deref())
+        .map_err(|e| ApiError::internal(format!("memory clear error: {e}")))?;
+    Ok(Json(json!({ "cleared": true })))
+}
+
 const MOBILE_HTML: &str = include_str!("runtime_mobile.html");
 
 /// Built-in dev origins always allowed by the runtime API (whalescale#255).
@@ -4575,6 +6269,13 @@ impl ApiError {
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }

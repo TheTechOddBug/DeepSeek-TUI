@@ -155,4 +155,24 @@ describe("web workflow deploy trigger contract", () => {
     expect(deploy).toContain("ref: ${{ github.sha }}");
     expect(deploy).toContain('--expected-revision "$GITHUB_SHA"');
   });
+
+  it("builds one OpenNext bundle before preview or deploy without a Wrangler rebuild", () => {
+    const packageJson = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { scripts: Record<string, string> };
+    const wrangler = JSON.parse(
+      readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
+    ) as { build?: { command?: string } };
+
+    expect(packageJson.scripts.preview).toBe(
+      "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    );
+    expect(packageJson.scripts.deploy).toBe(
+      "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    );
+    expect(wrangler.build).toBeUndefined();
+    expect(deploy).toContain("run: npm run deploy");
+    expect(deploy).not.toContain("npm run build");
+    expect(deploy).not.toContain("npx opennextjs-cloudflare build");
+  });
 });

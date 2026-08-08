@@ -298,28 +298,7 @@ impl HistoryCell {
                 }
             }
             HistoryCell::Error { message, severity } => {
-                // Error messages are machine-generated and should not be run
-                // through markdown rendering, which would mangle env-var names
-                // containing underscores (e.g. DEEPSEEK_ALLOW_INSECURE_HTTP
-                // would lose its underscores as italic markers).
-                let label = error_label_text(*severity);
-                let label_style = error_label_style(*severity);
-                let body_style = error_body_style(*severity);
-                let prefix_width = UnicodeWidthStr::width(label);
-                let content_width = width.saturating_sub(2 + prefix_width as u16).max(1);
-                let mut lines = wrap_plain_line(message, body_style, content_width);
-                // Add the label prefix to the first line
-                if let Some(first) = lines.get_mut(0) {
-                    first.spans.insert(0, Span::raw(" "));
-                    first.spans.insert(0, Span::styled(label, label_style));
-                }
-                // Continuation rail for subsequent lines
-                let rail = format!("{}{}", '\u{258F}', " ".repeat(prefix_width));
-                let rail_style = Style::default().fg(palette::TEXT_DIM);
-                for line in lines.iter_mut().skip(1) {
-                    line.spans.insert(0, Span::styled(rail.clone(), rail_style));
-                }
-                lines
+                render_error_message(message, *severity, width, true)
             }
             HistoryCell::Thinking {
                 content,
@@ -425,7 +404,10 @@ impl HistoryCell {
                 }
                 lines
             }
-            HistoryCell::System { .. } | HistoryCell::Error { .. } => self.lines(width),
+            HistoryCell::System { .. } => self.lines(width),
+            HistoryCell::Error { message, severity } => {
+                render_error_message(message, *severity, width, true)
+            }
             HistoryCell::SubAgent(cell) => cell.lines(width),
             HistoryCell::ArchivedContext { .. } => {
                 render_archived_context(self, width, options.low_motion)
@@ -543,7 +525,10 @@ impl HistoryCell {
                 content,
                 width,
             ),
-            HistoryCell::System { .. } | HistoryCell::Error { .. } => self.lines(width),
+            HistoryCell::System { .. } => self.lines(width),
+            HistoryCell::Error { message, severity } => {
+                render_error_message(message, *severity, width, false)
+            }
             HistoryCell::Thinking {
                 content,
                 streaming,
@@ -2295,6 +2280,45 @@ fn error_body_style(severity: crate::error_taxonomy::ErrorSeverity) -> Style {
         crate::error_taxonomy::ErrorSeverity::Info => palette::TEXT_MUTED,
     };
     Style::default().fg(color)
+}
+
+/// Render an engine error without markdown interpretation. The live transcript
+/// always advertises the dedicated full-error pager: terminal height, scroll
+/// position, and adjacent tool cards can otherwise make a multiline recovery
+/// instruction look like a clipped one-line failure. Transcript/pager mode
+/// omits the recursive affordance while preserving every character.
+fn render_error_message(
+    message: &str,
+    severity: crate::error_taxonomy::ErrorSeverity,
+    width: u16,
+    show_full_error_affordance: bool,
+) -> Vec<Line<'static>> {
+    // Error messages are machine-generated and should not be run through
+    // markdown rendering, which would mangle env-var names containing
+    // underscores (e.g. CODEWHALE_ALLOW_INSECURE_HTTP would lose them as
+    // italic markers).
+    let label = error_label_text(severity);
+    let label_style = error_label_style(severity);
+    let body_style = error_body_style(severity);
+    let prefix_width = UnicodeWidthStr::width(label);
+    let content_width = width.saturating_sub(2 + prefix_width as u16).max(1);
+    let mut lines = wrap_plain_line(message, body_style, content_width);
+    if let Some(first) = lines.get_mut(0) {
+        first.spans.insert(0, Span::raw(" "));
+        first.spans.insert(0, Span::styled(label, label_style));
+    }
+    let rail = format!("{}{}", '\u{258F}', " ".repeat(prefix_width));
+    let rail_style = Style::default().fg(palette::TEXT_DIM);
+    for line in lines.iter_mut().skip(1) {
+        line.spans.insert(0, Span::styled(rail.clone(), rail_style));
+    }
+    if show_full_error_affordance {
+        lines.push(details_affordance_line(
+            &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full error"),
+            Style::default().fg(palette::TEXT_MUTED).italic(),
+        ));
+    }
+    lines
 }
 
 fn render_tool_header(

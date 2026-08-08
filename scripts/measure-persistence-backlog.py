@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,54 @@ TEST_NAME = (
     "tui::persistence_actor::backlog_measurement_tests::"
     "write_paused_persistence_backlog_measurement_receipt"
 )
+
+
+class PersistenceBacklogMeasurementError(RuntimeError):
+    """The exact measurement test did not produce a trustworthy receipt."""
+
+
+def measurement_command() -> list[str]:
+    return [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "codewhale-tui",
+        "--lib",
+        TEST_NAME,
+        "--",
+        "--exact",
+        "--ignored",
+        "--test-threads=1",
+    ]
+
+
+def run_measurement(receipt_path: Path, env: dict[str, str]) -> dict:
+    result = subprocess.run(
+        measurement_command(),
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        sys.stdout.write(result.stdout)
+        result.check_returncode()
+
+    combined = "\n".join(result.stdout.splitlines() + result.stderr.splitlines())
+    if re.search(r"\brunning\s+0\s+tests?\b", combined):
+        sys.stdout.write(result.stdout)
+        raise PersistenceBacklogMeasurementError(
+            f"exact library measurement test {TEST_NAME} ran zero tests"
+        )
+    try:
+        return json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PersistenceBacklogMeasurementError(
+            f"exact library measurement test {TEST_NAME} emitted no valid receipt: {error}"
+        ) from error
 
 
 def main() -> int:
@@ -55,34 +104,11 @@ def main() -> int:
         env[SOURCE_DIRTY_ENV] = str(source_dirty).lower()
         env[RUSTC_VERSION_ENV] = rustc_version
         env[CARGO_VERSION_ENV] = cargo_version
-        command = [
-            "cargo",
-            "test",
-            "--locked",
-            "-p",
-            "codewhale-tui",
-            "--bin",
-            "codewhale-tui",
-            TEST_NAME,
-            "--",
-            "--exact",
-            "--ignored",
-            "--test-threads=1",
-        ]
-        result = subprocess.run(
-            command,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        sys.stderr.write(result.stderr)
-        if result.returncode != 0:
-            sys.stdout.write(result.stdout)
-            return result.returncode
         try:
-            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            receipt = run_measurement(receipt_path, env)
+        except subprocess.CalledProcessError as error:
+            return error.returncode
+        except PersistenceBacklogMeasurementError as error:
             sys.stderr.write(f"invalid persistence backlog receipt: {error}\n")
             return 1
 

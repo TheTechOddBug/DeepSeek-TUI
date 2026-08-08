@@ -1219,7 +1219,7 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // Token-budget / continuity fragment: prior-session handoff relay.
     let token_budget_body = load_handoff_block(workspace);
 
-    let world_state = world_state_from_session_facts(
+    let mut world_state = world_state_from_session_facts(
         Some(workspace_body.as_str()),
         permissions_body.as_deref(),
         Some(route_body.as_str()),
@@ -1227,6 +1227,19 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         None, // Skills stay in the constitution prefix (skills-dir-static).
         token_budget_body.as_deref(),
     );
+    // Project-instruction import (#3978, #4079) as a typed fragment with
+    // hard caps — unified with `codewhale_core::fragments`. This covers
+    // `.cursorrules`, `.clinerules`, `.windsurf/rules/*`, `.gemini/*`,
+    // `.github/copilot-instructions.md` etc., beyond the canonical
+    // `AGENTS.md` already in the constitution prefix.
+    if let Some(fragment) =
+        codewhale_core::fragments::load_additional_project_instruction_fragment(workspace)
+    {
+        // `BoundedFragment` already enforces `MAX_FRAGMENT_BYTES` (10K-token
+        // ceiling) and per-fragment caps; WorldState's `with_*` also clamps.
+        world_state = world_state.with_project_instructions(fragment.content);
+        debug_assert!(world_state.validate_caps().is_ok());
+    }
 
     let mut blocks = crate::model_context::WorldStateSnapshot {
         constitution: full_prompt,

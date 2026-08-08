@@ -97,12 +97,16 @@ pub fn build_entries_with_plugins(
 ) -> Vec<CommandPaletteEntry> {
     let mut entries = Vec::new();
     commands::user_registry::with_registry_for_workspace(Some(workspace), |user_registry| {
+        let all_user_commands = user_registry.iter().collect::<Vec<_>>();
         for command in commands::command_infos() {
-            if user_registry.get(command.name).is_some() {
+            if commands::discovery::user_command_shadows_builtin_canonical(
+                command,
+                &all_user_commands,
+            ) {
                 continue;
             }
             let mut description =
-                palette_description_for_unshadowed_aliases(command, locale, user_registry);
+                palette_description_for_unshadowed_aliases(command, locale, &all_user_commands);
             if command.requires_argument() {
                 description.push_str("  ");
                 description.push_str(command.usage);
@@ -261,15 +265,10 @@ pub fn build_entries_with_plugins(
 fn palette_description_for_unshadowed_aliases(
     command: &commands::CommandInfo,
     locale: Locale,
-    user_registry: &commands::user_registry::UserCommandRegistry,
+    all_user_commands: &[&commands::user_registry::UserCommandMetadata],
 ) -> String {
     let desc = command.description_for(locale);
-    let aliases = command
-        .aliases
-        .iter()
-        .copied()
-        .filter(|alias| user_registry.get(alias).is_none())
-        .collect::<Vec<_>>();
+    let aliases = commands::discovery::unshadowed_builtin_aliases(command, all_user_commands);
     if aliases.len() == command.aliases.len() {
         return command.palette_description_for(locale);
     }
@@ -1529,6 +1528,163 @@ mod tests {
                 .any(|entry| entry.section == PaletteSection::Command
                     && entry.label == "/image-review"),
             "user command that owns the /image alias should be visible"
+        );
+    }
+
+    #[test]
+    fn command_palette_visible_canonical_shadow_has_exactly_one_user_row() {
+        // Deep-Dive Q1: a visible user command whose canonical name equals a
+        // built-in must produce exactly one palette row owned by the user
+        // command (its metadata and action), never the built-in row.
+        let tmp = TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let commands_dir = workspace.join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).expect("create commands dir");
+        std::fs::write(
+            commands_dir.join("my-help.md"),
+            "---\nname: help\ndescription: My private help\nusage: /help <topic>\n---\nhelp $ARGUMENTS",
+        )
+        .expect("write user command");
+
+        let entries = build_entries(
+            Locale::En,
+            tmp.path().join("skills").as_path(),
+            false,
+            workspace.as_path(),
+            tmp.path().join("mcp.json").as_path(),
+            None,
+        );
+        let rows = entries
+            .iter()
+            .filter(|entry| entry.section == PaletteSection::Command && entry.label == "/help")
+            .collect::<Vec<_>>();
+
+        assert_eq!(rows.len(), 1, "exactly one /help row must exist");
+        assert!(
+            rows[0].description.contains("My private help"),
+            "row must carry the user command metadata: {}",
+            rows[0].description
+        );
+        assert!(
+            rows[0].description.contains("/help <topic>"),
+            "row must carry the user command usage: {}",
+            rows[0].description
+        );
+        assert!(
+            matches!(&rows[0].action, CommandPaletteAction::InsertText { text } if text == "/help "),
+            "row must carry the user command action"
+        );
+    }
+
+    #[test]
+    fn command_palette_accepted_alias_suppresses_builtin_canonical_row() {
+        // A visible user command whose accepted alias equals a built-in
+        // canonical token must suppress the built-in row in the palette,
+        // matching the shared alias-aware contract.
+        let tmp = TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let commands_dir = workspace.join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).expect("create commands dir");
+        std::fs::write(
+            commands_dir.join("assistant.md"),
+            "---\ndescription: My assistant\nalias: help\n---\nassistant",
+        )
+        .expect("write user command");
+
+        let entries = build_entries(
+            Locale::En,
+            tmp.path().join("skills").as_path(),
+            false,
+            workspace.as_path(),
+            tmp.path().join("mcp.json").as_path(),
+            None,
+        );
+
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.section == PaletteSection::Command && entry.label == "/help"),
+            "built-in canonical row must be suppressed when a user alias claims /help"
+        );
+        assert!(
+            entries.iter().any(
+                |entry| entry.section == PaletteSection::Command && entry.label == "/assistant"
+            ),
+            "the user command must appear under its own canonical name"
+        );
+    }
+
+    #[test]
+    fn command_palette_hidden_canonical_shadow_exposes_no_discovery_row() {
+        // A hidden user command claiming a built-in canonical token must not
+        // surface either row: the hidden command is excluded from output while
+        // still owning the token (AT-008 boundary in the palette).
+        let tmp = TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let commands_dir = workspace.join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).expect("create commands dir");
+        std::fs::write(
+            commands_dir.join("private-help.md"),
+            "---\nname: help\nhidden: true\n---\nprivate help",
+        )
+        .expect("write hidden user command");
+
+        let entries = build_entries(
+            Locale::En,
+            tmp.path().join("skills").as_path(),
+            false,
+            workspace.as_path(),
+            tmp.path().join("mcp.json").as_path(),
+            None,
+        );
+
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.section == PaletteSection::Command && entry.label == "/help"),
+            "neither the hidden user command nor the shadowed built-in may appear"
+        );
+    }
+
+    #[test]
+    fn command_palette_alias_shadow_preserves_canonical_row_without_claimed_alias() {
+        // A user command claiming only one built-in alias must leave the
+        // built-in canonical row visible and remove only the claimed alias
+        // from its description.
+        let tmp = TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let commands_dir = workspace.join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).expect("create commands dir");
+        std::fs::write(
+            commands_dir.join("image-review.md"),
+            "---\ndescription: Review an image\nalias: image\n---\nreview image",
+        )
+        .expect("write user command");
+
+        let entries = build_entries(
+            Locale::En,
+            tmp.path().join("skills").as_path(),
+            false,
+            workspace.as_path(),
+            tmp.path().join("mcp.json").as_path(),
+            None,
+        );
+        let attach_rows = entries
+            .iter()
+            .filter(|entry| entry.section == PaletteSection::Command && entry.label == "/attach")
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            attach_rows.len(),
+            1,
+            "built-in canonical row must appear once"
+        );
+        assert!(
+            !attach_rows[0].description.contains("aliases: image")
+                && !attach_rows[0].description.contains(", image")
+                && !attach_rows[0].description.contains("image,"),
+            "claimed /image alias must be absent from /attach description: {}",
+            attach_rows[0].description
         );
     }
 

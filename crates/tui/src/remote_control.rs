@@ -717,21 +717,61 @@ async fn relay_worker(
             command = worker_rx.recv() => {
                 match command {
                     Some(WorkerCommand::Upload { run_id, acknowledgements, envelopes }) => {
-                        runner_request(
+                        let body = Some(json!({ "acknowledgements": acknowledgements, "envelopes": envelopes }));
+                        let result = runner_request(
                             &client,
                             &enrollment,
                             Method::POST,
                             &["api", "local-runners", &runner_id, "runs", &run_id, "events"],
                             &[],
-                            Some(json!({ "acknowledgements": acknowledgements, "envelopes": envelopes })),
-                        ).await?;
+                            body.clone(),
+                        )
+                        .await;
+                        if let Err(err) = result {
+                            if err == "runner_access_token_expired" {
+                                refresh_enrollment_and_reconnect(
+                                    &client,
+                                    &mut enrollment,
+                                    &mut runner_id,
+                                    &start,
+                                    &event_tx,
+                                )
+                                .await?;
+                                runner_request(
+                                    &client,
+                                    &enrollment,
+                                    Method::POST,
+                                    &["api", "local-runners", &runner_id, "runs", &run_id, "events"],
+                                    &[],
+                                    body,
+                                )
+                                .await?;
+                            } else {
+                                return Err(err);
+                            }
+                        }
                     }
                     Some(WorkerCommand::Stop) | None => {
                         // Do not return local input until the control plane has
                         // durably released this lease. If the confirmation
                         // cannot be delivered, the UI keeps ownership locked
                         // through the server-side lease expiry instead.
-                        post_heartbeat(&client, &enrollment, &runner_id, &start, "offline").await?;
+                        let hb = post_heartbeat(&client, &enrollment, &runner_id, &start, "offline").await;
+                        if let Err(err) = hb {
+                            if err == "runner_access_token_expired" {
+                                refresh_enrollment_and_reconnect(
+                                    &client,
+                                    &mut enrollment,
+                                    &mut runner_id,
+                                    &start,
+                                    &event_tx,
+                                )
+                                .await?;
+                                post_heartbeat(&client, &enrollment, &runner_id, &start, "offline").await?;
+                            } else {
+                                return Err(err);
+                            }
+                        }
                         let _ = event_tx.send(RemoteEvent::Stopped);
                         return Ok(());
                     }
@@ -739,27 +779,113 @@ async fn relay_worker(
             }
             () = tokio::time::sleep(SYNC_INTERVAL) => {
                 if enrollment_needs_refresh(&enrollment) {
-                    enrollment = refresh_enrollment(&client, enrollment.persisted.clone()).await?;
-                    runner_id = connect_runner(&client, &enrollment, &start).await?;
+                    // Proactive refresh before expiry; reconnect to keep runner lease valid.
+                    match refresh_enrollment(&client, enrollment.persisted.clone()).await {
+                        Ok(new_enrollment) => {
+                            enrollment = new_enrollment;
+                            runner_id = connect_runner(&client, &enrollment, &start).await?;
+                        }
+                        Err(err) if err == "runner_enrollment_revoked" => {
+                            delete_persisted_enrollment();
+                            enrollment = enroll_device(&client, &base, &start, &event_tx).await?;
+                            runner_id = connect_runner(&client, &enrollment, &start).await?;
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
                 if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-                    post_heartbeat(&client, &enrollment, &runner_id, &start, "active").await?;
+                    let hb = post_heartbeat(&client, &enrollment, &runner_id, &start, "active").await;
+                    if let Err(err) = hb {
+                        if err == "runner_access_token_expired" {
+                            refresh_enrollment_and_reconnect(
+                                &client,
+                                &mut enrollment,
+                                &mut runner_id,
+                                &start,
+                                &event_tx,
+                            )
+                            .await?;
+                            post_heartbeat(&client, &enrollment, &runner_id, &start, "active").await?;
+                        } else {
+                            return Err(err);
+                        }
+                    }
                     last_heartbeat = Instant::now();
                 }
-                let runs = list_runs(&client, &enrollment, &runner_id).await?;
+                let runs = match list_runs(&client, &enrollment, &runner_id).await {
+                    Ok(v) => v,
+                    Err(err) if err == "runner_access_token_expired" => {
+                        refresh_enrollment_and_reconnect(
+                            &client,
+                            &mut enrollment,
+                            &mut runner_id,
+                            &start,
+                            &event_tx,
+                        )
+                        .await?;
+                        list_runs(&client, &enrollment, &runner_id).await?
+                    }
+                    Err(err) => return Err(err),
+                };
                 for run_id in runs {
                     let since = command_cursor.get(&run_id).copied().unwrap_or(0);
-                    for listed in list_commands(&client, &enrollment, &runner_id, &run_id, since).await? {
+                    let listed_commands = match list_commands(
+                        &client,
+                        &enrollment,
+                        &runner_id,
+                        &run_id,
+                        since,
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(err) if err == "runner_access_token_expired" => {
+                            refresh_enrollment_and_reconnect(
+                                &client,
+                                &mut enrollment,
+                                &mut runner_id,
+                                &start,
+                                &event_tx,
+                            )
+                            .await?;
+                            list_commands(&client, &enrollment, &runner_id, &run_id, since).await?
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    for listed in listed_commands {
                         let seq = listed.seq;
                         if !listed.ack_status.is_empty() {
                             if listed.ack_status == "accepted" {
-                                recover_run(
+                                let rr = recover_run(
                                     &client,
                                     &enrollment,
                                     &runner_id,
                                     &run_id,
                                     "accepted command has no terminal acknowledgement after runner restart",
-                                ).await?;
+                                )
+                                .await;
+                                if let Err(err) = rr {
+                                    if err == "runner_access_token_expired" {
+                                        refresh_enrollment_and_reconnect(
+                                            &client,
+                                            &mut enrollment,
+                                            &mut runner_id,
+                                            &start,
+                                            &event_tx,
+                                        )
+                                        .await?;
+                                        recover_run(
+                                            &client,
+                                            &enrollment,
+                                            &runner_id,
+                                            &run_id,
+                                            "accepted command has no terminal acknowledgement after runner restart",
+                                        )
+                                        .await?;
+                                    } else {
+                                        return Err(err);
+                                    }
+                                }
                             }
                             command_cursor.insert(run_id.clone(), seq);
                             continue;
@@ -773,14 +899,38 @@ async fn relay_worker(
                             }
                         } else {
                             delivered.insert(key, fingerprint);
-                            upload_command_accepted(
+                            let up = upload_command_accepted(
                                 &client,
                                 &enrollment,
                                 &runner_id,
                                 &run_id,
                                 seq,
                                 &command,
-                            ).await?;
+                            )
+                            .await;
+                            if let Err(err) = up {
+                                if err == "runner_access_token_expired" {
+                                    refresh_enrollment_and_reconnect(
+                                        &client,
+                                        &mut enrollment,
+                                        &mut runner_id,
+                                        &start,
+                                        &event_tx,
+                                    )
+                                    .await?;
+                                    upload_command_accepted(
+                                        &client,
+                                        &enrollment,
+                                        &runner_id,
+                                        &run_id,
+                                        seq,
+                                        &command,
+                                    )
+                                    .await?;
+                                } else {
+                                    return Err(err);
+                                }
+                            }
                             event_tx.send(RemoteEvent::Command {
                                 run_id: run_id.clone(),
                                 seq,
@@ -1269,8 +1419,7 @@ async fn runner_request(
         response.status(),
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
     ) {
-        delete_persisted_enrollment();
-        return Err("The remote-control enrollment was revoked.".to_string());
+        return Err("runner_access_token_expired".to_string());
     }
     if !response.status().is_success() {
         return Err(format!(
@@ -1389,6 +1538,30 @@ fn save_persisted_enrollment(enrollment: &PersistedEnrollment) -> Result<(), Str
 fn delete_persisted_enrollment() {
     if let Err(error) = codewhale_secrets::Secrets::auto_detect().delete(ENROLLMENT_SECRET_SLOT) {
         tracing::warn!("could not delete revoked remote-control enrollment: {error}");
+    }
+}
+
+async fn refresh_enrollment_and_reconnect(
+    client: &Client,
+    enrollment: &mut LiveEnrollment,
+    runner_id: &mut String,
+    start: &RemoteStart,
+    event_tx: &mpsc::UnboundedSender<RemoteEvent>,
+) -> Result<(), String> {
+    let base = enrollment.persisted.control_plane_base.clone();
+    match refresh_enrollment(client, enrollment.persisted.clone()).await {
+        Ok(new_enrollment) => {
+            *enrollment = new_enrollment;
+            *runner_id = connect_runner(client, enrollment, start).await?;
+            Ok(())
+        }
+        Err(err) if err == "runner_enrollment_revoked" => {
+            delete_persisted_enrollment();
+            *enrollment = enroll_device(client, &base, start, event_tx).await?;
+            *runner_id = connect_runner(client, enrollment, start).await?;
+            Ok(())
+        }
+        Err(err) => Err(err),
     }
 }
 

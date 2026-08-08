@@ -193,10 +193,6 @@ async function main() {
       cwd: installDir,
       env,
     });
-    await runCommand("npx", ["--no-install", "codewhale-tui", "--help"], {
-      cwd: installDir,
-      env,
-    });
 
     console.log(`npm wrapper smoke passed with local assets from ${served.baseUrl}`);
   } catch (error) {

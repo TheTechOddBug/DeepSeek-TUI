@@ -5,9 +5,10 @@
 #
 # Touches: Cargo.toml (workspace version), crates/*/Cargo.toml (internal
 # codewhale-* dependency pins), npm/codewhale/package.json (version +
-# codewhaleBinaryVersion), the root npm lock workspace record, the remote-smoke
-# default tag, README*.md install-tag examples when present, the public fact
-# matrix's source-candidate version, Cargo.lock, crates/tui/CHANGELOG.md (via
+# codewhaleBinaryVersion), npm/runtime-sdk/package.json, the VS Code extension
+# package and lock, the root npm lock workspace records, the remote-smoke default
+# tag, README*.md install-tag examples when present, the public fact matrix's
+# source-candidate version, Cargo.lock, crates/tui/CHANGELOG.md (via
 # sync-changelog.sh), and web/lib/facts.generated.ts (via derive-facts.mjs).
 #
 # It does NOT write the CHANGELOG entry — add the `## [X.Y.Z] - YYYY-MM-DD`
@@ -40,6 +41,9 @@ transaction_paths=(
   Cargo.lock
   package-lock.json
   npm/codewhale/package.json
+  npm/runtime-sdk/package.json
+  extensions/vscode/package.json
+  extensions/vscode/package-lock.json
   scripts/remote-smoke/setup-vm.sh
   docs/public-surface-facts.json
   docs/INSTALL.md
@@ -153,6 +157,20 @@ bump(
     2,
 )
 
+# The runtime SDK and VS Code extension are versioned release artifacts too.
+bump(
+    "npm/runtime-sdk/package.json",
+    rf'^(  "version": "){old_re}(",?)$',
+    rf"\g<1>{new}\g<2>",
+    1,
+)
+bump(
+    "extensions/vscode/package.json",
+    rf'^(  "version": "){old_re}(",?)$',
+    rf"\g<1>{new}\g<2>",
+    1,
+)
+
 # 4) README install-tag examples (all translations, when present).
 for readme in readmes:
     p = pathlib.Path(readme)
@@ -210,22 +228,67 @@ if pointer_hits:
     install.write_text(install_out)
     print(f"  docs/INSTALL.md: {pointer_hits} publish-pointer replacement(s)")
 
-# 6) Root npm lock workspace record. Keep the rest of the lock byte-stable.
+# 6) npm lock workspace records. Keep dependency records byte-stable.
 lock = pathlib.Path("package-lock.json")
 lock_text = lock.read_text()
-lock_out, lock_hits = re.subn(
+lock_out, wrapper_lock_hits = re.subn(
     rf'("npm/codewhale"\s*:\s*\{{[\s\S]*?"version"\s*:\s*"){old_re}(")',
     rf"\g<1>{new}\g<2>",
     lock_text,
     count=1,
 )
-if lock_hits != 1:
+if wrapper_lock_hits != 1:
     sys.exit(
         "error: expected package-lock.json packages['npm/codewhale'].version "
-        f"to be {old}; made {lock_hits} replacement(s)"
+        f"to be {old}; made {wrapper_lock_hits} replacement(s)"
+    )
+lock_out, sdk_lock_hits = re.subn(
+    rf'("npm/runtime-sdk"\s*:\s*\{{[\s\S]*?"version"\s*:\s*"){old_re}(")',
+    rf"\g<1>{new}\g<2>",
+    lock_out,
+    count=1,
+)
+if sdk_lock_hits != 1:
+    sys.exit(
+        "error: expected package-lock.json packages['npm/runtime-sdk'].version "
+        f"to be {old}; made {sdk_lock_hits} replacement(s)"
     )
 lock.write_text(lock_out)
-print("  package-lock.json: 1 npm workspace replacement")
+print("  package-lock.json: 2 npm workspace replacements")
+
+vscode_lock = pathlib.Path("extensions/vscode/package-lock.json")
+vscode_lock_text = vscode_lock.read_text()
+vscode_lock_json = json.loads(vscode_lock_text)
+if vscode_lock_json.get("version") != old:
+    sys.exit(
+        "error: extensions/vscode/package-lock.json root version is "
+        f"{vscode_lock_json.get('version')!r}; expected {old!r}"
+    )
+workspace_record = vscode_lock_json.get("packages", {}).get("", {})
+if workspace_record.get("version") != old:
+    sys.exit(
+        "error: extensions/vscode/package-lock.json packages[''].version is "
+        f"{workspace_record.get('version')!r}; expected {old!r}"
+    )
+vscode_lock_out, vscode_lock_hits = re.subn(
+    rf'("version"\s*:\s*"){old_re}(")',
+    rf"\g<1>{new}\g<2>",
+    vscode_lock_text,
+    count=2,
+)
+if vscode_lock_hits != 2:
+    sys.exit(
+        "error: expected two VS Code package-lock version replacements; "
+        f"made {vscode_lock_hits}"
+    )
+vscode_lock_after = json.loads(vscode_lock_out)
+if (
+    vscode_lock_after.get("version") != new
+    or vscode_lock_after.get("packages", {}).get("", {}).get("version") != new
+):
+    sys.exit("error: VS Code package-lock version replacement hit wrong records")
+vscode_lock.write_text(vscode_lock_out)
+print("  extensions/vscode/package-lock.json: 2 workspace replacements")
 
 # 7) Remote published-asset smoke defaults to the version being prepared.
 bump(

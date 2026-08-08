@@ -35,9 +35,8 @@ bundle() {
   local platform="$1"
   local cli_src="$2"
   local shim_src="$3"
-  local tui_src="$4"
-  local ext="$5"
-  local variant="$6"
+  local ext="$4"
+  local variant="$5"
 
   local stem="codewhale-${platform}${variant:+-}${variant}"
   local stage_root
@@ -47,24 +46,20 @@ bundle() {
 
   local cli_dst="codewhale"
   local shim_dst="codew"
-  local tui_dst="codewhale-tui"
   if [[ "${platform}" == windows-* ]]; then
     cli_dst="codewhale.exe"
     shim_dst="codew.exe"
-    tui_dst="codewhale-tui.exe"
   fi
 
   cp "${artifact_dir}/${cli_src}/${cli_src}" "${stage_dir}/${cli_dst}"
   cp "${artifact_dir}/${shim_src}/${shim_src}" "${stage_dir}/${shim_dst}"
-  cp "${artifact_dir}/${tui_src}/${tui_src}" "${stage_dir}/${tui_dst}"
 
   # actions/upload-artifact intentionally normalizes downloaded files to 0644.
   # Restore the executable contract before constructing Unix archives.
   if [[ "${platform}" != windows-* ]]; then
     chmod 0755 \
       "${stage_dir}/${cli_dst}" \
-      "${stage_dir}/${shim_dst}" \
-      "${stage_dir}/${tui_dst}"
+      "${stage_dir}/${shim_dst}"
   fi
 
   if [[ "${variant}" != "portable" ]]; then
@@ -107,23 +102,23 @@ bundle() {
 }
 
 bundle linux-x64 \
-  codewhale-linux-x64 codew-linux-x64 codewhale-tui-linux-x64 tar.gz ""
+  codewhale-linux-x64 codew-linux-x64 tar.gz ""
 bundle linux-arm64 \
-  codewhale-linux-arm64 codew-linux-arm64 codewhale-tui-linux-arm64 tar.gz ""
+  codewhale-linux-arm64 codew-linux-arm64 tar.gz ""
 bundle android-arm64 \
-  codewhale-android-arm64 codew-android-arm64 codewhale-tui-android-arm64 tar.gz ""
+  codewhale-android-arm64 codew-android-arm64 tar.gz ""
 bundle macos-x64 \
-  codewhale-macos-x64 codew-macos-x64 codewhale-tui-macos-x64 tar.gz ""
+  codewhale-macos-x64 codew-macos-x64 tar.gz ""
 bundle macos-arm64 \
-  codewhale-macos-arm64 codew-macos-arm64 codewhale-tui-macos-arm64 tar.gz ""
+  codewhale-macos-arm64 codew-macos-arm64 tar.gz ""
 bundle windows-x64 \
-  codewhale-windows-x64.exe codew-windows-x64.exe codewhale-tui-windows-x64.exe zip ""
+  codewhale-windows-x64.exe codew-windows-x64.exe zip ""
 bundle windows-x64 \
-  codewhale-windows-x64.exe codew-windows-x64.exe codewhale-tui-windows-x64.exe zip portable
+  codewhale-windows-x64.exe codew-windows-x64.exe zip portable
 bundle windows-arm64 \
-  codewhale-windows-arm64.exe codew-windows-arm64.exe codewhale-tui-windows-arm64.exe zip ""
+  codewhale-windows-arm64.exe codew-windows-arm64.exe zip ""
 bundle windows-arm64 \
-  codewhale-windows-arm64.exe codew-windows-arm64.exe codewhale-tui-windows-arm64.exe zip portable
+  codewhale-windows-arm64.exe codew-windows-arm64.exe zip portable
 
 sort -o "${manifest}" "${manifest}"
 echo "Bundle checksum manifest:"

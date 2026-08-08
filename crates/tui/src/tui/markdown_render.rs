@@ -126,7 +126,7 @@ static COLOR_DEPTH: OnceLock<palette::ColorDepth> = OnceLock::new();
 static PALETTE_MODE: OnceLock<palette::PaletteMode> = OnceLock::new();
 
 fn syntax_set() -> &'static SyntaxSet {
-    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_nonewlines)
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 fn theme_set() -> &'static ThemeSet {

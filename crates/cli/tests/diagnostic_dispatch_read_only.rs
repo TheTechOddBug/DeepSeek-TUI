@@ -1,9 +1,15 @@
-//! The facade must not migrate secrets before it delegates static diagnostics.
+//! Diagnostic dispatch (`doctor`, `setup --status`) runs the real in-process
+//! TUI entry via `run_tui_in_process` — the single `codewhale` binary calls
+//! `codewhale_tui::run` directly, so there is no sibling TUI binary to delegate
+//! to anymore (#5259 single-binary argv0 dispatch). These invariants stay: the
+//! dispatcher must not migrate legacy secrets, must not rewrite legacy
+//! settings, and must not create any state under a sealed HOME when running a
+//! read-only diagnostic. `doctor --context-json` must still emit a
+//! machine-readable context source map (`{"entries":[...]}`).
 
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,20 +17,14 @@ use codewhale_secrets::{FileKeyringStore, KeyringStore};
 use tempfile::TempDir;
 
 #[test]
-fn dispatcher_diagnostics_leave_legacy_secret_state_unchanged() {
-    for (args, expected_tui_args, expects_json) in [
-        (&["doctor"][..], &["doctor"][..], false),
-        (&["doctor", "--json"][..], &["doctor", "--json"][..], false),
-        (
-            &["doctor", "--context-json"][..],
-            &["doctor", "--context-json"][..],
-            true,
-        ),
-        (
-            &["setup", "--status"][..],
-            &["setup", "--status"][..],
-            false,
-        ),
+fn dispatcher_diagnostics_are_in_process_and_read_only() {
+    // (cli args, whether stdout must be a JSON object carrying an `entries`
+    // array). Only `doctor --context-json` carries the context source map.
+    for (args, expects_entries_json) in [
+        (&["doctor"][..], false),
+        (&["doctor", "--json"][..], false),
+        (&["doctor", "--context-json"][..], true),
+        (&["setup", "--status"][..], false),
     ] {
         let fixture = TempDir::new().expect("fixture root");
         let sealed_home = fixture.path().join("sealed-home");
@@ -43,19 +43,10 @@ fn dispatcher_diagnostics_leave_legacy_secret_state_unchanged() {
         let before_paths = relative_paths(&sealed_home);
         let before_legacy = fs::read(&legacy).expect("read synthetic legacy store");
 
-        let receipt = fixture.path().join("delegated-args.txt");
-        let fake_tui = fixture.path().join("fake-codewhale-tui");
-        fs::write(
-            &fake_tui,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DIAGNOSTIC_DISPATCH_RECEIPT\"\nif [ \"$1\" = doctor ] && [ \"$2\" = --context-json ]; then\n  printf '%s\\n' '{\"entries\":[]}'\nfi\n",
-        )
-        .expect("write fake TUI");
-        let mut permissions = fs::metadata(&fake_tui)
-            .expect("fake TUI metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&fake_tui, permissions).expect("make fake TUI executable");
-
+        // The diagnostic runs entirely in-process: the single `codewhale` binary
+        // dispatches through `run_tui_in_process` -> `codewhale_tui::run`. No
+        // `DEEPSEEK_TUI_BIN` sibling is spawned, so there is no receipt to read;
+        // assert the in-process behavior and the read-only invariants instead.
         let output = Command::new(codewhale_binary())
             .args(args)
             .env_clear()
@@ -63,8 +54,6 @@ fn dispatcher_diagnostics_leave_legacy_secret_state_unchanged() {
             .env("USERPROFILE", &sealed_home)
             .env("CODEWHALE_HOME", &codewhale_home)
             .env("CODEWHALE_SECRET_BACKEND", "file")
-            .env("DEEPSEEK_TUI_BIN", &fake_tui)
-            .env("DIAGNOSTIC_DISPATCH_RECEIPT", &receipt)
             .output()
             .expect("run dispatcher diagnostic");
 
@@ -74,29 +63,23 @@ fn dispatcher_diagnostics_leave_legacy_secret_state_unchanged() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            fs::read_to_string(&receipt)
-                .expect("fake TUI receipt")
-                .lines()
-                .collect::<Vec<_>>(),
-            expected_tui_args,
-            "dispatcher must preserve the diagnostic command shape"
-        );
-        if expects_json {
+
+        if expects_entries_json {
             let report: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .unwrap_or_else(|error| {
                     panic!(
-                        "facade {args:?} must preserve machine-readable output: {error}\nstdout:\n{}\nstderr:\n{}",
+                        "doctor --context-json must emit a machine-readable context source map: {error}\nstdout:\n{}\nstderr:\n{}",
                         String::from_utf8_lossy(&output.stdout),
                         String::from_utf8_lossy(&output.stderr)
                     )
                 });
             assert!(
                 report["entries"].is_array(),
-                "facade {args:?} must preserve the context source map\nstdout:\n{}",
+                "doctor --context-json must carry an `entries` array\nstdout:\n{}",
                 String::from_utf8_lossy(&output.stdout)
             );
         }
+
         assert_eq!(
             relative_paths(&sealed_home),
             before_paths,

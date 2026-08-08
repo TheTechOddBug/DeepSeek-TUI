@@ -2314,12 +2314,32 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
     ] {
         let prompt = agent_type.system_prompt();
         assert!(prompt.contains(marker));
+        // Every role shares the parseable output-contract spine exactly once.
         assert_eq!(
-            prompt.matches("## Output contract (mandatory)").count(),
+            prompt.matches("## Output contract").count(),
             1,
-            "{agent_type:?} prompt should include the shared output contract exactly once"
+            "{agent_type:?} prompt should include exactly one output contract"
         );
-        assert!(prompt.contains("### SUMMARY") && prompt.contains("### BLOCKERS"));
+        assert!(prompt.contains("### SUMMARY"));
+        if matches!(agent_type, FleetRole::Scout) {
+            // #5189 F5: scouts are read-only explorers and get a scaled-down
+            // contract (SUMMARY+EVIDENCE) that drops CHANGES/RISKS/BLOCKERS.
+            assert!(
+                prompt.contains("## Output contract (scout)"),
+                "{agent_type:?} should use the scaled-down scout contract"
+            );
+            assert!(
+                !prompt.contains("### BLOCKERS"),
+                "{agent_type:?} scout contract drops BLOCKERS ceremony"
+            );
+        } else {
+            assert_eq!(
+                prompt.matches("## Output contract (mandatory)").count(),
+                1,
+                "{agent_type:?} prompt should include the shared output contract exactly once"
+            );
+            assert!(prompt.contains("### SUMMARY") && prompt.contains("### BLOCKERS"));
+        }
     }
 }
 
@@ -2341,6 +2361,15 @@ fn explore_prompt_is_quick_bounded_and_read_only() {
     assert!(prompt.contains("ALREADY_KNOWN"));
     assert!(prompt.contains("STOP_CONDITION"));
     assert!(prompt.contains("Return partial findings"));
+    assert!(prompt.contains("private `todo_write` list as editable working notes"));
+    assert!(prompt.contains("not permission to write project files"));
+    assert!(prompt.contains("complete transcript artifact"));
+    assert!(prompt.contains("advertised direct-argv evidence subset"));
+    assert!(prompt.contains("`git log -n 5`"));
+    assert!(!prompt.contains("use RLM"));
+    let reviewer = FleetRole::Reviewer.system_prompt();
+    assert!(reviewer.contains("direct-argv navigation/rg"));
+    assert!(reviewer.contains("shell control actions are unavailable"));
 }
 
 #[test]
@@ -2354,9 +2383,7 @@ fn implementer_prompt_is_not_forced_into_explorer_cap() {
 #[test]
 fn role_prompts_use_canonical_file_action_contract() {
     let explore = FleetRole::Scout.system_prompt();
-    assert!(
-        explore.contains("`File` with actions `list`, `search_name`, `search_content`, and `read`")
-    );
+    assert!(explore.contains("Use `File` for bounded reads"));
 
     let implementer = FleetRole::Builder.system_prompt();
     assert!(implementer.contains("`File` action `read`"));
@@ -2385,7 +2412,20 @@ fn review_and_verifier_prompts_stop_after_decisive_evidence() {
     let review = FleetRole::Reviewer.system_prompt();
     let verifier = FleetRole::Verifier.system_prompt();
     assert!(review.contains("stop after decisive evidence"));
+    assert!(review.contains("private `todo_write` list as editable working notes"));
     assert!(verifier.contains("stop after decisive pass/fail evidence"));
+}
+
+#[test]
+fn child_artifact_copy_surfaces_working_notes_in_the_complete_transcript() {
+    let artifacts = default_subagent_artifacts("agent_scout_notes");
+    let transcript = artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "transcript")
+        .expect("complete transcript artifact");
+    assert_eq!(transcript.target, "agent:agent_scout_notes");
+    assert!(transcript.description.contains("todo_write working notes"));
+    assert!(transcript.description.contains("transcript_handle"));
 }
 
 #[test]
@@ -5950,6 +5990,14 @@ fn seed_recon_deny_list(runtime: &mut SubAgentRuntime) {
         .iter()
         .chain(MUTATING_TOOL_DENYLIST.iter())
     {
+        if *rule == "Bash"
+            && matches!(
+                &runtime.worker_profile.role,
+                FleetRole::Scout | FleetRole::Reviewer
+            )
+        {
+            continue;
+        }
         if !runtime
             .worker_profile
             .denied_tools
@@ -5968,6 +6016,7 @@ fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     runtime.context.auto_approve = true;
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
     // The real spawn threads the clamp's deny list into the child profile
     // (write:false => raw shell + mutating surface denied); model it so the
     // catalog assertion matches what a real scout lane sees.
@@ -5982,30 +6031,246 @@ fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
 
     let tools = registry.tools_for_model(&FleetRole::Scout);
     let names = tool_names(tools.clone());
-    for name in ["File", "Git", "Web", "web.run"] {
+    for name in ["File", "Web", "web.run", "Bash", "todo_write"] {
         assert!(names.contains(name), "Explore should inherit {name}");
     }
     for name in [
-        "Bash",
         "write_file",
         "edit_file",
         "apply_patch",
         "fim_edit",
         "exec_shell",
         "task_shell_start",
+        "Git",
+        "review",
+        "Run",
     ] {
         assert!(!names.contains(name), "Explore must hide {name}");
     }
-    // Recon posture keeps the bounded verification surface: raw shell stays
-    // denied (write=false), but the canonical `Run` verification gate
-    // survives the clamp because the shell posture is Full. (`run_tests` /
-    // `run_verifiers` are retired names from the canonical-action cutover.)
-    assert!(names.contains("Run"), "Explore should inherit Run");
+    // Recon keeps canonical Bash only for classifier-proven read commands;
+    // every background/terminal alias, build/test runner, and mutation
+    // primitive stays hidden.
     let file = tools.iter().find(|tool| tool.name == "File").unwrap();
     assert_eq!(
         file.input_schema["properties"]["action"]["enum"],
         json!(["read", "list", "search_name", "search_content"])
     );
+}
+
+#[tokio::test]
+async fn ordinary_scout_catalog_and_dispatch_keep_only_readonly_bash() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    let todo_list = crate::tools::todo::new_shared_todo_list();
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Scout,
+        None,
+        todo_list.clone(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+
+    let tools = registry.tools_for_model(&FleetRole::Scout);
+    let names = tool_names(tools.clone());
+    let expected = [
+        "Bash",
+        "File",
+        "Web",
+        "agent",
+        "handle_read",
+        "load_skill",
+        "retrieve_tool_result",
+        "todo_write",
+        "web.run",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        names, expected,
+        "Scout catalog must be the evidence profile"
+    );
+    let bash = tools.iter().find(|tool| tool.name == "Bash").unwrap();
+    assert_eq!(
+        bash.input_schema["properties"]["action"]["enum"],
+        json!(["run"])
+    );
+    for hidden in ["background", "tty", "stdin", "task_id", "wait"] {
+        assert!(
+            bash.input_schema["properties"].get(hidden).is_none(),
+            "{hidden}"
+        );
+    }
+    let web = tools.iter().find(|tool| tool.name == "Web").unwrap();
+    assert_eq!(
+        web.input_schema["properties"]["action"]["enum"],
+        json!(["search", "fetch"])
+    );
+    assert_eq!(
+        registry.registry.context().shell_policy,
+        ShellPolicy::ReadOnly,
+        "the concrete Bash executor must keep the same read-only contract"
+    );
+    for command in ["pwd", "git status --short", "rg needle crates"] {
+        assert!(
+            registry
+                .envelope_refusal("Bash", &json!({"action": "run", "command": command}))
+                .is_none(),
+            "Scout should admit {command}"
+        );
+    }
+    for command in [
+        "git checkout -- src/lib.rs",
+        "git push origin main",
+        "gh issue close 5287",
+        "gh issue view 5287 > issue.txt",
+        "bash -lc 'git status'",
+    ] {
+        assert!(
+            registry
+                .envelope_refusal("Bash", &json!({"action": "run", "command": command}))
+                .is_some(),
+            "Scout must refuse {command}"
+        );
+    }
+    let sentinel = "SCOUT_WORKSPACE_SENTINEL";
+    std::fs::write(tmp.path().join("scout-cwd-sentinel.txt"), sentinel).expect("sentinel fixture");
+    let output = registry
+        .execute(
+            "agent_scout",
+            "Bash",
+            json!({"action": "run", "command": "cat scout-cwd-sentinel.txt"}),
+        )
+        .await
+        .expect("ordinary Scout dispatches a bounded shell read");
+    assert_eq!(output, sentinel);
+    for (name, input) in [
+        ("Git", json!({"action": "status"})),
+        ("Run", json!({"action": "tests"})),
+        ("lsp", json!({"action": "definition", "path": "src/lib.rs"})),
+        ("diagnostics", json!({})),
+        ("verify", json!({})),
+    ] {
+        let error = registry
+            .execute("agent_scout", name, input)
+            .await
+            .expect_err("non-evidence process surface must stay outside recon")
+            .to_string();
+        assert!(
+            error.contains("hardened evidence boundary"),
+            "{name}: {error}"
+        );
+    }
+
+    registry
+        .execute(
+            "agent_scout",
+            "todo_write",
+            json!({
+                "todos": [{"content": "inspect issue evidence", "status": "in_progress"}]
+            }),
+        )
+        .await
+        .expect("Scout may revise its private working notes");
+    assert_eq!(
+        todo_contents(&todo_list).await,
+        vec!["inspect issue evidence"],
+        "the bounded notes write lands only in this child's todo list"
+    );
+    assert!(
+        registry
+            .envelope_refusal(
+                "File",
+                &json!({"action": "write", "path": "src/lib.rs", "content": "nope"})
+            )
+            .is_some(),
+        "agent-owned notes must not widen Scout workspace writes"
+    );
+}
+
+#[tokio::test]
+async fn scout_shell_respects_parent_shell_and_network_ceilings() {
+    let tmp = tempdir().expect("tempdir");
+    let mut shell_off =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    shell_off.context = ToolContext::new(tmp.path().to_path_buf());
+    shell_off.allow_shell = false;
+    shell_off.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    let shell_off = SubAgentToolRegistry::new(
+        shell_off,
+        FleetRole::Scout,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+    assert!(
+        !tool_names(shell_off.tools_for_model(&FleetRole::Scout)).contains("Bash"),
+        "a child cannot acquire shell when the parent disabled it"
+    );
+    assert!(
+        shell_off
+            .execute("agent_shell_off", "Bash", json!({"command": "pwd"}))
+            .await
+            .is_err(),
+        "the parent shell-off ceiling must also bind dispatch"
+    );
+
+    let mut network_off =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    network_off.context = ToolContext::new(tmp.path().to_path_buf());
+    network_off.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    network_off.worker_profile.permissions.network = false;
+    let network_off = SubAgentToolRegistry::new(
+        network_off,
+        FleetRole::Scout,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+    let error = network_off
+        .execute(
+            "agent_offline_scout",
+            "Bash",
+            json!({"action": "run", "command": "gh issue view 5287"}),
+        )
+        .await
+        .expect_err("network-off Scout must fail before spawning gh")
+        .to_string();
+    assert!(error.contains("no network capability"), "{error}");
+
+    for role in [
+        FleetRole::Planner,
+        FleetRole::Consultant,
+        FleetRole::Verifier,
+    ] {
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            role.clone(),
+            None,
+            crate::tools::todo::new_shared_todo_list(),
+            crate::tools::plan::new_shared_plan_state(),
+        );
+        assert!(
+            !tool_names(registry.tools_for_model(&role)).contains("Bash"),
+            "{role:?} must not inherit the Scout-only Bash catalog exception"
+        );
+        if role == FleetRole::Verifier {
+            assert!(
+                registry
+                    .execute("agent_verifier", "Bash", json!({"command": "pwd"}))
+                    .await
+                    .is_err(),
+                "Verifier keeps bounded Run, never arbitrary Bash"
+            );
+        }
+    }
 }
 
 #[test]
@@ -6082,8 +6347,9 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
         FleetRole::Verifier,
     ] {
         let mut role_runtime = runtime.clone();
+        role_runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
         if matches!(
-            role,
+            &role,
             FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
         ) {
             // Model the clamp deny list for read-only roles, as the real
@@ -6123,20 +6389,24 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
                     "read-only role {role:?} keeps load_skill without gaining {denied}"
                 );
             }
-            // Verifier keeps raw shell authority; scout/reviewer carry the
-            // recon posture (full shell authority with the bounded
-            // verification surface, raw shell still denied by the clamp);
-            // planner stays shell-less. Raw shell names stay denied for
-            // every read-only role.
-            if !matches!(role, FleetRole::Verifier) {
-                for denied in ["exec_shell", "task_shell_start", "Bash"] {
+            // Scout/reviewer expose only canonical Bash, whose concrete calls
+            // are reclassified. Planner is shell-less; verifier keeps its
+            // bounded Run surface but not raw Bash.
+            if matches!(&role, FleetRole::Scout | FleetRole::Reviewer) {
+                assert!(names.contains("Bash"), "{role:?} keeps read-only Bash");
+                for denied in ["exec_shell", "task_shell_start"] {
                     assert!(
                         !names.contains(denied),
                         "read-only role {role:?} keeps load_skill without gaining {denied}"
                     );
                 }
+            } else {
+                assert!(
+                    !names.contains("Bash"),
+                    "read-only role {role:?} must not gain Bash"
+                );
             }
-            if matches!(role, FleetRole::Planner) {
+            if matches!(&role, FleetRole::Planner) {
                 assert!(
                     !names.contains("Run"),
                     "planner must not gain the verification surface"
@@ -7979,12 +8249,17 @@ fn git_repo_root_discovers_one_level_nested_repo_from_harness() {
 
 #[test]
 fn git_repo_root_reports_attempted_paths_when_no_repo_found() {
-    let repo_root = git_repo_root(&std::env::current_dir().expect("current dir"))
-        .expect("test should run inside the checkout");
+    // Use the system temp dir rather than the checkout's parent: a checkout
+    // nested inside another repository (for example a workspace repo that
+    // contains sibling checkouts) would otherwise make the harness itself
+    // resolve to that parent repo and never exercise the no-repository path.
     let harness = TempDirBuilder::new()
         .prefix(".codewhale-no-repo-")
-        .tempdir_in(repo_root.parent().expect("repo parent"))
-        .expect("empty harness outside checkout");
+        .tempdir_in(std::env::temp_dir())
+        .expect("empty harness outside any repository");
+    // Keep the probe beyond `git_repo_root`'s parent-search limit so the walk
+    // terminates inside the temp region instead of reaching `/` (mirrors the
+    // sibling no-repo worktree test).
     let empty = harness
         .path()
         .join("isolated")
@@ -9206,7 +9481,7 @@ async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
         )
         .await
         .expect_err("read-only General must not receive mutating shell");
-    assert!(shell_error.to_string().contains("not permitted"));
+    assert!(shell_error.to_string().contains("not registered"));
     assert!(!tmp.path().join("forbidden.txt").exists());
     assert!(!tmp.path().join("shell.txt").exists());
 }
@@ -13792,7 +14067,7 @@ fn subagent_tool_results_spill_to_disk_and_stay_bounded_inline() {
         assert!(inline.contains("full output at"));
         assert!(inline.contains(crate::tools::truncate::SPILLOVER_RECOVERY_HINT));
         assert!(inline.contains("\n…\n"));
-        assert!(inline.contains(&path.display().to_string()));
+        assert!(inline.contains(&crate::artifacts::format_artifact_relative_path(&path)));
         assert!(!inline.contains("Exact evidence retained"));
         assert!(inline.contains("retrieve_tool_result"), "{inline}");
         // Full output remains recoverable from disk.
@@ -14962,6 +15237,10 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
         (
             "nested",
             json!({"source": {"url": "wss://socket.test/stream"}}),
+        ),
+        (
+            "Bash",
+            json!({"action": "run", "command": "gh issue view 5287"}),
         ),
     ] {
         assert!(

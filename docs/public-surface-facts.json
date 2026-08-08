@@ -20,7 +20,7 @@
     ]
   },
   "sourceCandidate": {
-    "version": "0.9.4",
+    "version": "0.9.5",
     "providerCount": 40,
     "toolCount": 69,
     "sandboxBackends": [
@@ -35,10 +35,10 @@
     ]
   },
   "latestPublishedRelease": {
-    "tag": "v0.9.3",
-    "version": "0.9.3",
-    "publishedAt": "2026-07-31T15:04:14Z",
-    "url": "https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.3",
+    "tag": "v0.9.5",
+    "version": "0.9.5",
+    "publishedAt": "2026-08-08T16:39:59Z",
+    "url": "https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.5",
     "sources": [
       "web/data/latest-published-release.json"
     ]
@@ -47,8 +47,7 @@
     "recommended": "npm install -g codewhale",
     "binaries": [
       "codewhale",
-      "codew",
-      "codewhale-tui"
+      "codew"
     ],
     "channels": {
       "npm": "published releases only",
@@ -230,11 +229,9 @@
     ],
     "requiredCandidateCredits": [
       "@SparkofSpike",
-      "@XhesicaFrost",
       "@aboimpinto",
-      "@shenjackyuanjie",
-      "@DracheTek",
-      "@MuRongMoQing"
+      "@bistack",
+      "@skyzhao1223"
     ]
   },
   "screenshot": {

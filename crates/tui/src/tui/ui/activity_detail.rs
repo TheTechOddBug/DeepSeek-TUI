@@ -583,6 +583,7 @@ pub(crate) fn detail_target_label(app: &App, cell_index: usize) -> Option<String
             ),
         ),
         HistoryCell::SubAgent(_) => Some("sub-agent".to_string()),
+        HistoryCell::Error { .. } => Some("full error message".to_string()),
         _ => None,
     }
 }
@@ -886,7 +887,11 @@ fn selected_item_context_line(app: &App) -> Option<String> {
             )
             .footer_chord,
         );
-        format!(" · {details} opens its raw detail")
+        if matches!(cell, HistoryCell::Error { .. }) {
+            format!(" · {details} opens the full error")
+        } else {
+            format!(" · {details} opens its raw detail")
+        }
     } else {
         String::new()
     };
@@ -1110,6 +1115,8 @@ fn timeline_cell_actions(app: &App, idx: usize, cell: &HistoryCell) -> Vec<Strin
         );
         if is_diff {
             actions.push(format!("{details} diff"));
+        } else if matches!(cell, HistoryCell::Error { .. }) {
+            actions.push(format!("{details} full error"));
         } else {
             actions.push(format!("{details} raw detail"));
         }

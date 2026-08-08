@@ -2292,13 +2292,16 @@ mod tests {
         .join("\n");
         assert!(review.contains("Overrides built-in 'reviewer'"), "{review}");
 
-        // "custom" matches no roster member: no override note anywhere.
+        // "custom" also matches a built-in roster member.
         let mut custom_view = FleetSetupView::from_snapshot(snapshot());
         for _ in 0..8 {
             custom_view.handle_key(key(KeyCode::Down));
         }
         assert_eq!(custom_view.selected_role(), "custom");
-        assert!(custom_view.roster_override_note().is_none());
+        assert_eq!(
+            custom_view.roster_override_note().as_deref(),
+            Some("Overrides built-in 'custom' unless a project profile exists.")
+        );
     }
 
     #[test]

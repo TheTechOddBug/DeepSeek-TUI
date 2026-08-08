@@ -25,6 +25,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use codewhale_config::{SetupState, TELEMETRY_NOTICE_VERSION};
@@ -61,6 +62,12 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(90);
 // ── Fixture ──────────────────────────────────────────────────────────────
 
 struct Fixture {
+    // The consolidated integration target runs tests in parallel. Each test in
+    // this module launches the full Codewhale binary, and low-resource CI
+    // runners can fail those children before they reach either loopback server.
+    // These tests exercise telemetry contracts, not launch concurrency, so one
+    // process fixture at a time keeps their non-vacuity assertions meaningful.
+    _process_test_guard: MutexGuard<'static, ()>,
     _root: TempDir,
     home: PathBuf,
     codewhale_home: PathBuf,
@@ -71,6 +78,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let process_test_guard = telemetry_process_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = TempDir::new().expect("fixture root");
         let home = root.path().join("home");
         let codewhale_home = root.path().join("codewhale-home");
@@ -81,6 +91,7 @@ impl Fixture {
         let config_path = root.path().join("config.toml");
         std::fs::write(&config_path, "").expect("write config");
         Self {
+            _process_test_guard: process_test_guard,
             _root: root,
             home,
             codewhale_home,
@@ -182,6 +193,11 @@ impl Fixture {
         out.push(self.config_path.clone());
         out
     }
+}
+
+fn telemetry_process_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(Mutex::default)
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -612,6 +628,7 @@ async fn batch_contains_no_planted_sentinel() {
     plant_sentinels(&fixture, &server.uri());
 
     let output = run_exec(&fixture, SENTINEL_PROMPT);
+    assert_exec_succeeded(&output, "sentinel payload run");
 
     assert!(
         model_request_count(&server).await > 0,
@@ -686,6 +703,8 @@ async fn a_hostile_buffer_line_never_reaches_a_batch() {
 
     let mut command = exec_command(&fixture, "hello");
     let mut child = command.spawn().expect("spawn codewhale-tui exec");
+    let stdout = read_in_background(child.stdout.take().expect("stdout pipe"));
+    let stderr = read_in_background(child.stderr.take().expect("stderr pipe"));
 
     let buffer = fixture.telemetry_root().join("buffer.jsonl");
     wait_until(Duration::from_secs(30), || buffer.exists());
@@ -716,10 +735,16 @@ async fn a_hostile_buffer_line_never_reaches_a_batch() {
         ],
     );
 
-    let _ = child
+    let status = child
         .wait_timeout(EXEC_TIMEOUT)
         .expect("wait for codewhale-tui exec")
         .expect("codewhale-tui exec must exit");
+    let output = Output {
+        status,
+        stdout: stdout.join().expect("stdout reader"),
+        stderr: stderr.join().expect("stderr reader"),
+    };
+    assert_exec_succeeded(&output, "hostile-buffer payload run");
 
     let batches = recorded_batches(&server).await;
     assert!(
@@ -760,10 +785,20 @@ async fn mid_session_opt_out_stops_the_shutdown_flush() {
     let mut command = exec_command(&fixture, "hello");
     let mut child = command.spawn().expect("spawn codewhale-tui exec");
 
-    // Wait until the session has armed and started buffering, then take the
-    // documented way out from outside the process.
+    // Wait until this session's event is actually buffered, then leave enough
+    // time for any accidental background flush to reach the recorder. Nothing
+    // may be sent before shutdown.
     let buffer = fixture.telemetry_root().join("buffer.jsonl");
-    wait_until(Duration::from_secs(30), || buffer.exists());
+    wait_until(Duration::from_secs(30), || {
+        std::fs::read_to_string(&buffer)
+            .map(|body| body.contains("\"event\":\"session_start\""))
+            .unwrap_or(false)
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_no_batches(&server, "before the shutdown flush").await;
+
+    // Now take the documented way out from outside the process. The only
+    // flush, at shutdown, must re-resolve this write and suppress the batch.
     fixture.write_config(&sentinel_config(&server.uri(), false));
 
     let status = child
@@ -998,6 +1033,16 @@ fn run_exec(fixture: &Fixture, prompt: &str) -> Output {
         stdout: stdout.join().expect("stdout reader"),
         stderr: stderr.join().expect("stderr reader"),
     }
+}
+
+fn assert_exec_succeeded(output: &Output, context: &str) {
+    assert!(
+        output.status.success(),
+        "{context} exited with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn read_in_background(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {

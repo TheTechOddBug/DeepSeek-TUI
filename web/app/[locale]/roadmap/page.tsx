@@ -22,7 +22,7 @@ const tracksEn = [
   {
     title: "Shipped",
     items: [
-      { title: "Canonical action tools", note: "Bash, File, Git, and Run; agent, remember, tasks, update_plan, work_update, and the synthetic tool_search complete the ten-name default-active policy. remember is present when built-in memory is enabled; Web is deferred and conditional." },
+      { title: "Canonical action tools", note: "Bash, File, Git, and Run; agent, remember, tasks, update_plan, todo_write, and the synthetic tool_search complete the ten-name default-active policy. remember is present when built-in memory is enabled; Web is deferred and conditional." },
       { title: "Sub-agent parallel execution", note: "agent; 64 concurrent sessions by default, configurable to 128, with bounded result handles" },
       { title: "RLM batched processing", note: "Persistent sandboxed Python REPL with 1–16 cheap parallel children for long-input analysis" },
       { title: "Three operating modes", note: "Plan (read-only), Act (execution), Operate (Fleet/Workflow orchestration); orthogonal Ask / Auto-Review / Full Access posture" },
@@ -81,7 +81,7 @@ const tracksZh = [
   {
     title: "已完成",
     items: [
-      { title: "Canonical action 工具", note: "Bash、File、Git、Run、agent、remember、tasks、update_plan、work_update 与 synthetic tool_search 构成十个默认启用名称；remember 在启用内置记忆时出现，Web 按条件延迟加载" },
+      { title: "Canonical action 工具", note: "Bash、File、Git、Run、agent、remember、tasks、update_plan、todo_write 与 synthetic tool_search 构成十个默认启用名称；remember 在启用内置记忆时出现，Web 按条件延迟加载" },
       { title: "子 Agent 并行执行", note: "agent；默认 64 个并发会话，可配置到 128 个，通过 var_handle 有界读取结果" },
       { title: "RLM 批量处理", note: "持久沙箱 Python REPL，支持 1–16 路廉价并行子调用，处理长文本分析" },
       { title: "三种运行模式", note: "Plan（只读调查）、Act（执行）与 Operate（Fleet / Workflow 编排）；Ask、Auto-Review 与 Full Access 权限姿态独立设置" },

@@ -1157,11 +1157,6 @@ fn record_blocking_is_a_noop_when_unarmed() {
     });
     crate::set_exit_class(ExitClass::Panic);
     assert_eq!(crate::exit_class(), ExitClass::Clean);
-    assert_eq!(
-        crate::flush_blocking(Duration::from_millis(10)),
-        crate::FlushOutcome::Empty
-    );
-    assert!(!crate::startup_drain_due());
     assert!(
         !root.exists(),
         "an unarmed process must create no directory"

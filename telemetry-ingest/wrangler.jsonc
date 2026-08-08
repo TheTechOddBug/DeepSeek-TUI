@@ -20,8 +20,7 @@
 
   // Per-install rate limiting. Keyed on `install_id` from the validated batch
   // body — never on a network address. 20 POSTs per 60s is generous against the
-  // client's two flush points per session (a startup drain at most once every
-  // six hours, and one bounded attempt at shutdown).
+  // client's single bounded flush attempt at shutdown.
   "ratelimits": [
     {
       "name": "RATE_LIMITER",

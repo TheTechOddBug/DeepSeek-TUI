@@ -10,11 +10,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 src_dir="${1:-${repo_root}/target/release}"
 
-if [[ ! -x "${src_dir}/codewhale" || ! -x "${src_dir}/codew" || ! -x "${src_dir}/codewhale-tui" ]]; then
-  echo "ERROR: expected executable codewhale, codew, and codewhale-tui in ${src_dir}" >&2
+if [[ ! -x "${src_dir}/codewhale" ]]; then
+  echo "ERROR: expected executable codewhale in ${src_dir}" >&2
   # Since #5245 local builds are unstamped ("(dev)"); a dogfood build must be
   # stamped explicitly or the identity check below will (correctly) refuse it.
-  echo "Build first: DEEPSEEK_BUILD_SHA=\$(git rev-parse HEAD) cargo build --release -p codewhale-cli -p codewhale-tui --locked" >&2
+  echo "Build first: DEEPSEEK_BUILD_SHA=\$(git rev-parse HEAD) cargo build --release -p codewhale-cli --locked" >&2
   exit 1
 fi
 
@@ -32,24 +32,20 @@ else
 fi
 
 cli_version="$("${src_dir}/codewhale" --version)"
-shim_version="$("${src_dir}/codew" --version)"
-tui_version="$("${src_dir}/codewhale-tui" --version)"
+shim_version="${cli_version}"
 short_sha="${source_sha:0:12}"
-if [[ "${cli_version}" != *"${short_sha}"* || "${shim_version}" != *"${short_sha}"* || "${tui_version}" != *"${short_sha}"* ]]; then
+if [[ "${cli_version}" != *"${short_sha}"* ]]; then
   echo "ERROR: release binaries do not embed current HEAD ${short_sha}" >&2
   echo "  codewhale: ${cli_version}" >&2
-  echo "  codew: ${shim_version}" >&2
-  echo "  codewhale-tui: ${tui_version}" >&2
   echo "Rebuild this checkout before installing:" >&2
-  echo "  DEEPSEEK_BUILD_SHA=\$(git rev-parse HEAD) cargo build --release -p codewhale-cli -p codewhale-tui --locked" >&2
+  echo "  DEEPSEEK_BUILD_SHA=\$(git rev-parse HEAD) cargo build --release -p codewhale-cli --locked" >&2
   exit 1
 fi
 cli_sha="$(shasum -a 256 "${src_dir}/codewhale" | awk '{print $1}')"
-shim_sha="$(shasum -a 256 "${src_dir}/codew" | awk '{print $1}')"
-tui_sha="$(shasum -a 256 "${src_dir}/codewhale-tui" | awk '{print $1}')"
+shim_sha="${cli_sha}"
 
 default_install_dirs="${HOME}/.cargo/bin:${HOME}/.local/bin"
-for command_name in codewhale codewhale-tui codew; do
+for command_name in codewhale codew; do
   if command_path="$(command -v "${command_name}" 2>/dev/null)" \
     && [[ "${command_path}" == "${HOME}/"* ]]; then
     command_dir="$(dirname "${command_path}")"
@@ -94,9 +90,8 @@ installed=()
 for dest in "${dest_dirs[@]}"; do
   mkdir -p "${dest}"
   install_binary "${src_dir}/codewhale" "${dest}/codewhale"
-  install_binary "${src_dir}/codew" "${dest}/codew"
-  install_binary "${src_dir}/codewhale-tui" "${dest}/codewhale-tui"
-  installed+=("${dest}/codewhale" "${dest}/codewhale-tui" "${dest}/codew")
+  install_binary "${src_dir}/codewhale" "${dest}/codew"
+  installed+=("${dest}/codewhale" "${dest}/codew")
 done
 
 verify_fresh_shell_binary() {
@@ -131,10 +126,8 @@ verify_fresh_shell_binary() {
 
 path_cli="$(verify_fresh_shell_binary codewhale)"
 path_shim="$(verify_fresh_shell_binary codew)"
-path_tui="$(verify_fresh_shell_binary codewhale-tui)"
 installed_cli_sha="$(shasum -a 256 "${path_cli}" | awk '{print $1}')"
 installed_shim_sha="$(shasum -a 256 "${path_shim}" | awk '{print $1}')"
-installed_tui_sha="$(shasum -a 256 "${path_tui}" | awk '{print $1}')"
 
 default_receipt_root="${HOME}/.codewhale/dogfood-receipts"
 if [[ -d "/Volumes/VIXinSSD/CW/backups" ]]; then
@@ -155,16 +148,12 @@ receipt="${receipt_root}/${timestamp}-${source_sha:0:12}.txt"
   echo "codew_version=${shim_version}"
   echo "codew_sha256=${shim_sha}"
   echo "installed_codew_sha256=${installed_shim_sha}"
-  echo "codewhale_tui_version=${tui_version}"
-  echo "codewhale_tui_sha256=${tui_sha}"
-  echo "installed_codewhale_tui_sha256=${installed_tui_sha}"
   echo "fresh_shell_codewhale=${path_cli}"
   echo "fresh_shell_codew=${path_shim}"
-  echo "fresh_shell_codewhale_tui=${path_tui}"
   printf 'installed_path=%s\n' "${installed[@]}"
 } >"${receipt}"
 
 echo "Installed ${source_identity}:"
 printf '  %s\n' "${installed[@]}"
 echo "Receipt: ${receipt}"
-echo "Fresh-shell check: zsh -lc 'type -a codew codewhale codewhale-tui; codew --version; codewhale-tui --version'"
+echo "Fresh-shell check: zsh -lc 'type -a codew codewhale; codew --version; codewhale --version'"

@@ -1,0 +1,112 @@
+# Hmbown.CodeWhale — winget singleton manifest for CodeWhale (single binary)
+# PackageIdentifier follows the publisher convention used by the Homebrew tap (Hmbown/deepseek-tui).
+# This file is the source of truth for winget-pkgs submission; see README.md for the update flow.
+# The single-binary release (v0.9.5+) ships only `codewhale` + `codew` per target — no `codewhale-tui` asset.
+
+PackageIdentifier: Hmbown.CodeWhale
+PackageVersion: 0.9.5
+DefaultLocale: en-US
+ManifestType: singleton
+ManifestVersion: 1.6.0
+
+Publisher: Hmbown
+PublisherUrl: https://github.com/Hmbown
+PublisherSupportUrl: https://github.com/Hmbown/CodeWhale/issues
+PackageName: CodeWhale
+PackageUrl: https://github.com/Hmbown/CodeWhale
+License: MIT
+LicenseUrl: https://github.com/Hmbown/CodeWhale/blob/main/LICENSE
+Copyright: Copyright (c) Hmbown
+ShortDescription: Terminal coding agent for supported hosted and local models
+Description: |
+  CodeWhale is a terminal coding agent that runs on your machine. The v0.9.5 single-binary
+  release ships one `codewhale` binary per target (plus the `codew` shim) across Linux x64 (musl),
+  Linux arm64, Android arm64, macOS x64/arm64, and Windows x64/arm64. See https://github.com/Hmbown/CodeWhale
+  for provider setup, Fleet workflows, and the full install guide (docs/INSTALL.md).
+Author: Hmbown
+Moniker: codewhale
+Tags:
+  - codewhale
+  - deepseek
+  - cli
+  - tui
+  - terminal
+  - ai
+  - coding-agent
+  - rust
+MinimumOSVersion: 10.0.0.0
+ReleaseNotes: https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.5
+ReleaseNotesUrl: https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.5
+InstallationNotes: |
+  The winget package installs the Windows binaries. For the NSIS installer (CodeWhaleSetup.exe)
+  the installer adds %LOCALAPPDATA%\Programs\CodeWhale\bin to the user PATH. For the portable
+  ZIP, winget extracts codewhale.exe and codew.exe side-by-side and adds the install location to PATH.
+  Verify checksums with codewhale-artifacts-sha256.txt from the same GitHub Release.
+Documentations:
+  - DocumentLabel: Install guide
+    DocumentUrl: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md
+  - DocumentLabel: Releases
+    DocumentUrl: https://github.com/Hmbown/CodeWhale/releases
+
+Installers:
+  # Preferred: NSIS installer for Windows x64 (per-user, no elevation, adds user PATH).
+  - Architecture: x64
+    InstallerType: nullsoft
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/CodeWhaleSetup.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    ProductCode: CodeWhale
+    UpgradeBehavior: install
+    FileExtensions:
+      - toml
+    ReleaseDate: 2026-08-07
+  # Portable ZIP fallback — same single binary (codewhale.exe + codew.exe). Used when NSIS is blocked
+  # by policy or for winget's portable install flow. NestedInstallerType is portable (no installer).
+  - Architecture: x64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-x64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-x64/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-x64/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07
+  - Architecture: x64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-x64-portable.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-x64-portable/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-x64-portable/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07
+  - Architecture: arm64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-arm64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-arm64/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-arm64/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07
+  - Architecture: arm64
+    InstallerType: zip
+    Scope: user
+    InstallerUrl: https://github.com/Hmbown/CodeWhale/releases/download/v0.9.5/codewhale-windows-arm64-portable.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: codewhale-windows-arm64-portable/codewhale.exe
+        PortableCommandAlias: codewhale
+      - RelativeFilePath: codewhale-windows-arm64-portable/codew.exe
+        PortableCommandAlias: codew
+    ReleaseDate: 2026-08-07

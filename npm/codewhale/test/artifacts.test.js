@@ -25,8 +25,8 @@ test("openharmony x64 resolves to linux x64 binaries", () => {
     const { detectBinaryNames } = require(ARTIFACTS_PATH);
     const result = detectBinaryNames();
     assert.equal(result.codewhale, "codewhale-linux-x64");
-    assert.equal(result.tui, "codewhale-tui-linux-x64");
     assert.equal(result.codew, "codew-linux-x64");
+    assert.equal(result.tui, undefined);
   });
 });
 
@@ -35,7 +35,6 @@ test("openharmony arm64 resolves to linux arm64 binaries", () => {
     const { detectBinaryNames } = require(ARTIFACTS_PATH);
     const result = detectBinaryNames();
     assert.equal(result.codewhale, "codewhale-linux-arm64");
-    assert.equal(result.tui, "codewhale-tui-linux-arm64");
     assert.equal(result.codew, "codew-linux-arm64");
   });
 });
@@ -45,7 +44,6 @@ test("android arm64 resolves to Termux-native Android assets", () => {
     const { detectBinaryNames } = require(ARTIFACTS_PATH);
     const result = detectBinaryNames();
     assert.equal(result.codewhale, "codewhale-android-arm64");
-    assert.equal(result.tui, "codewhale-tui-android-arm64");
     assert.equal(result.codew, "codew-android-arm64");
   });
 });
@@ -85,7 +83,6 @@ test("Windows arm64 resolves the complete native binary family", () => {
       platform: "win32",
       arch: "arm64",
       codewhale: "codewhale-windows-arm64.exe",
-      tui: "codewhale-tui-windows-arm64.exe",
       codew: "codew-windows-arm64.exe",
     });
   });
@@ -114,25 +111,30 @@ test("release asset inventory includes binaries, archives, installer, and manife
     BUNDLE_CHECKSUM_MANIFEST,
     CHECKSUM_MANIFEST,
     checksummedReleaseAssetNames,
+    LEGACY_TUI_BRIDGE_ASSET_NAMES,
     WINDOWS_INSTALLER_ASSET,
   } = require(ARTIFACTS_PATH);
   const assetNames = allAssetNames();
   const releaseAssetNames = allReleaseAssetNames();
   assert.ok(assetNames.includes("codewhale-windows-x64.exe"));
-  assert.ok(assetNames.includes("codewhale-tui-windows-x64.exe"));
   assert.ok(assetNames.includes("codew-windows-x64.exe"));
   assert.ok(assetNames.includes("codewhale.bat"));
   assert.ok(assetNames.includes("codewhale-windows-arm64.exe"));
-  assert.ok(assetNames.includes("codewhale-tui-windows-arm64.exe"));
   assert.ok(assetNames.includes("codew-windows-arm64.exe"));
   assert.ok(assetNames.includes("codewhale-android-arm64"));
-  assert.ok(assetNames.includes("codewhale-tui-android-arm64"));
   assert.ok(assetNames.includes("codew-android-arm64"));
+  assert.ok(!assetNames.includes("codewhale-tui-windows-x64.exe"));
+  assert.ok(!assetNames.includes("codewhale-tui-windows-arm64.exe"));
+  assert.ok(!assetNames.includes("codewhale-tui-android-arm64"));
   assert.ok(!assetNames.includes("codewhale-linux-riscv64"));
   assert.ok(releaseAssetNames.includes("codew-windows-x64.exe"));
   assert.ok(releaseAssetNames.includes("codewhale.bat"));
   assert.ok(releaseAssetNames.includes("codew-windows-arm64.exe"));
   assert.ok(releaseAssetNames.includes("codew-android-arm64"));
+  for (const bridgeAsset of LEGACY_TUI_BRIDGE_ASSET_NAMES) {
+    assert.ok(releaseAssetNames.includes(bridgeAsset));
+    assert.ok(!assetNames.includes(bridgeAsset));
+  }
   for (const bundle of BUNDLE_ASSET_NAMES) {
     assert.ok(releaseAssetNames.includes(bundle));
   }

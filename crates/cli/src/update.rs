@@ -40,7 +40,7 @@ pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Re
     let legacy_binary = is_legacy_binary(&current_exe);
     ensure_supported_release_target(std::env::consts::OS, std::env::consts::ARCH)?;
 
-    let targets = update_targets_for_exe(&current_exe);
+    let plan = update_plan_for_exe(&current_exe);
     let channel = ReleaseChannel::from_beta_flag(beta);
     let current_version = env!("CARGO_PKG_VERSION");
     let proxy = proxy_arg
@@ -119,58 +119,55 @@ pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Re
         }
     };
 
-    // Step 3: Download and verify every colocated binary in the install.
-    let mut downloads = Vec::new();
-    for target in &targets {
-        let asset = select_platform_asset(release, &target.asset_stem).with_context(|| {
-            format!(
-                "no asset found for platform {} in release {latest_tag}. \
-                     Available assets: {}",
-                target.asset_stem,
-                release
-                    .assets
-                    .iter()
-                    .map(|a| a.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+    // Step 3: Download and verify the sole implementation binary once. The
+    // installed `codew` and pre-0.9.5 `codewhale-tui` command paths are
+    // compatibility names for these exact bytes, not separate release assets.
+    let asset = select_platform_asset(release, &plan.asset_stem).with_context(|| {
+        format!(
+            "no asset found for platform {} in release {latest_tag}. \
+                 Available assets: {}",
+            plan.asset_stem,
+            release
+                .assets
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
 
-        println!("Downloading {}...", asset.name);
-        let bytes =
-            download_url(&asset.browser_download_url, proxy.as_ref()).with_context(|| {
-                format!(
-                    "failed to download {}\n{}",
-                    asset.name,
-                    update_network_fallback_hint()
-                )
-            })?;
+    println!("Downloading {}...", asset.name);
+    let bytes = download_url(&asset.browser_download_url, proxy.as_ref()).with_context(|| {
+        format!(
+            "failed to download {}\n{}",
+            asset.name,
+            update_network_fallback_hint()
+        )
+    })?;
 
-        if let Some(checksums) = &checksum_manifest {
-            let expected = checksums
-                .get(&asset.name)
-                .with_context(|| format!("checksum manifest is missing {}", asset.name))?;
-            let actual = sha256_hex(&bytes);
-            if !actual.eq_ignore_ascii_case(expected) {
-                bail!(
-                    "SHA256 mismatch for {}!\n  expected: {expected}\n  actual:   {actual}",
-                    asset.name
-                );
-            }
+    if let Some(checksums) = &checksum_manifest {
+        let expected = checksums
+            .get(&asset.name)
+            .with_context(|| format!("checksum manifest is missing {}", asset.name))?;
+        let actual = sha256_hex(&bytes);
+        if !actual.eq_ignore_ascii_case(expected) {
+            bail!(
+                "SHA256 mismatch for {}!\n  expected: {expected}\n  actual:   {actual}",
+                asset.name
+            );
         }
-
-        preflight_downloaded_binary(&asset.name, &bytes)?;
-        downloads.push((target.path.clone(), asset.name.clone(), bytes));
     }
+
+    preflight_downloaded_binary(&asset.name, &bytes)?;
 
     if checksum_manifest.is_some() {
         println!("SHA256 checksum verified.");
     }
 
-    // Step 4: Replace binaries only after all downloads and the primary
+    // Step 4: Replace command paths only after the download and the running
     // executable identity verify. The preflight happens before a colocated
-    // sibling can change, then the primary is checked again just in time.
-    replace_verified_downloads(&downloads, || {
+    // compatibility path can change, then the identity is checked just in time.
+    replace_verified_downloads(&plan.target_paths, &bytes, || {
         validate_primary_update_identity(&executable_identity)
     })?;
 
@@ -179,9 +176,9 @@ pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Re
          Updated binaries:\n{}\n\
          \n\
          Restart the application to use the new version.",
-        downloads
+        plan.target_paths
             .iter()
-            .map(|(path, asset, _)| format!("  - {} ({asset})", path.display()))
+            .map(|path| format!("  - {} ({})", path.display(), asset.name))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -524,7 +521,8 @@ fn validate_primary_update_identity(identity: &UpdateExecutableIdentity) -> Resu
 }
 
 fn replace_verified_downloads<F>(
-    downloads: &[(PathBuf, String, Vec<u8>)],
+    target_paths: &[PathBuf],
+    verified_bytes: &[u8],
     validate_primary_identity: F,
 ) -> Result<()>
 where
@@ -533,11 +531,12 @@ where
     // Fail before mutating a sibling if the primary pathname no longer names
     // the process image that initiated this update.
     validate_primary_identity()?;
-    for (path, _, bytes) in downloads.iter().rev() {
-        replace_binary_with_validation(path, bytes, || {
+    for path in target_paths.iter().rev() {
+        replace_binary_with_validation(path, verified_bytes, || {
             // Re-check after each temp file is fully staged and immediately
-            // before every destructive rename. This protects paired installs
-            // before the sibling as well as just in time for the primary.
+            // before every destructive rename. The running command is first
+            // in the plan and therefore replaced last, after its colocated
+            // compatibility names have received the same verified bytes.
             validate_primary_identity()
         })?;
     }
@@ -628,10 +627,11 @@ fn legacy_binary_message(current_exe: &Path) -> String {
         "\
 this binary ({exe}) is using the legacy deepseek/deepseek-tui command name.
 
-The package has been renamed to `codewhale`. This update will install canonical
-Codewhale binaries (`codewhale` and, when present, `codewhale-tui`) beside the
-legacy command when the install directory is writable. DeepSeek provider support
-is unchanged.
+The package has been renamed to `codewhale`. This update will install the
+canonical `codewhale` command and refresh any existing `codew` or
+`codewhale-tui` compatibility command from the same binary beside the legacy
+command when the install directory is writable.
+DeepSeek provider support is unchanged.
 
 If this update cannot write to the install directory, reinstall using your
 original install method:
@@ -644,13 +644,12 @@ original install method:
     cargo uninstall deepseek-tui-cli 2>/dev/null || true
     cargo uninstall deepseek-tui 2>/dev/null || true
     cargo install codewhale-cli --locked
-    cargo install codewhale-tui --locked
 
   Homebrew:
     brew upgrade deepseek-tui
 
   Manual binary:
-    download the matched codewhale and codewhale-tui assets from
+    download the matched codewhale asset from
     https://github.com/Hmbown/CodeWhale/releases/latest
 
 Once `codewhale` is on your PATH, run `codewhale update` for future updates.",
@@ -658,96 +657,79 @@ Once `codewhale` is on your PATH, run `codewhale update` for future updates.",
     )
 }
 
-pub(crate) fn binary_prefix_for_exe(current_exe: &Path) -> &'static str {
+fn command_name_for_exe(current_exe: &Path) -> String {
     let exe_name = current_exe
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("codewhale")
         .to_ascii_lowercase();
-    if exe_name.contains("codewhale-tui") || exe_name.contains("deepseek-tui") {
-        "codewhale-tui"
-    } else {
-        "codewhale"
-    }
+    exe_name
+        .strip_suffix(".exe")
+        .unwrap_or(&exe_name)
+        .to_string()
 }
 
-fn sibling_prefix_for(prefix: &str) -> &'static str {
-    if prefix == "codewhale-tui" {
-        "codewhale"
-    } else {
-        "codewhale-tui"
-    }
+fn command_path_beside(current_exe: &Path, command: &str) -> PathBuf {
+    current_exe.with_file_name(format!("{command}{}", std::env::consts::EXE_SUFFIX))
 }
 
-fn sibling_binary_path(current_exe: &Path, sibling_prefix: &str) -> PathBuf {
-    current_exe.with_file_name(format!("{sibling_prefix}{}", std::env::consts::EXE_SUFFIX))
-}
-
-fn canonical_binary_path_for_prefix(current_exe: &Path, prefix: &str) -> PathBuf {
-    if is_legacy_binary(current_exe) {
-        current_exe.with_file_name(format!("{prefix}{}", std::env::consts::EXE_SUFFIX))
-    } else {
+fn installed_command_path(current_exe: &Path, command: &str) -> PathBuf {
+    if command_name_for_exe(current_exe) == command {
         current_exe.to_path_buf()
-    }
-}
-
-fn legacy_binary_name_for_prefix(prefix: &str) -> &'static str {
-    if prefix == "codewhale-tui" {
-        "deepseek-tui"
     } else {
-        "deepseek"
+        command_path_beside(current_exe, command)
     }
 }
 
-fn legacy_sibling_binary_path(current_exe: &Path, sibling_prefix: &str) -> PathBuf {
-    current_exe.with_file_name(format!(
-        "{}{}",
-        legacy_binary_name_for_prefix(sibling_prefix),
-        std::env::consts::EXE_SUFFIX
-    ))
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
-fn should_update_sibling(
-    current_exe: &Path,
-    canonical_sibling: &Path,
-    sibling_prefix: &str,
-) -> bool {
-    canonical_sibling.exists()
-        || (is_legacy_binary(current_exe)
-            && legacy_sibling_binary_path(current_exe, sibling_prefix).exists())
+fn legacy_tui_command_exists_beside(current_exe: &Path) -> bool {
+    command_name_for_exe(current_exe) == "deepseek-tui"
+        || command_path_beside(current_exe, "deepseek-tui").exists()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UpdateTarget {
-    path: PathBuf,
+struct UpdatePlan {
+    target_paths: Vec<PathBuf>,
     asset_stem: String,
 }
 
-fn update_targets_for_exe(current_exe: &Path) -> Vec<UpdateTarget> {
-    let current_prefix = binary_prefix_for_exe(current_exe);
-    let mut targets = vec![UpdateTarget {
-        path: canonical_binary_path_for_prefix(current_exe, current_prefix),
+fn update_plan_for_exe(current_exe: &Path) -> UpdatePlan {
+    let mut target_paths = Vec::new();
+
+    // Keep the process image first so reverse-order replacement updates the
+    // command currently running the updater last. Pre-rebrand command names
+    // retain their historical migration behavior: install canonical commands
+    // beside them instead of overwriting the legacy path.
+    if !is_legacy_binary(current_exe) {
+        push_unique_path(&mut target_paths, current_exe.to_path_buf());
+    }
+
+    let primary = installed_command_path(current_exe, "codewhale");
+    push_unique_path(&mut target_paths, primary);
+
+    for alias in ["codew", "codewhale-tui"] {
+        let alias_path = installed_command_path(current_exe, alias);
+        let migrate_legacy_tui = alias == "codewhale-tui"
+            && is_legacy_binary(current_exe)
+            && legacy_tui_command_exists_beside(current_exe);
+        if alias_path.exists() || command_name_for_exe(current_exe) == alias || migrate_legacy_tui {
+            push_unique_path(&mut target_paths, alias_path);
+        }
+    }
+
+    UpdatePlan {
+        target_paths,
         asset_stem: release_asset_stem_for_prefix(
-            current_prefix,
+            "codewhale",
             std::env::consts::OS,
             std::env::consts::ARCH,
         ),
-    }];
-
-    let sibling_prefix = sibling_prefix_for(current_prefix);
-    let sibling = sibling_binary_path(current_exe, sibling_prefix);
-    if should_update_sibling(current_exe, &sibling, sibling_prefix) {
-        targets.push(UpdateTarget {
-            path: sibling,
-            asset_stem: release_asset_stem_for_prefix(
-                sibling_prefix,
-                std::env::consts::OS,
-                std::env::consts::ARCH,
-            ),
-        });
     }
-
-    targets
 }
 
 fn release_asset_stem_for_prefix(prefix: &str, os: &str, rust_arch: &str) -> String {
@@ -766,8 +748,8 @@ fn release_asset_name_for_prefix(prefix: &str, os: &str, rust_arch: &str) -> Str
 
 #[cfg(test)]
 fn release_asset_stem_for(current_exe: &Path, os: &str, rust_arch: &str) -> String {
-    let prefix = binary_prefix_for_exe(current_exe);
-    release_asset_stem_for_prefix(prefix, os, rust_arch)
+    let _ = current_exe;
+    release_asset_stem_for_prefix("codewhale", os, rust_arch)
 }
 
 pub(crate) fn asset_matches_platform(asset_name: &str, binary_name: &str) -> bool {
@@ -954,13 +936,11 @@ fn release_from_asset_base_url(
         browser_download_url: mirror_asset_url(base_url, CHECKSUM_MANIFEST_ASSET),
     }];
 
-    for prefix in ["codewhale", "codewhale-tui"] {
-        let name = release_asset_name_for_prefix(prefix, os, rust_arch);
-        assets.push(Asset {
-            browser_download_url: mirror_asset_url(base_url, &name),
-            name,
-        });
-    }
+    let name = release_asset_name_for_prefix("codewhale", os, rust_arch);
+    assets.push(Asset {
+        browser_download_url: mirror_asset_url(base_url, &name),
+        name,
+    });
 
     Release {
         tag_name: tag_name.to_string(),
@@ -1341,7 +1321,6 @@ Official Linux release binaries are GNU libc builds. Ubuntu 22.04 ships glibc
 Install from source on this host instead:
 
   cargo install codewhale-cli --locked
-  cargo install codewhale-tui --locked
 
 Release engineering follow-up: build Linux GNU assets against an older glibc
 baseline, or add a musl/static Linux asset. Set CODEWHALE_SKIP_GLIBC_CHECK=1 to
@@ -1527,7 +1506,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(resolved, executable.canonicalize().unwrap());
-        assert_eq!(update_targets_for_exe(&resolved)[0].path, resolved);
+        assert_eq!(update_plan_for_exe(&resolved).target_paths[0], resolved);
     }
 
     #[cfg(unix)]
@@ -1550,10 +1529,7 @@ mod tests {
 
         let resolved =
             resolve_android_loaded_executable_report(&maps, TEST_ANDROID_MARKER, &invoked).unwrap();
-        let target_paths = update_targets_for_exe(&resolved)
-            .into_iter()
-            .map(|target| target.path)
-            .collect::<Vec<_>>();
+        let target_paths = update_plan_for_exe(&resolved).target_paths;
 
         assert_eq!(
             target_paths,
@@ -1813,19 +1789,8 @@ mod tests {
         std::fs::write(&swapped_primary, b"externally swapped primary").unwrap();
         std::fs::rename(&swapped_primary, &primary).unwrap();
 
-        let downloads = vec![
-            (
-                primary.clone(),
-                "codewhale-android-arm64".to_string(),
-                b"downloaded primary".to_vec(),
-            ),
-            (
-                sibling.clone(),
-                "codewhale-tui-android-arm64".to_string(),
-                b"downloaded sibling".to_vec(),
-            ),
-        ];
-        let error = replace_verified_downloads(&downloads, || {
+        let target_paths = vec![primary.clone(), sibling.clone()];
+        let error = replace_verified_downloads(&target_paths, b"downloaded binary", || {
             resolve_android_loaded_executable_report(&maps, TEST_ANDROID_MARKER, &primary)
                 .map(|_| ())
         })
@@ -1859,20 +1824,9 @@ mod tests {
         write_test_executable(&swapped_primary);
         std::fs::write(&swapped_primary, b"externally swapped primary").unwrap();
 
-        let downloads = vec![
-            (
-                primary.clone(),
-                "codewhale-android-arm64".to_string(),
-                b"downloaded primary".to_vec(),
-            ),
-            (
-                sibling.clone(),
-                "codewhale-tui-android-arm64".to_string(),
-                b"downloaded sibling".to_vec(),
-            ),
-        ];
+        let target_paths = vec![primary.clone(), sibling.clone()];
         let validation_calls = Cell::new(0);
-        let error = replace_verified_downloads(&downloads, || {
+        let error = replace_verified_downloads(&target_paths, b"downloaded binary", || {
             let call = validation_calls.get() + 1;
             validation_calls.set(call);
             if call == 1 {
@@ -1910,13 +1864,9 @@ mod tests {
         write_test_executable(&swapped_primary);
         std::fs::write(&swapped_primary, b"externally swapped primary").unwrap();
 
-        let downloads = vec![(
-            primary.clone(),
-            "codewhale-android-arm64".to_string(),
-            b"downloaded primary".to_vec(),
-        )];
+        let target_paths = vec![primary.clone()];
         let validation_calls = Cell::new(0);
-        let error = replace_verified_downloads(&downloads, || {
+        let error = replace_verified_downloads(&target_paths, b"downloaded binary", || {
             let call = validation_calls.get() + 1;
             validation_calls.set(call);
             if call == 1 {
@@ -1949,58 +1899,25 @@ mod tests {
         );
     }
 
-    /// Verify binary prefix detection for dispatcher vs TUI binary.
+    /// Every command name resolves to the sole implementation asset.
     #[test]
-    fn test_binary_prefix_detection() {
-        // TUI binary should use codewhale-tui prefix
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("codewhale-tui")),
-            "codewhale-tui"
-        );
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("codewhale-tui.exe")),
-            "codewhale-tui"
-        );
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("CodeWhale-TUI.exe")),
-            "codewhale-tui"
-        );
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("/usr/local/bin/codewhale-tui")),
-            "codewhale-tui"
-        );
-
-        // Dispatcher binary should use codewhale prefix
-        assert_eq!(binary_prefix_for_exe(Path::new("codewhale")), "codewhale");
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("codewhale.exe")),
-            "codewhale"
-        );
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("/usr/local/bin/codewhale")),
-            "codewhale"
-        );
-
-        // Fallback for unknown names
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("other-binary")),
-            "codewhale"
-        );
-
-        // Legacy names still map to the canonical update asset prefixes.
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("deepseek-tui")),
-            "codewhale-tui"
-        );
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("/usr/local/bin/deepseek-tui")),
-            "codewhale-tui"
-        );
-        assert_eq!(
-            binary_prefix_for_exe(Path::new("DeepSeek-TUI.exe")),
-            "codewhale-tui"
-        );
-        assert_eq!(binary_prefix_for_exe(Path::new("deepseek")), "codewhale");
+    fn every_invocation_name_uses_codewhale_release_asset() {
+        for command in [
+            "codewhale",
+            "codewhale.exe",
+            "codew",
+            "codew.exe",
+            "codewhale-tui",
+            "CodeWhale-TUI.exe",
+            "deepseek",
+            "deepseek-tui",
+            "other-binary",
+        ] {
+            assert_eq!(
+                release_asset_stem_for(Path::new(command), "macos", "aarch64"),
+                "codewhale-macos-arm64"
+            );
+        }
     }
 
     #[test]
@@ -2037,7 +1954,7 @@ mod tests {
         let message = legacy_binary_message(Path::new("/usr/local/bin/deepseek-tui"));
 
         assert!(message.contains("legacy deepseek/deepseek-tui command name"));
-        assert!(message.contains("install canonical"));
+        assert!(message.contains("canonical `codewhale` command"));
         assert!(message.contains("DeepSeek provider support"));
         assert!(message.contains("is unchanged"));
         assert!(message.contains("npm uninstall -g deepseek-tui"));
@@ -2045,13 +1962,13 @@ mod tests {
         assert!(message.contains("cargo uninstall deepseek-tui-cli 2>/dev/null || true"));
         assert!(message.contains("cargo uninstall deepseek-tui 2>/dev/null || true"));
         assert!(message.contains("cargo install codewhale-cli --locked"));
-        assert!(message.contains("cargo install codewhale-tui --locked"));
+        assert!(!message.contains("cargo install codewhale-tui --locked"));
         assert!(message.contains("brew upgrade deepseek-tui"));
         assert!(message.contains("https://github.com/Hmbown/CodeWhale/releases/latest"));
     }
 
     #[test]
-    fn legacy_dispatcher_update_targets_canonical_codewhale_pair() {
+    fn legacy_dispatcher_update_targets_canonical_compatibility_commands() {
         let dir = tempfile::TempDir::new().unwrap();
         let dispatcher = dir
             .path()
@@ -2062,14 +1979,10 @@ mod tests {
         std::fs::write(&dispatcher, b"legacy dispatcher").unwrap();
         std::fs::write(&tui, b"legacy tui").unwrap();
 
-        let targets = update_targets_for_exe(&dispatcher);
-        let paths = targets
-            .iter()
-            .map(|target| target.path.clone())
-            .collect::<Vec<_>>();
+        let plan = update_plan_for_exe(&dispatcher);
 
         assert_eq!(
-            paths,
+            plan.target_paths,
             vec![
                 dir.path()
                     .join(format!("codewhale{}", std::env::consts::EXE_SUFFIX)),
@@ -2077,12 +1990,12 @@ mod tests {
                     .join(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX))
             ]
         );
-        assert!(targets[0].asset_stem.starts_with("codewhale-"));
-        assert!(targets[1].asset_stem.starts_with("codewhale-tui-"));
+        assert!(plan.asset_stem.starts_with("codewhale-"));
+        assert!(!plan.asset_stem.starts_with("codewhale-tui-"));
     }
 
     #[test]
-    fn legacy_tui_update_targets_canonical_tui_pair() {
+    fn legacy_tui_update_targets_canonical_compatibility_commands() {
         let dir = tempfile::TempDir::new().unwrap();
         let dispatcher = dir
             .path()
@@ -2093,23 +2006,19 @@ mod tests {
         std::fs::write(&dispatcher, b"legacy dispatcher").unwrap();
         std::fs::write(&tui, b"legacy tui").unwrap();
 
-        let targets = update_targets_for_exe(&tui);
-        let paths = targets
-            .iter()
-            .map(|target| target.path.clone())
-            .collect::<Vec<_>>();
+        let plan = update_plan_for_exe(&tui);
 
         assert_eq!(
-            paths,
+            plan.target_paths,
             vec![
                 dir.path()
-                    .join(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX)),
+                    .join(format!("codewhale{}", std::env::consts::EXE_SUFFIX)),
                 dir.path()
-                    .join(format!("codewhale{}", std::env::consts::EXE_SUFFIX))
+                    .join(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX))
             ]
         );
-        assert!(targets[0].asset_stem.starts_with("codewhale-tui-"));
-        assert!(targets[1].asset_stem.starts_with("codewhale-"));
+        assert!(plan.asset_stem.starts_with("codewhale-"));
+        assert!(!plan.asset_stem.starts_with("codewhale-tui-"));
     }
 
     #[test]
@@ -2120,18 +2029,8 @@ mod tests {
             ("codewhale", "linux", "x86_64", "codewhale-linux-x64"),
             ("codewhale", "windows", "x86_64", "codewhale-windows-x64"),
             ("codewhale", "windows", "aarch64", "codewhale-windows-arm64"),
-            (
-                "codewhale-tui",
-                "macos",
-                "aarch64",
-                "codewhale-tui-macos-arm64",
-            ),
-            (
-                "codewhale-tui",
-                "linux",
-                "x86_64",
-                "codewhale-tui-linux-x64",
-            ),
+            ("codew", "macos", "aarch64", "codewhale-macos-arm64"),
+            ("codewhale-tui", "linux", "x86_64", "codewhale-linux-x64"),
         ];
 
         for (exe, os, arch, expected) in cases {
@@ -2140,7 +2039,7 @@ mod tests {
     }
 
     #[test]
-    fn update_targets_include_existing_sibling_tui_for_dispatcher() {
+    fn update_plan_includes_existing_compatibility_tui_for_primary() {
         let dir = tempfile::TempDir::new().unwrap();
         let dispatcher = dir
             .path()
@@ -2151,30 +2050,94 @@ mod tests {
         std::fs::write(&dispatcher, b"dispatcher").unwrap();
         std::fs::write(&tui, b"tui").unwrap();
 
-        let targets = update_targets_for_exe(&dispatcher);
-        let paths = targets
+        let plan = update_plan_for_exe(&dispatcher);
+        let paths = plan
+            .target_paths
             .iter()
-            .map(|target| target.path.as_path())
+            .map(PathBuf::as_path)
             .collect::<Vec<_>>();
 
         assert_eq!(paths, vec![dispatcher.as_path(), tui.as_path()]);
-        assert!(targets[0].asset_stem.starts_with("codewhale-"));
-        assert!(targets[1].asset_stem.starts_with("codewhale-tui-"));
+        assert!(plan.asset_stem.starts_with("codewhale-"));
+        assert!(!plan.asset_stem.starts_with("codewhale-tui-"));
     }
 
     #[test]
-    fn update_targets_skip_missing_sibling() {
+    fn update_plan_skips_missing_compatibility_commands() {
         let dir = tempfile::TempDir::new().unwrap();
         let dispatcher = dir
             .path()
             .join(format!("codewhale{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&dispatcher, b"dispatcher").unwrap();
 
-        let targets = update_targets_for_exe(&dispatcher);
+        let plan = update_plan_for_exe(&dispatcher);
 
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].path, dispatcher);
-        assert!(targets[0].asset_stem.starts_with("codewhale-"));
+        assert_eq!(plan.target_paths, vec![dispatcher]);
+        assert!(plan.asset_stem.starts_with("codewhale-"));
+    }
+
+    #[test]
+    fn v094_three_command_install_updates_every_path_from_primary_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let primary = dir
+            .path()
+            .join(format!("codewhale{}", std::env::consts::EXE_SUFFIX));
+        let codew = dir
+            .path()
+            .join(format!("codew{}", std::env::consts::EXE_SUFFIX));
+        let legacy_tui = dir
+            .path()
+            .join(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX));
+        for path in [&primary, &codew, &legacy_tui] {
+            std::fs::write(path, b"v0.9.4 old bytes").unwrap();
+        }
+
+        let plan = update_plan_for_exe(&primary);
+        assert_eq!(
+            plan.target_paths,
+            vec![primary.clone(), codew.clone(), legacy_tui.clone()]
+        );
+        assert!(plan.asset_stem.starts_with("codewhale-"));
+        assert!(!plan.asset_stem.contains("codewhale-tui"));
+
+        replace_verified_downloads(&plan.target_paths, b"v0.9.5 primary bytes", || Ok(())).unwrap();
+
+        for path in [&primary, &codew, &legacy_tui] {
+            assert_eq!(std::fs::read(path).unwrap(), b"v0.9.5 primary bytes");
+        }
+        assert_ne!(std::fs::read(codew).unwrap(), b"v0.9.4 old bytes");
+    }
+
+    #[test]
+    fn direct_alias_invocation_keeps_running_path_first_and_updates_primary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let primary = dir
+            .path()
+            .join(format!("codewhale{}", std::env::consts::EXE_SUFFIX));
+        let codew = dir
+            .path()
+            .join(format!("codew{}", std::env::consts::EXE_SUFFIX));
+        let legacy_tui = dir
+            .path()
+            .join(format!("codewhale-tui{}", std::env::consts::EXE_SUFFIX));
+        for invoked in [&codew, &legacy_tui] {
+            for path in [&primary, &codew, &legacy_tui] {
+                std::fs::write(path, b"old").unwrap();
+            }
+            let plan = update_plan_for_exe(invoked);
+            assert_eq!(plan.target_paths.first(), Some(invoked));
+            assert!(plan.target_paths.contains(&primary));
+            assert!(plan.target_paths.contains(&codew));
+            assert!(plan.target_paths.contains(&legacy_tui));
+            assert!(plan.asset_stem.starts_with("codewhale-"));
+            assert!(!plan.asset_stem.starts_with("codewhale-tui-"));
+
+            replace_verified_downloads(&plan.target_paths, b"new primary bytes", || Ok(()))
+                .unwrap();
+            for path in [&primary, &codew, &legacy_tui] {
+                assert_eq!(std::fs::read(path).unwrap(), b"new primary bytes");
+            }
+        }
     }
 
     #[test]
@@ -2366,10 +2329,9 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
         assert_eq!(content, "fresh binary");
     }
 
-    /// Mocked GitHub release payload covering both the dispatcher (`codewhale`)
-    /// and the legacy TUI (`codewhale-tui`) binaries across our published
-    /// platform/arch matrix, plus a checksum sibling that must never be picked
-    /// as the primary binary.
+    /// Mocked GitHub release payload covering the sole implementation binary
+    /// across the published platform/arch matrix, plus a checksum sibling that
+    /// must never be picked as the binary.
     fn mocked_release() -> Release {
         let json = r#"{
           "tag_name": "v0.8.8",
@@ -2379,12 +2341,7 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
             { "name": "codewhale-macos-arm64",        "browser_download_url": "https://example.invalid/codewhale-macos-arm64" },
             { "name": "codewhale-windows-x64.exe",    "browser_download_url": "https://example.invalid/codewhale-windows-x64.exe" },
             { "name": "codewhale-windows-x64.exe.sha256", "browser_download_url": "https://example.invalid/codewhale-windows-x64.exe.sha256" },
-            { "name": "codewhale-windows-arm64.exe",  "browser_download_url": "https://example.invalid/codewhale-windows-arm64.exe" },
-            { "name": "codewhale-tui-linux-x64",      "browser_download_url": "https://example.invalid/codewhale-tui-linux-x64" },
-            { "name": "codewhale-tui-macos-x64",      "browser_download_url": "https://example.invalid/codewhale-tui-macos-x64" },
-            { "name": "codewhale-tui-macos-arm64",    "browser_download_url": "https://example.invalid/codewhale-tui-macos-arm64" },
-            { "name": "codewhale-tui-windows-x64.exe","browser_download_url": "https://example.invalid/codewhale-tui-windows-x64.exe" },
-            { "name": "codewhale-tui-windows-arm64.exe","browser_download_url": "https://example.invalid/codewhale-tui-windows-arm64.exe" }
+            { "name": "codewhale-windows-arm64.exe",  "browser_download_url": "https://example.invalid/codewhale-windows-arm64.exe" }
           ]
         }"#;
         serde_json::from_str(json).expect("mock release JSON")
@@ -2410,40 +2367,38 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
     }
 
     #[test]
-    fn mocked_release_selects_tui_asset_when_tui_binary_invokes_update() {
+    fn mocked_release_selects_primary_asset_when_compatibility_alias_invokes_update() {
         let release = mocked_release();
         let stem = release_asset_stem_for(
             Path::new("/usr/local/bin/codewhale-tui"),
             "macos",
             "aarch64",
         );
-        let asset = select_platform_asset(&release, &stem).expect("TUI platform asset");
-        assert_eq!(asset.name, "codewhale-tui-macos-arm64");
+        let asset = select_platform_asset(&release, &stem).expect("primary platform asset");
+        assert_eq!(asset.name, "codewhale-macos-arm64");
 
-        let windows_stem =
-            release_asset_stem_for(Path::new("C:\\codewhale-tui.exe"), "windows", "aarch64");
+        let windows_stem = release_asset_stem_for(Path::new("C:\\codew.exe"), "windows", "aarch64");
         let windows_asset =
-            select_platform_asset(&release, &windows_stem).expect("Windows ARM64 TUI asset");
-        assert_eq!(windows_asset.name, "codewhale-tui-windows-arm64.exe");
+            select_platform_asset(&release, &windows_stem).expect("Windows ARM64 primary asset");
+        assert_eq!(windows_asset.name, "codewhale-windows-arm64.exe");
     }
 
     #[test]
     fn android_arm64_maps_to_android_release_assets() {
         // The generic format!("{prefix}-{os}-{arch}") path naturally produces
-        // Android asset stems. Verify the full stem for both dispatcher and TUI
-        // binaries so `codewhale update` on Termux requests Android assets, not
-        // linux-arm64 (#4241).
+        // Android asset stems. Verify every supported command name resolves to
+        // the primary Android asset, never Linux or a removed TUI asset (#4241).
         assert_eq!(
             release_asset_stem_for_prefix("codewhale", "android", "aarch64"),
             "codewhale-android-arm64"
         );
         assert_eq!(
-            release_asset_stem_for_prefix("codewhale-tui", "android", "aarch64"),
-            "codewhale-tui-android-arm64"
+            release_asset_stem_for(Path::new("codewhale-tui"), "android", "aarch64"),
+            "codewhale-android-arm64"
         );
         assert_eq!(
-            release_asset_stem_for_prefix("codew", "android", "aarch64"),
-            "codew-android-arm64"
+            release_asset_stem_for(Path::new("codew"), "android", "aarch64"),
+            "codewhale-android-arm64"
         );
     }
 
@@ -2485,10 +2440,10 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
             dispatcher.browser_download_url,
             "https://mirror.example/releases/v0.8.36/codewhale-linux-x64"
         );
-        let tui = select_platform_asset(&release, "codewhale-tui-linux-x64").expect("tui asset");
-        assert_eq!(
-            tui.browser_download_url,
-            "https://mirror.example/releases/v0.8.36/codewhale-tui-linux-x64"
+        assert_eq!(release.assets.len(), 2);
+        assert!(
+            select_platform_asset(&release, "codewhale-tui-linux-x64").is_none(),
+            "mirror fallback must not synthesize a removed TUI asset"
         );
     }
 
@@ -2506,10 +2461,7 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
             select_platform_asset(&release, "codewhale-windows-x64")
                 .is_some_and(|asset| asset.name == "codewhale-windows-x64.exe")
         );
-        assert!(
-            select_platform_asset(&release, "codewhale-tui-windows-x64")
-                .is_some_and(|asset| asset.name == "codewhale-tui-windows-x64.exe")
-        );
+        assert!(select_platform_asset(&release, "codewhale-tui-windows-x64").is_none());
 
         let arm_release = release_from_mirror_base_url(
             "https://mirror.example/releases/v0.9.1",
@@ -2549,11 +2501,8 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
             dispatcher.browser_download_url,
             "https://github.com/Hmbown/CodeWhale/releases/download/v0.8.61/codewhale-macos-arm64"
         );
-        let tui = select_platform_asset(&release, "codewhale-tui-macos-arm64").expect("tui asset");
-        assert_eq!(
-            tui.browser_download_url,
-            "https://github.com/Hmbown/CodeWhale/releases/download/v0.8.61/codewhale-tui-macos-arm64"
-        );
+        assert_eq!(release.assets.len(), 2);
+        assert!(select_platform_asset(&release, "codewhale-tui-macos-arm64").is_none());
     }
 
     #[test]
@@ -2668,7 +2617,7 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
             "{hint}"
         );
         assert!(hint.contains("codewhale-cli"), "{hint}");
-        assert!(hint.contains("codewhale-tui --locked"), "{hint}");
+        assert!(!hint.contains("codewhale-tui --locked"), "{hint}");
     }
 
     fn serve_http_responses(

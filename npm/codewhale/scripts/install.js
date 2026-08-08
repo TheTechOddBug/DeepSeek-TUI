@@ -142,7 +142,7 @@ function maxAttempts(context = "runtime", env = process.env) {
 }
 
 function binaryPaths() {
-  const { codewhale, codew, tui } = detectBinaryNames();
+  const { codewhale, codew } = detectBinaryNames();
   const releaseDir = releaseBinaryDirectory();
   return {
     codewhale: {
@@ -153,12 +153,8 @@ function binaryPaths() {
       asset: codew,
       target: path.join(releaseDir, process.platform === "win32" ? "codew.exe" : "codew"),
     },
-    tui: {
-      asset: tui,
-      target: path.join(releaseDir, process.platform === "win32" ? "codewhale-tui.exe" : "codewhale-tui"),
-    },
   };
-}
+} // single binary — no tui asset (v0.9.5+)
 
 // ────────────────────────────────────────────────────────────────────────────
 // Logging / progress
@@ -207,7 +203,7 @@ function installFailureHint(error) {
       "codewhale install hint:",
       `  DEEPSEEK_TUI_RELEASE_BASE_URL is set to ${releaseBase}`,
       "  Verify that this directory contains codewhale-artifacts-sha256.txt",
-      "  plus the codewhale/codew/codewhale-tui binary assets for your platform.",
+      "  plus the codewhale/codew binary assets for your platform (single binary).",
     ].join("\n");
   }
 
@@ -1138,8 +1134,7 @@ async function run(options = {}) {
   await Promise.all([
     ensureBinary(paths.codewhale.target, paths.codewhale.asset, version, repo, getChecksums, { context }),
     ensureBinary(paths.codew.target, paths.codew.asset, version, repo, getChecksums, { context }),
-    ensureBinary(paths.tui.target, paths.tui.asset, version, repo, getChecksums, { context }),
-  ]);
+  ]); // single binary
 }
 
 async function getBinaryPath(name) {
@@ -1152,7 +1147,8 @@ async function getBinaryPath(name) {
     return paths.codew.target;
   }
   if (name === "codewhale-tui") {
-    return paths.tui.target;
+    // v0.9.5 single-binary: codewhale-tui is now an alias to codewhale for backwards compat
+    return paths.codewhale.target;
   }
   throw new Error(`Unknown binary: ${name}`);
 }

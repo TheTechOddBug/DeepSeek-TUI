@@ -1,7 +1,7 @@
 {
   "name": "codewhale",
-  "version": "0.9.4",
-  "codewhaleBinaryVersion": "0.9.4",
+  "version": "0.9.5",
+  "codewhaleBinaryVersion": "0.9.5",
   "description": "Terminal coding agent for supported hosted and local models. One runtime on your machine. Rust, MIT.",
   "author": "Hmbown",
   "license": "MIT",
@@ -35,8 +35,7 @@
   "type": "commonjs",
   "bin": {
     "codewhale": "bin/codewhale.js",
-    "codew": "bin/codew.js",
-    "codewhale-tui": "bin/codewhale-tui.js"
+    "codew": "bin/codew.js"
   },
   "scripts": {
     "release:check": "node scripts/verify-release-assets.js",

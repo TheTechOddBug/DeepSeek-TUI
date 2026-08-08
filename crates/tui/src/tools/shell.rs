@@ -60,6 +60,8 @@ use crate::work_graph::{
 use crate::worker_profile::ShellPolicy;
 use output::{tail_from_buffer, take_delta_from_buffer};
 
+const READONLY_ENV_MARKER: &str = "CODEWHALE_INTERNAL_READONLY_ARGV";
+
 fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) -> Result<()> {
     let metadata = std::fs::metadata(path).with_context(|| {
         let source = if inherited_session_workspace {
@@ -1477,6 +1479,7 @@ impl ShellManager {
             extra_env,
             owner_agent,
             None,
+            None,
         )
     }
 
@@ -1494,6 +1497,7 @@ impl ShellManager {
         extra_env: HashMap<String, String>,
         owner_agent: Option<ShellJobOwner>,
         work_lifecycle: Option<ShellWorkLifecycle>,
+        readonly_workspace: Option<&std::path::Path>,
     ) -> Result<ShellResult> {
         // Log execution via ShellDispatcher when SHELL_DISPATCHER_LOG is set.
         crate::shell_dispatcher::ShellDispatcher::log_exec(command);
@@ -1508,9 +1512,21 @@ impl ShellManager {
         let policy = policy_override.unwrap_or_else(|| self.sandbox_policy.clone());
 
         // Create command spec and prepare sandboxed environment
-        let spec = CommandSpec::shell(command, work_dir.clone(), Duration::from_millis(timeout_ms))
-            .with_policy(policy)
-            .with_env(extra_env);
+        let spec = if let Some(workspace) = readonly_workspace {
+            let (program, args) = hardened_readonly_argv(command)?;
+            let program = resolve_readonly_program(&program, workspace)?;
+            CommandSpec::program(
+                program
+                    .to_str()
+                    .ok_or_else(|| anyhow!("read-only executable path is not valid UTF-8"))?,
+                args,
+                work_dir.clone(),
+                Duration::from_millis(timeout_ms),
+            )
+        } else {
+            CommandSpec::shell(command, work_dir.clone(), Duration::from_millis(timeout_ms))
+        };
+        let spec = spec.with_policy(policy).with_env(extra_env);
         let exec_env = self.sandbox_manager.prepare(&spec);
 
         if background {
@@ -1623,6 +1639,7 @@ impl ShellManager {
         }
 
         child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
+        remove_readonly_redirect_env(&mut cmd, &exec_env.env);
 
         // Disable raw mode before spawn; restore only if raw mode was active
         // on entry (issue #1690).
@@ -1988,6 +2005,7 @@ impl ShellManager {
             }
 
             child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
+            remove_readonly_redirect_env(&mut cmd, &exec_env.env);
 
             let mut child = cmd
                 .spawn()
@@ -2452,7 +2470,8 @@ pub fn new_shared_shell_manager(workspace: PathBuf) -> SharedShellManager {
 // === ToolSpec Implementations ===
 
 use crate::command_safety::{
-    SafetyLevel, analyze_command, extract_primary_command, is_parallel_readonly_command,
+    SafetyLevel, analyze_command, extract_primary_command, is_github_readonly_command,
+    is_parallel_readonly_command,
 };
 use crate::execpolicy::{ExecPolicyDecision, load_default_policy};
 use crate::features::Feature;
@@ -2748,13 +2767,57 @@ fn attach_shell_owner_metadata(metadata: &mut serde_json::Value, context: &ToolC
     metadata["owner_agent_name"] = json!(owner.agent_name);
 }
 
+fn enforce_readonly_github_network_policy(
+    command: &str,
+    context: &ToolContext,
+) -> Result<(), ToolError> {
+    if !is_github_readonly_command(command) {
+        return Ok(());
+    }
+    let Some(decider) = context.network_policy.as_ref() else {
+        return Ok(());
+    };
+
+    use crate::network_policy::Decision;
+    match decider.evaluate("api.github.com", "Bash") {
+        Decision::Allow => Ok(()),
+        Decision::Deny => Err(ToolError::permission_denied(
+            "Read-only GitHub CLI access to 'api.github.com' is blocked by the active network policy."
+                .to_string(),
+        )),
+        Decision::Prompt => Err(ToolError::permission_denied(
+            "Read-only GitHub CLI access to 'api.github.com' requires network approval; allow that host in the parent session or network policy before dispatching the scout."
+                .to_string(),
+        )),
+    }
+}
+
 fn exec_shell_input_is_parallel_readonly(input: &serde_json::Value) -> bool {
+    let Some(fields) = input.as_object() else {
+        return false;
+    };
+    if fields
+        .keys()
+        .any(|key| !matches!(key.as_str(), "action" | "command" | "cwd" | "timeout_ms"))
+    {
+        return false;
+    }
+    match input.get("action") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(action)) if action == "run" => {}
+        Some(_) => return false,
+    }
     let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
         return false;
     };
     if ["background", "interactive", "tty", "combined_output"]
         .iter()
-        .any(|key| input.get(*key).and_then(serde_json::Value::as_bool) == Some(true))
+        .any(|key| {
+            !matches!(
+                input.get(*key),
+                None | Some(serde_json::Value::Null | serde_json::Value::Bool(false))
+            )
+        })
     {
         return false;
     }
@@ -2764,8 +2827,246 @@ fn exec_shell_input_is_parallel_readonly(input: &serde_json::Value) -> bool {
     {
         return false;
     }
+    if ["task_id", "id", "wait", "block", "close_stdin", "all"]
+        .iter()
+        .any(|key| input.get(*key).is_some())
+    {
+        return false;
+    }
 
     is_parallel_readonly_command(command)
+}
+
+fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
+    let mut argv = shell_words::split(command)
+        .map_err(|error| anyhow!("could not parse classifier-approved read command: {error}"))?;
+    if argv.is_empty() {
+        return Err(anyhow!("classifier-approved read command was empty"));
+    }
+
+    // Even when repository/user configuration names a diff or signature
+    // helper, these flags make Git keep the read inside its own process.
+    if argv.first().is_some_and(|program| program == "git") {
+        let subcommand = argv.get(1).map(String::as_str).ok_or_else(|| {
+            anyhow!("classifier-approved Git read was missing its literal subcommand")
+        })?;
+        match subcommand {
+            "diff" => {
+                argv.splice(
+                    2..2,
+                    ["--no-ext-diff".to_string(), "--no-textconv".to_string()],
+                );
+            }
+            "log" | "show" => {
+                argv.splice(
+                    2..2,
+                    [
+                        "--no-ext-diff".to_string(),
+                        "--no-textconv".to_string(),
+                        "--no-show-signature".to_string(),
+                    ],
+                );
+            }
+            "status" | "ls-files" | "blame" | "grep" => {}
+            _ => {
+                return Err(anyhow!(
+                    "classifier-approved Git read did not keep its subcommand in argv[1]"
+                ));
+            }
+        }
+    }
+
+    let program = argv.remove(0);
+    Ok((program, argv))
+}
+
+fn enforce_readonly_workspace_operands(
+    command: &str,
+    workspace: &std::path::Path,
+    effective_cwd: &std::path::Path,
+) -> Result<(), ToolError> {
+    let argv = shell_words::split(command).map_err(|error| {
+        ToolError::invalid_input(format!(
+            "Could not parse read-only command arguments: {error}"
+        ))
+    })?;
+    if argv.first().is_some_and(|program| program == "gh") {
+        // High-level gh reads do not consume local path operands. Their host
+        // is pinned and evaluated separately by the network-policy guard.
+        return Ok(());
+    }
+    let workspace = workspace.canonicalize().map_err(|error| {
+        ToolError::execution_failed(format!(
+            "Could not resolve the Scout workspace before shell dispatch: {error}"
+        ))
+    })?;
+    let effective_cwd = effective_cwd.canonicalize().map_err(|error| {
+        ToolError::permission_denied(format!(
+            "Could not prove the read-only shell working directory stays in the workspace: {error}"
+        ))
+    })?;
+    if !effective_cwd.starts_with(&workspace) {
+        return Err(ToolError::permission_denied(
+            "Read-only Scout shell working directory resolves outside the workspace.",
+        ));
+    }
+
+    for token in argv.iter().skip(1) {
+        if token.starts_with('-') && (token.contains('/') || token.contains('\\')) {
+            return Err(ToolError::permission_denied(format!(
+                "Read-only Scout shell options may not carry attached paths; refused {token:?}. Use the bounded File read/search actions for project evidence."
+            )));
+        }
+        let value = token
+            .split_once('=')
+            .map_or(token.as_str(), |(_, value)| value)
+            .trim();
+        if value.is_empty() || value == "-" {
+            continue;
+        }
+        let candidate = std::path::Path::new(value);
+        let bytes = value.as_bytes();
+        let windows_prefixed =
+            (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+                || value.starts_with("\\\\")
+                || candidate
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::Prefix(_)));
+        if value.starts_with('~')
+            || value.contains('\\')
+            || windows_prefixed
+            || candidate.has_root()
+            || candidate
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ToolError::permission_denied(format!(
+                "Read-only Scout shell operands must stay inside the workspace; refused {value:?}. Use the bounded File read/search actions for project evidence."
+            )));
+        }
+
+        let joined = effective_cwd.join(candidate);
+        if joined.exists() {
+            let resolved = joined.canonicalize().map_err(|error| {
+                ToolError::permission_denied(format!(
+                    "Could not prove read-only operand {value:?} stays in the workspace: {error}"
+                ))
+            })?;
+            if !resolved.starts_with(&workspace) {
+                return Err(ToolError::permission_denied(format!(
+                    "Read-only Scout shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn readonly_sanitized_path_from(
+    workspace: &std::path::Path,
+    path: &std::ffi::OsStr,
+) -> Option<std::ffi::OsString> {
+    let workspace = workspace.canonicalize().ok()?;
+    let safe = std::env::split_paths(path).filter_map(|entry| {
+        if !entry.is_absolute() {
+            return None;
+        }
+        let resolved = entry.canonicalize().ok()?;
+        (!resolved.starts_with(&workspace)).then_some(resolved)
+    });
+    std::env::join_paths(safe).ok()
+}
+
+fn readonly_sanitized_path(workspace: &std::path::Path) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    readonly_sanitized_path_from(workspace, &path).map(|value| value.to_string_lossy().into_owned())
+}
+
+fn resolve_readonly_program(program: &str, workspace: &std::path::Path) -> Result<PathBuf> {
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| anyhow!("no executable search path is configured"))?;
+    resolve_readonly_program_from_path(program, workspace, &path)
+}
+
+fn resolve_readonly_program_from_path(
+    program: &str,
+    workspace: &std::path::Path,
+    path: &std::ffi::OsStr,
+) -> Result<PathBuf> {
+    let workspace = workspace.canonicalize()?;
+    if std::path::Path::new(program).components().count() != 1 {
+        return Err(anyhow!(
+            "read-only command must name a bare allowlisted executable"
+        ));
+    }
+    let safe_path = readonly_sanitized_path_from(&workspace, path).ok_or_else(|| {
+        anyhow!("no trusted executable search path remains outside the workspace")
+    })?;
+    let names = if cfg!(windows) {
+        vec![format!("{program}.exe"), format!("{program}.com")]
+    } else {
+        vec![program.to_string()]
+    };
+    for directory in std::env::split_paths(&safe_path) {
+        for name in &names {
+            let candidate = directory.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if candidate.metadata()?.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+            }
+            let resolved = candidate.canonicalize()?;
+            if resolved.is_absolute() && !resolved.starts_with(&workspace) {
+                return Ok(resolved);
+            }
+        }
+    }
+    Err(anyhow!(
+        "allowlisted read-only executable {program:?} was not found at a canonical path outside the workspace"
+    ))
+}
+
+fn remove_readonly_redirect_env(cmd: &mut Command, env: &HashMap<String, String>) {
+    if env.get(READONLY_ENV_MARKER).map(String::as_str) != Some("1") {
+        return;
+    }
+    cmd.env_remove(READONLY_ENV_MARKER);
+    let removals = cmd
+        .get_envs()
+        .filter_map(|(key, _)| {
+            let upper = key.to_string_lossy().to_ascii_uppercase();
+            let guarded = upper.starts_with("GIT_")
+                || upper.starts_with("GH_")
+                || upper.starts_with("GITHUB_");
+            let safe = matches!(
+                upper.as_str(),
+                "GIT_OPTIONAL_LOCKS"
+                    | "GIT_NO_LAZY_FETCH"
+                    | "GIT_PAGER"
+                    | "GIT_CONFIG_NOSYSTEM"
+                    | "GIT_CONFIG_GLOBAL"
+                    | "GIT_CONFIG_PARAMETERS"
+                    | "GIT_EXTERNAL_DIFF"
+                    | "GIT_ATTR_NOSYSTEM"
+                    | "GIT_CONFIG_COUNT"
+                    | "GH_PAGER"
+                    | "GH_PROMPT_DISABLED"
+                    | "GH_NO_UPDATE_NOTIFIER"
+                    | "GH_HOST"
+                    | "GH_REPO"
+            ) || upper.starts_with("GIT_CONFIG_KEY_")
+                || upper.starts_with("GIT_CONFIG_VALUE_");
+            (guarded && !safe).then(|| key.to_os_string())
+        })
+        .collect::<Vec<_>>();
+    for key in removals {
+        cmd.env_remove(key);
+    }
 }
 
 fn exec_shell_input_starts_detached(input: &serde_json::Value) -> bool {
@@ -2792,6 +3093,7 @@ async fn execute_foreground_via_background(
     tty: bool,
     policy_override: Option<ExecutionSandboxPolicy>,
     extra_env: HashMap<String, String>,
+    direct_argv: bool,
 ) -> Result<ShellResult> {
     let timeout_ms = timeout_ms.clamp(1000, 600_000);
     let spawned = {
@@ -2800,6 +3102,8 @@ async fn execute_foreground_via_background(
             .lock()
             .map_err(|_| anyhow!("shell manager lock poisoned"))?;
         manager.clear_foreground_background_request();
+        let owner = shell_job_owner_from_context(context);
+        let lifecycle = shell_work_lifecycle_from_context(context);
         manager.execute_with_options_env_for_owner_and_work(
             command,
             working_dir.as_deref(),
@@ -2809,8 +3113,9 @@ async fn execute_foreground_via_background(
             tty,
             policy_override,
             extra_env,
-            shell_job_owner_from_context(context),
-            shell_work_lifecycle_from_context(context),
+            owner,
+            lifecycle,
+            direct_argv.then_some(context.workspace.as_path()),
         )?
     };
     let task_id = spawned
@@ -2892,6 +3197,21 @@ async fn execute_foreground_via_background(
 pub struct BashTool {
     name: &'static str,
     forced_action: Option<&'static str>,
+    read_only: bool,
+}
+
+pub(crate) fn readonly_bash_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": ["run"] },
+            "command": { "type": "string", "description": "A classifier-approved read command" },
+            "cwd": { "type": "string", "description": "Workspace-relative working directory" },
+            "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds (1000-600000)" }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+    })
 }
 
 impl BashTool {
@@ -2899,6 +3219,15 @@ impl BashTool {
         Self {
             name,
             forced_action: None,
+            read_only: false,
+        }
+    }
+
+    pub const fn read_only(name: &'static str) -> Self {
+        Self {
+            name,
+            forced_action: None,
+            read_only: true,
         }
     }
 
@@ -2906,6 +3235,7 @@ impl BashTool {
         Self {
             name,
             forced_action: Some(action),
+            read_only: false,
         }
     }
 }
@@ -2921,10 +3251,17 @@ impl ToolSpec for BashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" polls a background task; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
+        if self.read_only {
+            "Inspect the workspace with the bounded read-only command subset. Commands run directly as argv, never through a shell; only action=run plus command, cwd, and timeout_ms are accepted."
+        } else {
+            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" polls a background task; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
+        }
     }
 
     fn input_schema(&self) -> serde_json::Value {
+        if self.read_only {
+            return readonly_bash_input_schema();
+        }
         json!({
             "type": "object",
             "properties": {
@@ -3098,6 +3435,7 @@ impl ToolSpec for BashTool {
             }
             ShellPolicy::ReadOnly | ShellPolicy::Full => {}
         }
+        enforce_readonly_github_network_policy(command, context)?;
         let timeout_ms = optional_u64(&input, "timeout_ms", 120_000)?.min(600_000);
         let background = optional_bool(&input, "background", false)?;
         let interactive = optional_bool(&input, "interactive", false)?;
@@ -3207,12 +3545,24 @@ impl ToolSpec for BashTool {
             // shared ShellManager's parent-workspace default_workspace.
             None => Some(context.workspace.display().to_string()),
         };
+        if matches!(context.shell_policy, ShellPolicy::ReadOnly) {
+            let effective_cwd = working_dir
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or(&context.workspace);
+            enforce_readonly_workspace_operands(command, &context.workspace, effective_cwd)?;
+        }
 
         // #456 — collect env from any configured `shell_env` hooks. Runs
         // synchronously, captures stdout, parses `KEY=VAL` lines, audit-logs
         // the keys (never the values). Empty / no-op when no hook is
         // configured.
-        let extra_env = if let Some(hook_executor) = &context.runtime.hook_executor {
+        let read_only_shell = matches!(context.shell_policy, ShellPolicy::ReadOnly);
+        let mut extra_env = if read_only_shell {
+            // shell_env hooks are arbitrary operator-configured processes.
+            // They cannot run inside the evidence-only execution boundary.
+            HashMap::new()
+        } else if let Some(hook_executor) = &context.runtime.hook_executor {
             let hook_ctx = crate::hooks::HookContext::new()
                 .with_tool_name("exec_shell")
                 .with_tool_args(&input);
@@ -3220,6 +3570,63 @@ impl ToolSpec for BashTool {
         } else {
             std::collections::HashMap::new()
         };
+        if read_only_shell {
+            let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+            let inert_git_helper = if cfg!(windows) {
+                "cmd.exe /d /c exit 1"
+            } else {
+                "/usr/bin/false"
+            };
+            // Read-only Bash is intentionally a small inspection surface. Git
+            // can otherwise invoke operator/repository configured helpers
+            // while performing nominal reads (a pager or fsmonitor), and it
+            // may opportunistically refresh the index. These environment
+            // overrides make those reads non-interactive and suppress the
+            // optional mutation/extension seams; the command classifier and
+            // machine authority gate remain authoritative as well.
+            extra_env.insert("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string());
+            extra_env.insert("GIT_NO_LAZY_FETCH".to_string(), "1".to_string());
+            extra_env.insert("GIT_PAGER".to_string(), String::new());
+            extra_env.insert("GH_PAGER".to_string(), String::new());
+            extra_env.insert("GH_PROMPT_DISABLED".to_string(), "1".to_string());
+            extra_env.insert("GH_NO_UPDATE_NOTIFIER".to_string(), "1".to_string());
+            // The classifier rejects explicit GHES repo/URL targets. Pin the
+            // implicit environment side too, so inherited GH_HOST/GH_REPO
+            // cannot redirect the call after api.github.com was approved.
+            extra_env.insert("GH_HOST".to_string(), "github.com".to_string());
+            extra_env.insert("GH_REPO".to_string(), String::new());
+            extra_env.insert("PAGER".to_string(), String::new());
+            extra_env.insert("ENV".to_string(), String::new());
+            extra_env.insert("BASH_ENV".to_string(), String::new());
+            extra_env.insert("CDPATH".to_string(), String::new());
+            extra_env.insert("RIPGREP_CONFIG_PATH".to_string(), String::new());
+            // Ignore user/system Git configuration and replace any repository
+            // external diff helper with a fixed inert executable. Repository
+            // config and attributes are attacker-controlled evidence inputs;
+            // a nominal `git diff/log/show` must not turn them into programs.
+            extra_env.insert("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string());
+            extra_env.insert("GIT_CONFIG_GLOBAL".to_string(), null_device.to_string());
+            extra_env.insert("GIT_CONFIG_PARAMETERS".to_string(), String::new());
+            extra_env.insert(
+                "GIT_EXTERNAL_DIFF".to_string(),
+                inert_git_helper.to_string(),
+            );
+            extra_env.insert("GIT_ATTR_NOSYSTEM".to_string(), "1".to_string());
+            if let Some(path) = readonly_sanitized_path(&context.workspace) {
+                extra_env.insert("PATH".to_string(), path);
+            }
+            extra_env.insert("GIT_CONFIG_COUNT".to_string(), "3".to_string());
+            extra_env.insert("GIT_CONFIG_KEY_0".to_string(), "core.fsmonitor".to_string());
+            extra_env.insert("GIT_CONFIG_VALUE_0".to_string(), "false".to_string());
+            extra_env.insert("GIT_CONFIG_KEY_1".to_string(), "core.hooksPath".to_string());
+            extra_env.insert("GIT_CONFIG_VALUE_1".to_string(), null_device.to_string());
+            extra_env.insert(
+                "GIT_CONFIG_KEY_2".to_string(),
+                "log.showSignature".to_string(),
+            );
+            extra_env.insert("GIT_CONFIG_VALUE_2".to_string(), "false".to_string());
+            extra_env.insert(READONLY_ENV_MARKER.to_string(), "1".to_string());
+        }
 
         let command_expense = infer_command_expense(command);
         let heavy_permit = acquire_heavy_command_permit(command, context.cancel_token.as_ref())
@@ -3235,6 +3642,11 @@ impl ToolSpec for BashTool {
 
         // Route through external sandbox backend when configured.
         if let Some(backend) = &context.sandbox_backend {
+            if matches!(context.shell_policy, ShellPolicy::ReadOnly) {
+                return Err(ToolError::permission_denied(
+                    "Read-only Scout shell cannot use an external sandbox backend because that interface accepts a raw command string rather than the classifier-approved argv. Use File read/search, or run this Scout without the external backend.",
+                ));
+            }
             if interactive {
                 return Ok(ToolResult::error(
                     "Interactive mode is not supported with external sandbox backends.",
@@ -3398,6 +3810,7 @@ impl ToolSpec for BashTool {
                 extra_env,
                 shell_job_owner_from_context(context),
                 shell_work_lifecycle_from_context(context),
+                None,
             );
             if let (Ok(result), Some(permit)) = (&result, heavy_permit)
                 && let Some(task_id) = result.task_id.as_deref()
@@ -3418,6 +3831,7 @@ impl ToolSpec for BashTool {
                 combined_output,
                 policy_override,
                 extra_env,
+                matches!(context.shell_policy, ShellPolicy::ReadOnly),
             )
             .await
         };

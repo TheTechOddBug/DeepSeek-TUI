@@ -51,6 +51,10 @@ enum CloudCommand {
     Logout,
     /// Manage provider API keys stored in the signed-in Codewhale account.
     Keys(CloudKeysArgs),
+    /// Inspect the account document; local settings import is not available yet.
+    Pull(CloudPullArgs),
+    /// Push local settings to the account document (never automatic, --dry-run required).
+    Push(CloudPushArgs),
 }
 
 #[derive(Debug, Args)]
@@ -65,6 +69,20 @@ struct CloudLoginArgs {
         value_parser = clap::value_parser!(u64).range(1..=MAX_LOGIN_TIMEOUT_SECONDS)
     )]
     timeout_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+struct CloudPullArgs {
+    /// Inspect the account document without writing local files.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct CloudPushArgs {
+    /// Show what would be pushed without writing the remote document.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -663,6 +681,52 @@ fn run_with<T: CloudTransport, W: Write>(
                 Ok(())
             }
         },
+        CloudCommand::Pull(args) => {
+            if !args.dry_run {
+                bail!(
+                    "Account settings import is not available yet; local config was not changed. Run `codewhale account pull --dry-run` to inspect the signed-in account."
+                );
+            }
+            let user = client.me()?;
+            // `/api/me` currently exposes account identity and key metadata,
+            // not a versioned settings document that can be applied locally.
+            // Stay read-only and explicit until that import contract exists.
+            writeln!(out, "Account settings (pull --dry-run):")?;
+            writeln!(out, "Account ID: {}", printable(&user.id))?;
+            writeln!(out, "Profile: {}", printable(profile))?;
+            writeln!(out, "API: {api_base}")?;
+            writeln!(
+                out,
+                "dry-run: remote settings import is not available; local config unchanged"
+            )?;
+            // Show the invariant: Bearer custody stays in the OS keyring, never in config.toml.
+            writeln!(
+                out,
+                "Secure custody: Bearer tokens remain in the OS keyring"
+            )?;
+            Ok(())
+        }
+        CloudCommand::Push(args) => {
+            let user = client.me()?;
+            if !args.dry_run {
+                bail!(
+                    "Push is never automatic; re-run with --dry-run to preview, then confirm explicitly"
+                );
+            }
+            writeln!(out, "Account settings (push --dry-run):")?;
+            writeln!(out, "Account ID: {}", printable(&user.id))?;
+            writeln!(out, "Profile: {}", printable(profile))?;
+            writeln!(out, "API: {api_base}")?;
+            writeln!(
+                out,
+                "dry-run: would PATCH /api/me/preferences with If-Match revision check (412 on conflict)"
+            )?;
+            writeln!(
+                out,
+                "No credentials, paths, or env are copied; only explicit fields (field-level last-writer-wins)"
+            )?;
+            Ok(())
+        }
     }
 }
 

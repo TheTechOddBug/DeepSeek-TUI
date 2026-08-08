@@ -357,13 +357,13 @@ pub(crate) fn build_session_snapshot(
             Some(app.mode.as_setting()),
         )
     };
+    let computed_title = session.metadata.title.clone();
     if let Some(cached) = app
         .current_session_metadata
         .as_ref()
         .filter(|cached| cached.id == session.metadata.id)
     {
         session.metadata.created_at = cached.created_at;
-        session.metadata.title.clone_from(&cached.title);
         session
             .metadata
             .parent_session_id
@@ -375,7 +375,35 @@ pub(crate) fn build_session_snapshot(
     // Re-reading here is what makes "an archive or rename cannot be reverted
     // by autosave" true regardless of which surface applied it or when
     // (#2934 / #4397). One bounded metadata-prefix read, not a transcript scan.
-    let _ = manager.merge_persisted_lifecycle(&mut session.metadata);
+    let merged = manager.merge_persisted_lifecycle(&mut session.metadata);
+    // Title resolution, in priority order:
+    // 1. Disk, when the session already exists (#2934/#4397: a rename applied
+    //    through the session manager is persisted and must survive autosave).
+    // 2. The in-memory cache, when there is no disk record for the session
+    //    yet. (The session picker normally persists renames to disk first via
+    //    `rename_selected`; this branch covers sessions that have never been
+    //    saved, where the cache is the only title source.)
+    // 3. The title computed from the conversation (first user message).
+    //    The cache is NOT a candidate on its own: it is only refreshed at the
+    //    end of this function, so a snapshot taken before any user message
+    //    pins it to the `DEFAULT_SESSION_TITLE` placeholder, and restoring it
+    //    would prevent every later title update (the bug this block fixes).
+    if !merged
+        && let Some(cached) = app.current_session_metadata.as_ref()
+        && cached.id == session.metadata.id
+    {
+        session.metadata.title.clone_from(&cached.title);
+    }
+    if session.metadata.title == crate::session_manager::DEFAULT_SESSION_TITLE
+        && computed_title != crate::session_manager::DEFAULT_SESSION_TITLE
+    {
+        // The placeholder survived from an earlier snapshot; the conversation
+        // now has a real first user message, so let the computed title win.
+        // Known edge: a session deliberately renamed to the literal
+        // placeholder title is treated the same way and yields to the
+        // computed title on the next snapshot.
+        session.metadata.title = computed_title;
+    }
     if let Some(cached) = app.current_session_metadata.as_mut()
         && cached.id == session.metadata.id
     {
@@ -732,6 +760,20 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     let pending_preview = build_pending_input_preview(app);
     let desired_preview_height = pending_preview.desired_height(size.width);
 
+    // Persistent background-work indicator (#5286): one pinned row above the
+    // composer while shells / durable tasks / sub-agents are in flight. The
+    // chip mirrors the Work strip and `/jobs` state — no separate registry —
+    // and collapses to zero rows when nothing is pending. It is carved from
+    // the auxiliary budget so compact terminals shed the chip before they
+    // shed chat/composer space.
+    let pending_work = crate::tui::background_indicator::pending_work_from_app(app);
+    let composer_floor = MIN_COMPOSER_HEIGHT.saturating_add(u16::from(app.composer_border));
+    let indicator_height = u16::from(!pending_work.is_empty()).min(
+        rail_budget
+            .saturating_sub(top_work_strip_height)
+            .saturating_sub(composer_height.saturating_sub(composer_floor)),
+    );
+
     // WorkflowPanel unified activity surface (#4121). Expanded while running
     // (interactive drill-in above the composer); when collapsed the panel
     // takes no rows — its persistent status lives in the top status bar as a
@@ -742,12 +784,14 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         .filter(|panel| panel.expanded)
         .map(|panel| panel.desired_height(size.width))
         .unwrap_or(0);
-    let auxiliary_budget = body_height.saturating_sub(
-        top_work_strip_height
-            .saturating_add(MIN_CHAT_HEIGHT)
-            .saturating_add(composer_height)
-            .saturating_add(footer_height),
-    );
+    let auxiliary_budget = body_height
+        .saturating_sub(
+            top_work_strip_height
+                .saturating_add(MIN_CHAT_HEIGHT)
+                .saturating_add(composer_height)
+                .saturating_add(footer_height),
+        )
+        .saturating_sub(indicator_height);
     // Queued-only previews author the direct controls in row two (and fall
     // back to controls-only when just one row remains). Mixed previews retain
     // up to three compact rows at the release floor.
@@ -762,10 +806,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     let phase = crate::tui::underwater::ShellPhase::from_app(app);
     let phase_above =
         crate::tui::phase_strip::PhaseStripPlacement::for_phase(phase).is_above_composer();
+    // The indicator row sits directly above the composer (and above the
+    // footer when the phase strip is above), so background work stays pinned
+    // beside the prompt even when the transcript scrolls (#5286).
     let (composer_slot, footer_slot, tail_constraints) = if phase_above {
         (
+            6,
             5,
-            4,
             [
                 Constraint::Length(footer_height),
                 Constraint::Length(composer_height),
@@ -773,8 +820,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         )
     } else {
         (
-            4,
             5,
+            6,
             [
                 Constraint::Length(composer_height),
                 Constraint::Length(footer_height),
@@ -790,6 +837,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             Constraint::Min(1),                        // Chat area
             Constraint::Length(workflow_panel_height), // Workflow panel (#4121)
             Constraint::Length(preview_height),        // Pending input preview (0 if empty)
+            Constraint::Length(indicator_height),      // Background-work chip (#5286, 0 if idle)
             tail_constraints[0],
             tail_constraints[1],
         ])
@@ -875,6 +923,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     if preview_height > 0 {
         let buf = f.buffer_mut();
         pending_preview.render(body_chunks[3], buf);
+    }
+
+    // Render the pinned background-work chip (0-height when idle, so this is
+    // a no-op unless shells / tasks / sub-agents are in flight; #5286).
+    if indicator_height > 0 {
+        let buf = f.buffer_mut();
+        crate::tui::background_indicator::render(body_chunks[4], buf, app, &pending_work);
     }
 
     // Render composer

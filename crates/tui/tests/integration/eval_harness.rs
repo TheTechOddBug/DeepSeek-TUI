@@ -4,12 +4,7 @@ use std::fs;
 
 use tempfile::tempdir;
 
-#[path = "../src/eval.rs"]
-mod eval;
-#[path = "../src/shell_dispatcher.rs"]
-mod shell_dispatcher;
-
-use eval::{EvalHarness, EvalHarnessConfig, FixtureRecord, ScenarioStepKind};
+use crate::eval::{EvalHarness, EvalHarnessConfig, FixtureRecord, ScenarioStepKind};
 
 const HAPPY_PATH_TOOL_LOOP: [ScenarioStepKind; 6] = [
     ScenarioStepKind::List,

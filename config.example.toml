@@ -74,6 +74,9 @@ base_url = "https://api.deepseek.com/beta"
 #   trinity-large-preview            — direct Arcee AI API model ID
 #   deepseek-ai/DeepSeek-V4-Pro      — SGLang self-hosted Pro model ID
 #   deepseek-ai/DeepSeek-V4-Flash    — SGLang self-hosted Flash model ID
+#   auto                         — auto-select between flash and pro based on task complexity.
+#                                  Complex tasks (debugging, refactoring, architecture) → pro;
+#                                  simple tasks (lookups, formatting, Q&A) → flash.
 default_text_model = "deepseek-v4-pro"
 
 # ─────────────────────────────────────────────────────────────────────────────────

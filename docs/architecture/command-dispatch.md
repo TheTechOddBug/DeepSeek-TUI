@@ -35,6 +35,7 @@ intentional:
 | `crates/tui/src/commands/traits.rs` | Built-in command metadata, trait-backed command objects, command groups, and registry lookup. |
 | `crates/tui/src/commands/groups/` | Group-owned built-in command areas. Each group owns its command metadata and handlers. |
 | `crates/tui/src/commands/user_registry.rs` | User-command registry boundary: markdown metadata, aliases, hidden entries, validation errors, dispatch state resets, and shadowing behavior. |
+| `crates/tui/src/commands/discovery.rs` | Shared discovery-shadowing contract consumed by both the command palette and slash completion: canonical-token shadowing, alias-token shadowing, and unshadowed-alias projection. Both discovery surfaces interpret user-command ownership identically through this module. |
 | `crates/tui/src/commands/user_commands.rs` | Lower-level file scanning, frontmatter parsing, allowed-tools parsing, and template substitution used by the registry. |
 | `crates/tui/src/tui/command_palette.rs` | Palette entries for built-ins and visible user commands, with user commands shadowing built-ins. |
 | `crates/tui/src/tui/widgets/mod.rs` | Slash completion, user-command metadata display, and alias-shadowing behavior. |

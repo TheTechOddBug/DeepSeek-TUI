@@ -10,6 +10,7 @@ use crate::artifacts::ArtifactRecord;
 use crate::config::ApiProvider;
 use crate::model_routing::AutoRouteReceipt;
 use crate::models::{ContentBlock, Message, SystemPrompt};
+use crate::session_tree::{SessionEntry, SessionImportContainer, SessionJournal};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::todo::TodoListSnapshot;
 use crate::tui::file_mention::ContextReference;
@@ -165,6 +166,8 @@ pub struct SessionMetadata {
     /// until the flag is actually set.
     #[serde(default, skip_serializing_if = "is_not_archived")]
     pub archived: bool,
+    #[serde(default)]
+    pub spawn_depth: u32,
 }
 
 fn is_not_archived(archived: &bool) -> bool {
@@ -490,6 +493,7 @@ pub(crate) struct SavedAutoRouteReceipt {
 }
 
 /// A saved session containing full conversation history
+/// Starting with v0.9.5 (#5262) the canonical history is the append-only entry journal (`journal` / `leaf_id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSession {
     /// Schema version for migration compatibility
@@ -497,8 +501,12 @@ pub struct SavedSession {
     pub schema_version: u32,
     /// Session metadata
     pub metadata: SessionMetadata,
-    /// Conversation messages
+    /// Conversation messages — derived from the journal's active branch (kept for compat).
     pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<SessionJournal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_id: Option<String>,
     /// System prompt if any
     pub system_prompt: Option<String>,
     /// Compact linked context references for user-visible `@path` and
@@ -516,6 +524,150 @@ pub struct SavedSession {
     /// is `auto`. Optional for backward-compatible session loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_auto_route: Option<SavedAutoRouteReceipt>,
+}
+impl SavedSession {
+    /// Drop the journal-derived compatibility projection before an async
+    /// persistence request takes ownership. Disk serialization restores it.
+    pub(crate) fn compact_for_persistence_queue(&mut self) {
+        if self.journal.is_some() {
+            self.messages = Vec::new();
+        }
+    }
+
+    fn storage_compatible_copy(&self) -> Option<Self> {
+        let journal = self.journal.as_ref()?;
+        let active_messages = journal.to_messages();
+        if !self.messages.is_empty() && self.messages == active_messages {
+            return None;
+        }
+        let mut copy = self.clone();
+        if copy.messages.is_empty() {
+            copy.messages = active_messages;
+        } else if let Some(journal) = copy.journal.as_mut() {
+            journal.rebranch_active_messages(&copy.messages);
+            copy.leaf_id = journal.leaf_id.clone();
+        }
+        copy.metadata.message_count = copy.messages.len();
+        Some(copy)
+    }
+
+    pub fn ensure_journal(&mut self) {
+        if self.journal.is_some() {
+            if self.leaf_id.is_none() {
+                self.leaf_id = self.journal.as_ref().and_then(|j| j.leaf_id.clone());
+            }
+            let active = self
+                .journal
+                .as_ref()
+                .map(|j| j.to_messages())
+                .unwrap_or_default();
+            if !active.is_empty() {
+                self.messages = active;
+                self.metadata.message_count = self.messages.len();
+            }
+            return;
+        }
+        let journal =
+            SessionJournal::from_messages(self.messages.clone(), self.metadata.spawn_depth);
+        self.leaf_id = journal.leaf_id.clone();
+        self.journal = Some(journal);
+    }
+    pub fn journal_append_message(&mut self, message: Message) -> String {
+        self.ensure_journal();
+        let journal = self.journal.as_mut().expect("journal ensured");
+        let id = journal.append_message(message.clone());
+        self.leaf_id = journal.leaf_id.clone();
+        self.messages = journal.to_messages();
+        self.metadata.message_count = self.messages.len();
+        self.metadata.updated_at = Utc::now();
+        id
+    }
+    pub fn journal_branch_to(&mut self, entry_id: &str) -> Result<(), String> {
+        self.ensure_journal();
+        let journal = self.journal.as_mut().expect("journal ensured");
+        journal.branch_to(entry_id)?;
+        self.leaf_id = journal.leaf_id.clone();
+        self.messages = journal.to_messages();
+        self.metadata.updated_at = Utc::now();
+        Ok(())
+    }
+    pub fn active_entries(&self) -> Vec<SessionEntry> {
+        self.journal
+            .as_ref()
+            .map(|j| j.root_to_leaf().into_iter().cloned().collect())
+            .unwrap_or_default()
+    }
+    pub fn export_container(&self, source: &str) -> SessionImportContainer {
+        let journal = self.journal.clone().unwrap_or_else(|| {
+            SessionJournal::from_messages(self.messages.clone(), self.metadata.spawn_depth)
+        });
+        SessionImportContainer::new(
+            source.to_string(),
+            &journal,
+            serde_json::to_value(&self.metadata).ok(),
+        )
+    }
+    pub fn import_foreign(
+        container: SessionImportContainer,
+        workspace: PathBuf,
+        model: String,
+    ) -> Result<Self, String> {
+        let journal = container.into_journal()?;
+        let leaf_id = journal.leaf_id.clone();
+        let messages = journal.to_messages();
+        let now = Utc::now();
+        let spawn_depth = journal.spawn_depth.saturating_add(1);
+        let title = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .and_then(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+            })
+            .map(|s| crate::session_manager::truncate_title(s, 50))
+            .unwrap_or_else(|| crate::session_manager::DEFAULT_SESSION_TITLE.to_string());
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4().to_string(),
+            title,
+            created_at: now,
+            updated_at: now,
+            message_count: messages.len(),
+            total_tokens: 0,
+            model,
+            model_provider: default_model_provider(),
+            model_provider_id: None,
+            workspace,
+            mode: None,
+            cost: SessionCostSnapshot::default(),
+            parent_session_id: None,
+            forked_from_message_count: None,
+            cumulative_turn_secs: 0,
+            archived: false,
+            spawn_depth,
+        };
+        let mut journal = journal;
+        journal.spawn_depth = spawn_depth;
+        Ok(Self {
+            schema_version: CURRENT_SESSION_SCHEMA_VERSION,
+            metadata,
+            messages,
+            journal: Some(journal),
+            leaf_id,
+            system_prompt: None,
+            context_references: Vec::new(),
+            artifacts: Vec::new(),
+            work_state: None,
+            last_auto_route: None,
+        })
+    }
+}
+
+fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
+    let compatible = session.storage_compatible_copy();
+    serde_json::to_string_pretty(compatible.as_ref().unwrap_or(session))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// Manager for session persistence operations
@@ -626,8 +778,7 @@ impl SessionManager {
 
         self.archive_before_first_graph_write(session, &path)?;
 
-        let content = serde_json::to_string_pretty(&session)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let content = serialize_saved_session(session)?;
 
         // Atomic write via write_atomic (NamedTempFile + fsync + persist)
         write_atomic(&path, content.as_bytes())?;
@@ -649,8 +800,7 @@ impl SessionManager {
         self.archive_before_first_graph_write(session, &session_path)?;
         fs::create_dir_all(self.checkpoints_dir())?;
         let already_persisted = path.exists() || session_path.exists();
-        let content = serde_json::to_string_pretty(&session)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let content = serialize_saved_session(session)?;
         write_atomic(&path, content.as_bytes())?;
         self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
         Ok(path)
@@ -968,9 +1118,14 @@ impl SessionManager {
         }
 
         session.system_prompt = strip_legacy_truncation_note(session.system_prompt);
+        session.ensure_journal();
 
         let repair = crate::tool_history_repair::repair_tool_call_pairs(&mut session.messages);
         if !repair.is_empty() {
+            if let Some(journal) = session.journal.as_mut() {
+                journal.rebranch_active_messages(&session.messages);
+                session.leaf_id = journal.leaf_id.clone();
+            }
             session.metadata.message_count = session.messages.len();
             tracing::warn!(
                 session_id = %session.metadata.id,
@@ -1316,7 +1471,11 @@ pub(crate) fn workspace_scope_matches(saved_workspace: &Path, current_workspace:
 }
 
 fn is_empty_auto_created_session(session: &SessionMetadata) -> bool {
-    session.message_count == 0 && session.title.trim().eq_ignore_ascii_case("New Session")
+    session.message_count == 0
+        && session
+            .title
+            .trim()
+            .eq_ignore_ascii_case(DEFAULT_SESSION_TITLE)
 }
 
 fn paths_equivalent(lhs: &Path, rhs: &Path) -> bool {
@@ -1471,6 +1630,12 @@ pub fn create_saved_session(
     )
 }
 
+/// Placeholder title used for a session that has no first user message yet.
+/// `build_session_snapshot` (tui/ui/frame.rs) treats a title equal to this
+/// constant as an auto-generated placeholder and lets the conversation-derived
+/// title win once a user message exists. Keep this string stable on purpose.
+pub(crate) const DEFAULT_SESSION_TITLE: &str = "New Session";
+
 /// Create a new `SavedSession` from conversation state with optional mode label
 pub fn create_saved_session_with_mode(
     messages: &[Message],
@@ -1520,8 +1685,10 @@ pub fn create_saved_session_with_id_and_mode(
                 _ => None,
             })
         })
-        .unwrap_or_else(|| "New Session".to_string());
+        .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
 
+    let journal = SessionJournal::from_messages(messages.to_vec(), 0);
+    let leaf_id = journal.leaf_id.clone();
     SavedSession {
         schema_version: CURRENT_SESSION_SCHEMA_VERSION,
         metadata: SessionMetadata {
@@ -1541,8 +1708,11 @@ pub fn create_saved_session_with_id_and_mode(
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
             archived: false,
+            spawn_depth: 0,
         },
         messages: messages.to_vec(),
+        journal: Some(journal),
+        leaf_id,
         system_prompt: system_prompt_to_string(system_prompt),
         context_references: Vec::new(),
         artifacts: Vec::new(),
@@ -1559,6 +1729,45 @@ pub fn update_session(
     system_prompt: Option<&SystemPrompt>,
 ) -> SavedSession {
     session.schema_version = CURRENT_SESSION_SCHEMA_VERSION;
+    session.ensure_journal();
+    let old_len = session.messages.len();
+    let new_len = messages.len();
+    if new_len >= old_len && messages[..old_len] == session.messages[..] {
+        if let Some(journal) = session.journal.as_mut() {
+            for msg in &messages[old_len..] {
+                journal.append_message(msg.clone());
+            }
+            session.leaf_id = journal.leaf_id.clone();
+        }
+    } else if (new_len != old_len || messages != session.messages.as_slice())
+        && let Some(journal) = session.journal.as_mut()
+    {
+        let common = messages
+            .iter()
+            .zip(session.messages.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if common > 0 && common <= journal.entries.len() {
+            let target_id = journal
+                .root_to_leaf()
+                .get(common - 1)
+                .map(|entry| entry.id.clone());
+            if let Some(target_id) = target_id {
+                let _ = journal.branch_to(&target_id);
+            } else {
+                journal.leaf_id = None;
+            }
+        } else if common == 0 {
+            journal.leaf_id = journal.entries.first().and_then(|e| e.parent_id.clone());
+            if journal.leaf_id.is_none() && !journal.entries.is_empty() {
+                journal.leaf_id = None;
+            }
+        }
+        for msg in messages.iter().skip(common) {
+            journal.append_message(msg.clone());
+        }
+        session.leaf_id = journal.leaf_id.clone();
+    }
     session.messages.clear();
     session.messages.extend_from_slice(messages);
     session.metadata.updated_at = Utc::now();
@@ -2061,7 +2270,10 @@ mod tests {
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
                 archived: false,
+                spawn_depth: 0,
             },
+            journal: None,
+            leaf_id: None,
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
@@ -2082,7 +2294,7 @@ mod tests {
             messages: Vec::new(),
             metadata: SessionMetadata {
                 id: id.to_string(),
-                title: "New Session".to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
                 created_at: updated_at,
                 updated_at,
                 message_count: 0,
@@ -2097,7 +2309,10 @@ mod tests {
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
                 archived: false,
+                spawn_depth: 0,
             },
+            journal: None,
+            leaf_id: None,
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
@@ -2304,6 +2519,11 @@ mod tests {
                 )
             })
         }));
+        assert_eq!(
+            loaded.journal.as_ref().map(SessionJournal::to_messages),
+            Some(loaded.messages.clone()),
+            "the append-only journal must follow the repaired active branch"
+        );
         assert!(loaded.messages.iter().any(|message| {
             (message.role == "assistant"
                 || message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE)
@@ -2915,6 +3135,11 @@ mod tests {
 
     #[test]
     fn save_load_round_trip_preserves_all_messages_for_cache_fidelity() {
+        #[derive(serde::Deserialize)]
+        struct LegacySession {
+            messages: Vec<Message>,
+        }
+
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
         // Covers the old 500-message cap boundary and well beyond.
@@ -2928,10 +3153,22 @@ mod tests {
                 })
                 .collect();
 
-            let session = create_saved_session(&original, "test-model", tmp.path(), 0, None);
-            manager.save_session(&session).expect("save");
+            let mut session = create_saved_session(&original, "test-model", tmp.path(), 0, None);
+            let expected_journal = session.journal.clone();
+            session.compact_for_persistence_queue();
+            let path = manager.save_session(&session).expect("save");
+            let legacy: LegacySession =
+                serde_json::from_slice(&fs::read(path).expect("read")).expect("legacy reader");
             let loaded = manager.load_session(&session.metadata.id).expect("load");
 
+            assert_eq!(
+                legacy.messages, original,
+                "legacy messages for count={count}"
+            );
+            assert_eq!(
+                loaded.journal, expected_journal,
+                "journal for count={count}"
+            );
             assert_eq!(
                 loaded.messages.len(),
                 count,
@@ -2962,6 +3199,9 @@ mod tests {
             },
             ..SessionWorkState::default()
         });
+        let expected_messages = session.messages.clone();
+        let expected_journal = session.journal.clone();
+        session.compact_for_persistence_queue();
 
         let path = manager.save_checkpoint(&session).expect("save checkpoint");
         assert_eq!(
@@ -2974,7 +3214,8 @@ mod tests {
             .expect("load checkpoint")
             .expect("checkpoint exists");
         assert_eq!(loaded.metadata.id, session.metadata.id);
-        assert_eq!(loaded.messages, session.messages);
+        assert_eq!(loaded.messages, expected_messages);
+        assert_eq!(loaded.journal, expected_journal);
         assert_eq!(
             loaded.work_state, session.work_state,
             "work state must survive the checkpoint round trip"

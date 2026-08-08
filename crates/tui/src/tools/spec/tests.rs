@@ -187,6 +187,8 @@ fn scoped_authority(roots: &[&str], files: &[&str]) -> ToolAuthorityEnvelope {
         owner: "fleet-worker-1".to_string(),
         authority: ToolMutationAuthority::ScopedWrite,
         network_access: None,
+        shell: ToolShellAuthority::None,
+        verification: ToolVerificationAuthority::None,
         writable_roots: roots.iter().map(|value| (*value).to_string()).collect(),
         writable_files: files.iter().map(|value| (*value).to_string()).collect(),
         coordination_contracts: Vec::new(),
@@ -278,6 +280,25 @@ fn nested_tool_authority_may_only_narrow_the_outer_cap() {
         owner: "read-only-child".to_string(),
         authority: ToolMutationAuthority::ReadOnly,
         network_access: None,
+        shell: ToolShellAuthority::None,
+        verification: ToolVerificationAuthority::None,
+        writable_roots: Vec::new(),
+        writable_files: Vec::new(),
+        coordination_contracts: Vec::new(),
+    };
+    ToolContext::new(tmp.path().to_path_buf())
+        .with_tool_authority(outer.clone())
+        .unwrap()
+        .with_tool_authority(read_only)
+        .expect("read-only always narrows a write cap");
+
+    let shell_expansion = ToolAuthorityEnvelope {
+        schema_version: 1,
+        owner: "shell-expansion".to_string(),
+        authority: ToolMutationAuthority::ReadOnly,
+        network_access: None,
+        shell: ToolShellAuthority::ReadOnly,
+        verification: ToolVerificationAuthority::None,
         writable_roots: Vec::new(),
         writable_files: Vec::new(),
         coordination_contracts: Vec::new(),
@@ -285,8 +306,89 @@ fn nested_tool_authority_may_only_narrow_the_outer_cap() {
     ToolContext::new(tmp.path().to_path_buf())
         .with_tool_authority(outer)
         .unwrap()
+        .with_tool_authority(shell_expansion)
+        .err()
+        .expect("nested authority cannot add a shell cap the outer process lacks");
+}
+
+#[test]
+fn legacy_v1_authority_envelopes_default_to_shell_none() {
+    let authority = ToolAuthorityEnvelope::from_json(
+        r#"{"schema_version":1,"owner":"legacy-worker","authority":"read_only"}"#,
+    )
+    .expect("pre-shell v1 envelope remains readable");
+    assert_eq!(authority.shell, ToolShellAuthority::None);
+    assert_eq!(authority.verification, ToolVerificationAuthority::None);
+}
+
+#[test]
+fn headless_fleet_registers_bash_only_when_the_clamped_ceiling_keeps_it() {
+    assert!(fleet_exec_shell_enabled(
+        true,
+        ToolShellAuthority::ReadOnly,
+        None
+    ));
+    assert!(!fleet_exec_shell_enabled(
+        true,
+        ToolShellAuthority::ReadOnly,
+        Some(&["ba*".into()])
+    ));
+    assert!(!fleet_exec_shell_enabled(
+        true,
+        ToolShellAuthority::None,
+        None
+    ));
+}
+
+#[test]
+fn bounded_verification_is_typed_and_cannot_smuggle_bash_authority() {
+    let bounded = ToolAuthorityEnvelope::from_json(
+        r#"{"schema_version":1,"owner":"verifier","authority":"read_only","verification":"bounded"}"#,
+    )
+    .expect("bounded verifier authority");
+    assert_eq!(bounded.verification, ToolVerificationAuthority::Bounded);
+
+    let widened = ToolAuthorityEnvelope {
+        shell: ToolShellAuthority::ReadOnly,
+        ..bounded
+    };
+    assert!(
+        widened.normalized().is_err(),
+        "bounded verification and Bash authority are separate, non-composable caps"
+    );
+}
+
+#[test]
+fn read_only_machine_authority_clamps_live_shell_policy() {
+    let tmp = tempdir().expect("tempdir");
+    let read_only = ToolAuthorityEnvelope {
+        schema_version: 1,
+        owner: "scout".to_string(),
+        authority: ToolMutationAuthority::ReadOnly,
+        network_access: Some(true),
+        shell: ToolShellAuthority::ReadOnly,
+        verification: ToolVerificationAuthority::None,
+        writable_roots: Vec::new(),
+        writable_files: Vec::new(),
+        coordination_contracts: Vec::new(),
+    };
+    let mut context = ToolContext::new(tmp.path().to_path_buf())
         .with_tool_authority(read_only)
-        .expect("read-only always narrows a write cap");
+        .expect("read-only authority");
+
+    assert_eq!(context.shell_policy, ShellPolicy::ReadOnly);
+    context.set_shell_policy(ShellPolicy::Full);
+    assert_eq!(
+        context.shell_policy,
+        ShellPolicy::ReadOnly,
+        "a live mode refresh must not widen the process authority cap"
+    );
+
+    let scoped = ToolContext::new(tmp.path().to_path_buf())
+        .with_tool_authority(scoped_authority(&["src"], &[]))
+        .expect("scoped authority")
+        .with_shell_policy(ShellPolicy::Full);
+    assert_eq!(scoped.shell_policy, ShellPolicy::None);
 }
 
 #[test]
@@ -299,6 +401,8 @@ fn process_tool_authority_inherits_into_all_context_constructors() {
             owner: "fleet-worker-child-process".to_string(),
             authority: ToolMutationAuthority::ReadOnly,
             network_access: None,
+            shell: ToolShellAuthority::ReadOnly,
+            verification: ToolVerificationAuthority::None,
             writable_roots: Vec::new(),
             writable_files: Vec::new(),
             coordination_contracts: Vec::new(),
@@ -318,6 +422,7 @@ fn process_tool_authority_inherits_into_all_context_constructors() {
                 .expect("every constructor inherits process authority");
             assert_eq!(authority.owner, "fleet-worker-child-process");
             assert_eq!(authority.authority, ToolMutationAuthority::ReadOnly);
+            assert_eq!(context.shell_policy, ShellPolicy::ReadOnly);
         }
         return;
     }

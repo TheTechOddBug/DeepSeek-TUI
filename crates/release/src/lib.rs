@@ -198,12 +198,11 @@ pub fn update_network_fallback_hint() -> String {
     format!(
         "GitHub release downloads may be blocked or slow on this network.\n\
          For mainland China, use one of these fallback paths:\n\
-           1. Source build from the CNB mirror, installing both shipped binaries:\n\
+           1. Source build from the CNB mirror, installing the shipped binary:\n\
               cargo install --git {CNB_REPO_URL} --tag vX.Y.Z codewhale-cli --locked --force\n\
-              cargo install --git {CNB_REPO_URL} --tag vX.Y.Z codewhale-tui --locked --force\n\
            2. Use a binary asset mirror:\n\
               {RELEASE_BASE_URL_ENV}=https://<mirror>/<release-assets>/ {UPDATE_VERSION_ENV}=X.Y.Z codewhale update\n\
-         The mirror directory must contain {CHECKSUM_MANIFEST_ASSET} and the platform binaries."
+         The mirror directory must contain {CHECKSUM_MANIFEST_ASSET} and the codewhale platform binary."
     )
 }
 
@@ -619,6 +618,14 @@ mod tests {
         assert!(
             hint.contains(CHECKSUM_MANIFEST_ASSET),
             "hint missing CHECKSUM_MANIFEST_ASSET"
+        );
+        assert!(
+            hint.contains("codewhale platform binary"),
+            "hint must describe the sole implementation asset"
+        );
+        assert!(
+            !hint.contains("codewhale-tui"),
+            "hint must not request the removed TUI implementation asset"
         );
     }
 

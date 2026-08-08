@@ -1,4 +1,5 @@
 pub mod auth_source;
+pub mod auto_model;
 pub mod catalog;
 mod config_document;
 pub mod external_credentials;
@@ -1863,6 +1864,7 @@ impl<'de> Deserialize<'de> for FleetRole {
 pub enum FleetSlot {
     Manager,
     Scout,
+    Planner,
     Implementer,
     Reviewer,
     Verifier,
@@ -1879,6 +1881,7 @@ impl FleetSlot {
         match self {
             Self::Manager => "manager",
             Self::Scout => "scout",
+            Self::Planner => "planner",
             Self::Implementer => "implementer",
             Self::Reviewer => "reviewer",
             Self::Verifier => "verifier",
@@ -1894,6 +1897,7 @@ impl FleetSlot {
         match value.trim() {
             "manager" | "coordinator" => Self::Manager,
             "scout" | "research" | "research-worker" => Self::Scout,
+            "planner" | "plan" | "awaiter" => Self::Planner,
             "implementer" | "builder" => Self::Implementer,
             "reviewer" => Self::Reviewer,
             "verifier" | "tester" => Self::Verifier,

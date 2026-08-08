@@ -977,7 +977,10 @@ pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> FleetRole {
         Some("reviewer") => FleetRole::Reviewer,
         Some("builder") => FleetRole::Builder,
         Some("verifier") | Some("tester") => FleetRole::Verifier,
+        // Every canonical dispatch posture is also a seeded roster member
+        // (#5285); the explicit arms keep the roster→runtime mapping 1:1.
         Some("planner") => FleetRole::Planner,
+        Some("custom") => FleetRole::Custom,
         // Advisory counsel (#4752). `oracle` and `advisor` are compatibility
         // aliases for the canonical public role name, `consultant`.
         Some("consultant") | Some("oracle") | Some("advisor") => FleetRole::Consultant,
@@ -1671,6 +1674,33 @@ mod tests {
             codewhale_config::FleetSlot::Summarizer
         );
         assert_eq!(roster_member_agent_type(&slot_only), FleetRole::Planner);
+    }
+
+    /// #5285: every seeded dispatch posture maps back to exactly its own
+    /// runtime role, so the roster listing and the dispatch enum cannot drift
+    /// into a parallel taxonomy.
+    #[test]
+    fn seeded_posture_members_map_1to1_to_their_fleet_role() {
+        let roster = crate::fleet::roster::FleetRoster::built_ins_only();
+        for (id, expected) in [
+            ("worker", FleetRole::Worker),
+            ("scout", FleetRole::Scout),
+            ("planner", FleetRole::Planner),
+            ("reviewer", FleetRole::Reviewer),
+            ("builder", FleetRole::Builder),
+            ("verifier", FleetRole::Verifier),
+            ("consultant", FleetRole::Consultant),
+            ("custom", FleetRole::Custom),
+        ] {
+            let member = roster
+                .get(id)
+                .unwrap_or_else(|| panic!("seeded posture {id:?} must be a roster member"));
+            assert_eq!(
+                roster_member_agent_type(member),
+                expected,
+                "roster member {id:?} must resolve to its own dispatch posture"
+            );
+        }
     }
 
     #[test]

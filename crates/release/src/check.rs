@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 pub const UPDATE_CHECK_CACHE_FILE: &str = "update-check.json";
 
 /// Default hours between network update checks.
-pub const DEFAULT_CHECK_INTERVAL_HOURS: u64 = 24;
+pub const DEFAULT_CHECK_INTERVAL_HOURS: u64 = 1;
 
 /// Explicit opt-out, and the `update-notifier` convention many CLIs honour.
 const OPT_OUT_ENV: &[&str] = &["CODEWHALE_NO_UPDATE_CHECK", "NO_UPDATE_NOTIFIER"];
@@ -185,13 +185,13 @@ mod tests {
             checked_at_unix: 1_000_000,
             latest_tag: Some("v0.9.5".to_string()),
         };
-        // 23h later: still fresh on a 24h interval.
-        assert!(entry.is_fresh(1_000_000 + 23 * 3600, 24));
-        // 25h later: stale.
-        assert!(!entry.is_fresh(1_000_000 + 25 * 3600, 24));
+        // One second before the one-hour boundary: still fresh.
+        assert!(entry.is_fresh(1_000_000 + 3599, 1));
+        // One second beyond the boundary: stale.
+        assert!(!entry.is_fresh(1_000_000 + 3601, 1));
         // Exactly at the boundary counts as stale, so the interval is a true
         // upper bound on cache age.
-        assert!(!entry.is_fresh(1_000_000 + 24 * 3600, 24));
+        assert!(!entry.is_fresh(1_000_000 + 3600, 1));
     }
 
     #[test]

@@ -308,9 +308,9 @@ catalog and alias visibility at the exact candidate SHA:
 
 ```bash
 python3 scripts/measure-runtime-contract.py
-cargo test -p codewhale-tui --bin codewhale-tui --locked shell_surface_contains_only_the_canonical_bash_tool
-cargo test -p codewhale-tui --bin codewhale-tui --locked runtime_task_families_expose_only_canonical_tools
-cargo test --locked -p codewhale-tui --bin codewhale-tui print_mode_tool_catalog_metrics -- --ignored --nocapture
+cargo test -p codewhale-tui --lib --locked tools::registry::tests::shell_surface_contains_only_the_canonical_bash_tool -- --exact
+cargo test -p codewhale-tui --lib --locked tools::registry::tests::runtime_task_families_expose_only_canonical_tools -- --exact
+cargo test --locked -p codewhale-tui --lib core::engine::tests::print_mode_tool_catalog_metrics -- --ignored --exact --nocapture
 ```
 
 Check the test names against the source before trusting a green run: `cargo test`

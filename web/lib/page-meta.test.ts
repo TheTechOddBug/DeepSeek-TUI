@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { locales } from "./i18n/config";
-import { buildPageMetadata, IDENTITY_PHRASE, SITE_NAME, SITE_URL } from "./page-meta";
+import { buildPageMetadata, IDENTITY_PHRASE, OG_ALT, SITE_NAME, SITE_URL } from "./page-meta";
 
 /** hreflang alternates derive from the canonical locale registry. */
 function expectedLanguages(path: string): Record<string, string> {
@@ -45,7 +45,7 @@ describe("page metadata", () => {
           url: `${SITE_URL}/opengraph-image`,
           width: 1200,
           height: 630,
-          alt: `${SITE_NAME} — ${IDENTITY_PHRASE}`,
+          alt: OG_ALT,
         },
       ],
     });
@@ -70,6 +70,17 @@ describe("page metadata", () => {
     }
     expect(languages["x-default"]).toBe(`${SITE_URL}/en/docs`);
     expect(Object.keys(languages)).toHaveLength(locales.length + 1);
+  });
+
+  it("keeps the canonical brand-first identity without duplicating an OG heading", () => {
+    const brand = new RegExp(`\\b${SITE_NAME}\\b`, "gi");
+    const ogImage = readFileSync(new URL("../app/opengraph-image.tsx", import.meta.url), "utf8");
+
+    expect(IDENTITY_PHRASE).toBe("Codewhale dives into the deep so you don't have to.");
+    expect(OG_ALT).toBe(IDENTITY_PHRASE);
+    expect(OG_ALT.match(brand)).toHaveLength(1);
+    expect(ogImage).toContain("{IDENTITY_PHRASE}");
+    expect(ogImage).not.toContain("{SITE_NAME}");
   });
 
   it("keeps the previously incomplete indexable routes on the shared helper", () => {

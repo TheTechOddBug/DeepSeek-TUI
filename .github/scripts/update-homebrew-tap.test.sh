@@ -11,16 +11,12 @@ formula="${tmp_dir}/deepseek-tui.rb"
 assets=(
   codewhale-macos-arm64
   codew-macos-arm64
-  codewhale-tui-macos-arm64
   codewhale-macos-x64
   codew-macos-x64
-  codewhale-tui-macos-x64
   codewhale-linux-arm64
   codew-linux-arm64
-  codewhale-tui-linux-arm64
   codewhale-linux-x64
   codew-linux-x64
-  codewhale-tui-linux-x64
 )
 
 for asset in "${assets[@]}"; do
@@ -38,6 +34,9 @@ grep -Fq 'desc "Agentic terminal for open-source and open-weight coding models"'
 test "$(grep -Fc 'resource "codew" do' "${formula}")" -eq 4
 grep -Fq 'bin.install Dir["*"].first => "codew"' "${formula}"
 grep -Fq 'system "#{bin}/codew", "--version"' "${formula}"
-grep -Fq 'system "#{bin}/codewhale-tui", "--version"' "${formula}"
+if grep -Fq 'codewhale-tui' "${formula}"; then
+  echo "Homebrew formula must not install the legacy TUI compatibility asset" >&2
+  exit 1
+fi
 
 echo "update-homebrew-tap tests passed"

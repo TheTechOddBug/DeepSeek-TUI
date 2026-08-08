@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
-import { IDENTITY_PHRASE, SITE_NAME } from "@/lib/page-meta";
+import { IDENTITY_PHRASE, OG_ALT } from "@/lib/page-meta";
 
-export const alt = `${SITE_NAME} — ${IDENTITY_PHRASE}`;
+export const alt = OG_ALT;
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -38,20 +38,10 @@ export default function OpengraphImage() {
         <div style={{ display: "flex", flexDirection: "column" }}>
           <div
             style={{
-              fontSize: 116,
+              fontSize: 64,
               fontWeight: 700,
+              lineHeight: 1.18,
               color: "#14213A",
-              letterSpacing: 0,
-            }}
-          >
-            Codewhale
-          </div>
-          <div
-            style={{
-              marginTop: 28,
-              fontSize: 38,
-              lineHeight: 1.35,
-              color: "#455168",
               maxWidth: 980,
             }}
           >

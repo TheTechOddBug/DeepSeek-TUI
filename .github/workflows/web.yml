@@ -103,9 +103,10 @@ jobs:
         run: npm run compare:deployed-facts -- --expected-revision "$GITHUB_SHA"
       - name: Check Cloudflare deploy environment
         run: npm run check:deploy-env
-      - name: Build OpenNext bundle
-        run: npm run build && npx opennextjs-cloudflare build
-      - name: Deploy
+      # npm's deploy script performs one OpenNext build, then deploys that exact
+      # bundle. Wrangler must not run a custom post-cache build: OpenNext
+      # populates the remote cache before it hands the bundle to Wrangler.
+      - name: Build and deploy exact OpenNext bundle
         run: npm run deploy
       - name: Verify exact deployed revision
         # The public /api/facts receipt must identify this workflow's exact

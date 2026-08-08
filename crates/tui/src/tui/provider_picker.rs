@@ -1407,6 +1407,66 @@ pub(crate) fn external_consent_target_for_provider(
     Some((consent_provider, source, path))
 }
 
+/// #5243: grant-time validation — does the external file that the user wants
+/// to read actually exist and hold a fresh, usable token? The old picker only
+/// lexically normalized the path (`resolve_external_credential_path`) and
+/// deferred the check to the first request, which produced
+/// `auth:oauth-consented-select-to-check` and required a second `e` trip after
+/// a just-minted OAuth. Validating here fails fast and, when the check passes,
+/// the token is adopted automatically as part of the same grant.
+pub(crate) fn external_consent_target_is_grantable(provider: ApiProvider) -> bool {
+    let Some((_, _, path)) = external_consent_target_for_provider(provider) else {
+        return false;
+    };
+    match provider {
+        ApiProvider::Xai => crate::xai_oauth::external_file_is_fresh(&path),
+        ApiProvider::OpenaiCodex => codex_external_file_is_fresh(&path),
+        _ => false,
+    }
+}
+
+fn codex_external_file_is_fresh(path: &std::path::Path) -> bool {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let value: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let token = value
+        .get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.trim().is_empty());
+    let Some(token) = token else {
+        return false;
+    };
+    // Reuse the same 60s skew the runtime uses: token with valid JWT exp is fresh.
+    if let Some(exp) = codex_jwt_expiry(token) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        return now + 60 < exp;
+    }
+    // If we cannot parse expiry, fail closed — external Codex credentials are
+    // never refreshed by Codewhale, so an opaque token must be treated as stale.
+    false
+}
+
+fn codex_jwt_expiry(token: &str) -> Option<u64> {
+    use base64::Engine as _;
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    claims.get("exp")?.as_u64()
+}
+
 impl ProviderPickerView {
     #[cfg(test)]
     #[must_use]
@@ -3229,6 +3289,17 @@ impl ModalView for ProviderPickerView {
                             provider,
                             provider_id,
                         })
+                    } else if external_consent_target_is_grantable(provider) {
+                        // #5243: token already stored externally and the user
+                        // pressed Enter on the provider (says they want it
+                        // read) — adopt it automatically in the same chord,
+                        // no second `e` trip. Validated at grant time.
+                        if let Some(event) = self.build_external_consent_event() {
+                            ViewAction::EmitAndClose(event)
+                        } else {
+                            self.begin_setup();
+                            ViewAction::None
+                        }
                     } else {
                         self.begin_setup();
                         ViewAction::None
@@ -3245,6 +3316,21 @@ impl ModalView for ProviderPickerView {
                     ViewAction::EmitAndClose(ViewEvent::ProviderPickerExternalConsentRevoked {
                         provider: self.selected_provider(),
                     })
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty()
+                        && c.eq_ignore_ascii_case(&'e')
+                        && self.query.is_empty()
+                        && self.row_visible(self.selected_idx)
+                        && self.selected_external_consent_target().is_some() =>
+                {
+                    // #5243: one-chord external consent from the list — no
+                    // second trip through XaiAuthChoice/KeyEntry. The confirm
+                    // step validates at grant time and the token is adopted
+                    // automatically; a just-minted OAuth never requires a
+                    // follow-up `e`.
+                    self.enter_external_consent_choice();
+                    ViewAction::None
                 }
                 KeyCode::Char(c)
                     if key.modifiers.is_empty()

@@ -29,7 +29,6 @@ pub const BATCH_MAX_BYTES: usize = 64 * 1024;
 
 pub(crate) enum Message {
     Event(Box<Event>),
-    Flush(SyncSender<FlushOutcome>),
     Shutdown(SyncSender<FlushOutcome>),
 }
 
@@ -85,11 +84,6 @@ impl Handle {
         let _ = self.tx.send(Message::Event(Box::new(event)));
     }
 
-    /// Ask for a flush and wait at most `deadline` for the answer.
-    pub(crate) fn flush(&self, deadline: Duration) -> FlushOutcome {
-        self.round_trip(deadline, Message::Flush)
-    }
-
     /// Ask for a final flush and stop the thread.
     pub(crate) fn shutdown(&self, deadline: Duration) -> FlushOutcome {
         self.round_trip(deadline, Message::Shutdown)
@@ -121,10 +115,6 @@ fn run(context: &Context, rx: &Receiver<Message>) {
         let result = catch_unwind(AssertUnwindSafe(|| match message {
             Message::Event(event) => {
                 append(context, &event);
-                None
-            }
-            Message::Flush(ack) => {
-                let _ = ack.send(flush(context));
                 None
             }
             Message::Shutdown(ack) => {

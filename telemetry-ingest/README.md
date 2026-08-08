@@ -197,8 +197,8 @@ validated batch body. Never on a network address — an IP-keyed limiter would
 mean this Worker handles IPs, which is the whole thing it must not do. That is a
 weaker limiter (an `install_id.json` can be rewritten between POSTs) and it is
 the right trade: Cloudflare's edge already absorbs volumetric abuse, and the
-client only flushes twice per session anyway (a startup drain at most once every
-six hours, and one three-second attempt at shutdown).
+client only flushes once per session anyway (one three-second attempt at
+shutdown).
 
 ### Size cap
 

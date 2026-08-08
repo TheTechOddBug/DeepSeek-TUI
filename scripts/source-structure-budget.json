@@ -7,6 +7,7 @@
     "crates/agent/src/lib.rs",
     "crates/app-server/src/chat_completions.rs",
     "crates/app-server/src/lib.rs",
+    "crates/cli/src/cloud.rs",
     "crates/cli/src/lib.rs",
     "crates/cli/src/metrics.rs",
     "crates/cli/src/update.rs",
@@ -62,13 +63,14 @@
     "crates/tui/src/fleet/worker_runtime.rs",
     "crates/tui/src/hooks/config.rs",
     "crates/tui/src/hooks/executor.rs",
+    "crates/tui/src/lib.rs",
     "crates/tui/src/llm_client/mod.rs",
     "crates/tui/src/localization.rs",
-    "crates/tui/src/main.rs",
     "crates/tui/src/mcp.rs",
     "crates/tui/src/mcp/oauth.rs",
     "crates/tui/src/model_routing.rs",
     "crates/tui/src/models.rs",
+    "crates/tui/src/native_memory.rs",
     "crates/tui/src/palette/themes.rs",
     "crates/tui/src/plugins/agent_plugin.rs",
     "crates/tui/src/plugins/manifest.rs",
@@ -183,20 +185,16 @@
     "crates/workflow/src/lib.rs"
   ],
   "binary_targets": [
-    "codewhale-cli:codew",
     "codewhale-cli:codewhale",
     "codewhale-tui:codewhale-tui"
   ],
   "_todo_2026_08_06_windows_lane": "v0.9.4 Windows/no-sandbox test-lane repair: aggregate 673296 -> 673375 (+79 lines). The 12 failures blocking the ship were not Windows-only - 7 fail on any host with no OS sandbox backend (all Windows, Linux without bubblewrap), and release.yml's parity job runs the full suite on ubuntu-latest, so the tag itself would have failed. Growth is a pinned sandbox backend in the underwater test fixture plus one new test covering the unenforced rendering the fixture no longer exercises, the rooted-mention and native-separator fixes in file_mention, and their comments. No new modules; growth is in existing files. Pay down in v0.9.5.",
   "_todo_2026_08_06_unreleased": "Post-0.9.4 [Unreleased] work: aggregate 673375 -> 676325 and max module 17596 -> 17631. The bulk is Agent Plugins v1.0.0 consume/publish/slugify (a new plugins/agent_plugin.rs plus manifest/registry/export wiring, ~2.3k lines with its tests). The rest is the sub-agent billing work \u2014 the agent_spawned stream event that makes a child's model visible, the RLM block-intent scanner, memory revise/retire with journals, and the harness audit trail. main.rs takes the module bump from the stream event. No new packages or binaries. The standing note still applies: this is a ledger, not a new normal \u2014 pay it down by deletion and dedup rather than treating growth as routine.",
-  "_todo_2026_08_07_ship": "v0.9.4 final ship re-baseline: aggregate 676325 -> 676604 (+279 lines) for the todo_write sole progress surface, the fleet named-role model-pin contract + its tests, mid-stream network resume/paste dedup, and the release-prep runtime-contract budget rebaseline. No new 1000-line modules; growth is in existing files. Pay down in 0.9.5.",
-  "_todo_2026_08_07_signal_arming": "v0.9.4 release-gate repair: aggregate 676604 -> 676670 and max module 17631 -> 17684 (+66 lines). 53 in main.rs: splitting terminating-signal registration from the await so the OS disposition changes before `spawn_signal_cleanup_task` returns — a `tokio::spawn`ed task does not run until first polled, so registering inside it let a Ctrl-C in that window kill the process outright. The line cost is the `TerminatingSignals` struct and its two cfg'd impls replacing one free async fn, plus the comment recording why registration cannot be lazy. The other 13 are the shared guard that stops the two global-fetch-cache tests from resetting the cache under each other. No new modules or packages. Pay down in 0.9.5.",
-  "_todo_2026_08_07_builder_shell": "v0.9.4 builder shell repair: aggregate 676670 -> 676710 (+40 lines). The shared-checkout write gate now asks whether another *running* child is writing, instead of whether any claim exists — claims outlive their agents, so a workspace accumulated phantom contenders and every later builder lost Bash writes. Growth is the liveness-aware peer check plus a regression test that a lone shared writer keeps its shell. No new modules. Pay down in 0.9.5.",
   "document_kind": "codewhale.source_structure_budget",
   "large_module_threshold_lines": 1000,
-  "max_large_module_count": 177,
-  "max_module_lines": 17684,
-  "max_total_owned_rust_lines": 676710,
+  "max_large_module_count": 179,
+  "max_module_lines": 17680,
+  "max_total_owned_rust_lines": 685165,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",
@@ -220,5 +218,10 @@
     "codewhale-workflow",
     "codewhale-workflow-js"
   ],
-  "_todo_2026_08_07_rlm_turn": "v0.9.4 REPL fence + turn liveness: rlm/turn.rs 1081 lines becomes newly allowed (previously under threshold). Large-module count 176 -> 177. Provenance/empty-guard growth in turn.rs + honest exit ladder in turn_loop.rs. No new packages. Pay down in v0.9.5."
+  "_todo_2026_08_07_rlm_turn": "v0.9.4 REPL fence + turn liveness: rlm/turn.rs 1081 lines becomes newly allowed (previously under threshold). Large-module count 176 -> 177. Provenance/empty-guard growth in turn.rs + honest exit ladder in turn_loop.rs. No new packages. Pay down in v0.9.5.",
+  "_todo_2026_08_07_session_title_fix": "Session title pinned at New Session fix (codex/session-title-fix bf69e7ff5): aggregate 676325 -> 676653 (+328 lines). Includes two regression tests + DEFAULT_SESSION_TITLE constant (+128 from fork) plus efcf47a1d mid-stream resume/paste/fleet (+279) already landed without ceiling update. Durable test asset, not overspend.",
+  "_todo_2026_08_07_095_stack": "0.9.5 stack re-baseline: 680500 -> 680700 (+200) for #5243 OAuth auto-adopt in-progress (provider_picker + xai_oauth +128) and #5244 fallback helpers; keep slack for #5247 harness.",
+  "_todo_2026_08_07_5265_rc": "v0.9.5 /rc + managed login (5265): aggregate 680700 -> 683000 (+2300) for remote_control token-refresh resilience (cwc #140 single-retry, no 401-loop) and cloud pull/push --dry-run (account layer, Bearer keyring custody). cloud.rs 995 -> 1060 lines becomes newly allowed (explicit pull/push surface, 412 If-Match handling). Large-module count 178 -> 179, max module 17652 -> 17700. Pay down in v0.9.5.",
+  "_todo_2026_08_08_scout_evidence": "v0.9.5 Scout evidence profile: aggregate 684000 -> 684975 (+975 production Rust lines after the hidden continuation-cap deletion). The growth centralizes one normal/headless catalog and dispatch contract for an eight-tool evidence profile, a direct-argv read-only shell with executable/path/environment/Git/GitHub guards, parent authority intersection, and a typed Verifier-only bounded Run capability. No new package, binary, or thousand-line module; large-module count remains 179. The same reconciliation locks in the existing largest-module improvement 17700 -> 17680 and removes main.rs from the thousand-line allowlist. This is an explicit release-boundary re-baseline, not an assertion that the added security boundary is free; pursue deletion/dedup after v0.9.5.",
+  "_todo_2026_08_08_release_review": "Final v0.9.5 review reconciliation: aggregate 684975 -> 685165 (+190 net Rust lines). This is the net result after deleting duplicate routes and unreachable fields/helpers while adding the single-history persistence boundary, complete locale registry coverage, provider-aware auto-routing cleanup, OAuth/MCP/goal regressions, safe relative-link resolution for fetched HTML, Scout catalog/depth corrections, and compact-terminal indicator budgeting. No new package, binary, or thousand-line module; the large-module count remains 179 and the largest module remains 17680 lines. Keep the post-release deletion/dedup obligation rather than treating this release-boundary growth as free capacity."
 }

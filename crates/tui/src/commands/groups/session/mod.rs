@@ -3,6 +3,7 @@
 
 #[cfg(all(test, feature = "long-running-tests"))]
 mod acceptance;
+mod branch;
 mod compact;
 mod export;
 mod fork;
@@ -14,9 +15,11 @@ mod remote_control;
 mod rename;
 #[cfg(test)]
 pub(crate) use rename::rename_with_manager;
+mod resume;
 mod save;
 mod sessions;
 mod structcopy;
+mod tree;
 // This group dir intentionally has a `session.rs` child module with the same
 // name. The module_inception allow is a permanent structure rationale, not
 // migration scaffolding; see docs/architecture/command-dispatch.md.
@@ -54,6 +57,18 @@ impl CommandGroup for SessionCommands {
             Box::new(FunctionCommand::new(
                 load::LoadCmd::info(),
                 load::LoadCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                resume::ResumeCmd::info(),
+                resume::ResumeCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                tree::TreeCmd::info(),
+                tree::TreeCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                branch::BranchCmd::info(),
+                branch::BranchCmd::execute,
             )),
             Box::new(FunctionCommand::new(
                 compact::CompactCmd::info(),

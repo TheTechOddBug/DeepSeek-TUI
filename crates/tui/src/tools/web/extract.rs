@@ -187,36 +187,26 @@ fn extract_html(url: &str, html: &str) -> Result<ExtractedDocument, ToolError> {
     let parsed_url = reqwest::Url::parse(url)
         .map_err(|err| ToolError::invalid_input(format!("invalid URL: {err}")))?;
     let original_title = html_title(html);
-    let mut input = html.as_bytes();
-    let readable = readability::extractor::extract(&mut input, &parsed_url).ok();
 
-    let readable_html = readable
-        .as_ref()
-        .map(|product| product.content.trim())
-        .filter(|content| meaningful_html(content))
-        .map(ToOwned::to_owned);
-    let cleaned_html = readable_html
-        .or_else(|| fallback_main_html(html))
-        .ok_or_else(|| js_required_error(url))?;
-    let markdown = htmd::convert(&cleaned_html).map_err(|err| {
+    // Readability-based extraction was removed to consolidate the HTML
+    // pipeline onto a single stack (htmd 0.5 + html5ever 0.38). The
+    // previous dual-stack (readability 0.3 / html5ever 0.26 + htmd / 0.38)
+    // compiled two incompatible html5ever/markup5ever trees. The fallback
+    // main-content regex retains the meaningful-content signal used by the
+    // tests (≥32 non-whitespace chars, ≥5 words) without the duplicate tree.
+    let cleaned_html = fallback_main_html(html).ok_or_else(|| js_required_error(url))?;
+    let markdown = html_to_markdown_with_base_url(&cleaned_html, &parsed_url).map_err(|err| {
         ToolError::execution_failed(format!(
             "Failed to convert readable HTML to Markdown: {err}"
         ))
     })?;
-    let text = readable
-        .as_ref()
-        .map(|product| normalize_text(&product.text))
-        .filter(|content| meaningful_text(content))
-        .unwrap_or_else(|| html_to_plain_text(&cleaned_html));
+    let text = html_to_plain_text(&cleaned_html);
 
     if !meaningful_text(&text) && !meaningful_text(&markdown) {
         return Err(js_required_error(url));
     }
 
-    let title = readable
-        .map(|product| normalize_text(&product.title))
-        .filter(|value| !value.is_empty())
-        .or(original_title);
+    let title = original_title;
 
     Ok(ExtractedDocument {
         kind: DocumentKind::Html,
@@ -227,6 +217,63 @@ fn extract_html(url: &str, html: &str) -> Result<ExtractedDocument, ToolError> {
         pdf_pages: None,
         media_extension: None,
     })
+}
+
+/// Resolve relative anchors in `htmd`'s parsed DOM, not with an HTML regex.
+/// Absolute, fragment, non-HTTP, and malformed destinations fall through to
+/// the built-in handler unchanged.
+fn html_to_markdown_with_base_url(
+    html: &str,
+    base_url: &reqwest::Url,
+) -> Result<String, std::io::Error> {
+    let base_url = base_url.clone();
+    htmd::HtmlToMarkdown::builder()
+        .add_handler(
+            vec!["a"],
+            move |handlers: &dyn htmd::element_handler::Handlers, element: htmd::Element<'_>| {
+                let href = element.attrs.iter().find_map(|attr| {
+                    (attr.name.local.as_ref() == "href").then(|| attr.value.to_string())
+                });
+                let Some(destination) = href
+                    .as_deref()
+                    .and_then(|href| resolve_relative_http_href(&base_url, href))
+                else {
+                    return handlers.fallback(element);
+                };
+                let content = handlers.walk_children(element.node).content;
+                let trailing = &content[content.trim_end().len()..];
+                let destination = destination.replace('(', "\\(").replace(')', "\\)");
+                let title = element
+                    .attrs
+                    .iter()
+                    .find_map(|attr| {
+                        (attr.name.local.as_ref() == "title").then(|| {
+                            attr.value
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .replace('"', "\\\"")
+                        })
+                    })
+                    .map_or_else(String::new, |title| format!(" \"{title}\""));
+                Some(format!("[{}]({destination}{title}){trailing}", content.trim()).into())
+            },
+        )
+        .build()
+        .convert(html)
+}
+
+fn resolve_relative_http_href(base_url: &reqwest::Url, href: &str) -> Option<String> {
+    if !matches!(base_url.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let href = href.trim();
+    if href.is_empty() || href.starts_with('#') || reqwest::Url::parse(href).is_ok() {
+        return None;
+    }
+
+    base_url.join(href).ok().map(Into::into)
 }
 
 fn fallback_main_html(html: &str) -> Option<String> {
@@ -798,6 +845,32 @@ mod tests {
         );
         assert!(!document.markdown.contains("Products Pricing"));
         assert!(!document.markdown.contains("Privacy Cookies"));
+    }
+
+    #[test]
+    fn relative_http_href_resolution_preserves_other_destination_kinds() {
+        let base = reqwest::Url::parse("https://example.com/guides/page").expect("base URL");
+        assert_eq!(
+            resolve_relative_http_href(&base, "../proof?q=1#receipt").as_deref(),
+            Some("https://example.com/proof?q=1#receipt")
+        );
+        for href in [
+            "#receipt",
+            "mailto:maintainer@example.com",
+            "data:text/plain,proof",
+            "codewhale:session/123",
+            "https://other.example/proof",
+            "http://[::1",
+            "",
+        ] {
+            assert_eq!(
+                resolve_relative_http_href(&base, href),
+                None,
+                "destination must be left to htmd unchanged: {href:?}"
+            );
+        }
+        let file = reqwest::Url::parse("file:///tmp/page").expect("file URL");
+        assert!(resolve_relative_http_href(&file, "proof").is_none());
     }
 
     #[tokio::test]

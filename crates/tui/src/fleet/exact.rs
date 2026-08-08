@@ -190,6 +190,9 @@ pub(crate) const MUTATING_TOOL_DENYLIST: &[&str] = &[
 /// receipt says `write=false`. Denying the raw shell entries and leaving the
 /// bounded verification surface (`Run` / `run_tests` / `run_verifiers`) intact
 /// keeps the verifier able to do its job under a contract that is true.
+/// Scout/reviewer recon selectively removes only canonical `Bash` from this
+/// deny list after the role is known; its input-specific read-only classifier
+/// remains the authority for that narrow exception.
 ///
 /// That surface is bounded only in its **default** form, and the distinction is
 /// load-bearing: `run_verifiers` accepts a `commands` array of arbitrary
@@ -353,7 +356,9 @@ impl ChildAuthority {
         }
         // Raw shell requires the ceiling to *say* `shell = "full"`. Any narrower
         // shell posture — `none` (the `analyst` preset) or `read_only` — loses
-        // the raw command surface outright.
+        // the raw command surface outright. `clamp_for_role` may subsequently
+        // retain canonical `Bash` for a named scout/reviewer, whose concrete
+        // calls are bounded by the strict read-only classifier.
         //
         // This is deliberately keyed on the shell field rather than only on
         // `write`, and that is the whole repair: the execution envelope reads
@@ -387,13 +392,11 @@ impl ChildAuthority {
         if !ceiling.write {
             // `write = false` has to be a fact about the child's tool surface,
             // not a word on a receipt, so the mutating file tools go. The raw
-            // shell is already gone by the rule above — a `write = false`
-            // ceiling never satisfies `write && shell == Full` — which is what
-            // stops a `verifier`-shaped member that kept `shell = "full"` from
-            // mutating the workspace with an arbitrary command while its receipt
-            // says `write=false`. The bounded verification surface (`Run` /
-            // `run_tests` / `run_verifiers`) is deliberately left, so this
-            // narrows what the member may do without removing what it is for.
+            // shell is already gone by the rule above; a named scout/reviewer
+            // may regain only canonical Bash in `clamp_for_role`, behind its
+            // input-specific read-only classifier. The bounded verification
+            // surface (`Run` / `run_tests` / `run_verifiers`) is deliberately
+            // left for a full-shell verifier.
             disallowed_tools.extend(
                 MUTATING_TOOL_DENYLIST
                     .iter()
@@ -489,6 +492,21 @@ impl ChildAuthority {
     ) -> Self {
         let mut authority = Self::clamp(member, session);
         authority.posture_role = posture_role_for_member(role, authority.ceiling);
+        let named_recon = matches!(
+            role.trim().to_ascii_lowercase().as_str(),
+            "scout" | "explore" | "explorer" | "reviewer" | "review"
+        );
+        if named_recon && authority.ceiling.shell != ShellCeiling::None {
+            // Recon needs ordinary `git`/`rg`/`gh ... view|list` inspection.
+            // Keep one canonical foreground tool and leave every legacy,
+            // background, interactive, and terminal alias denied. The Bash
+            // spec and the machine authority envelope both reclassify the
+            // concrete input, so removing the name denial does not grant an
+            // arbitrary command channel.
+            authority
+                .disallowed_tools
+                .retain(|name| !name.eq_ignore_ascii_case("Bash"));
+        }
         authority
     }
 }
@@ -507,12 +525,7 @@ pub(crate) fn session_permission_ceiling(
         write: runtime.worker_profile.permissions.write,
         network_tool: runtime.worker_profile.permissions.network
             && runtime.agent_tool_surface_options.web_search_enabled,
-        shell: match runtime.worker_profile.shell {
-            crate::worker_profile::ShellPolicy::None => ShellCeiling::None,
-            crate::worker_profile::ShellPolicy::ReadOnly => ShellCeiling::ReadOnly,
-            crate::worker_profile::ShellPolicy::Full if runtime.allow_shell => ShellCeiling::Full,
-            crate::worker_profile::ShellPolicy::Full => ShellCeiling::ReadOnly,
-        },
+        shell: session_shell_ceiling(runtime.worker_profile.shell, runtime.allow_shell),
         delegation_depth: runtime.worker_profile.max_spawn_depth,
         // The session side never withholds the tool bit: a parent that has
         // reached this code is running a Workflow, which is itself a tool call,
@@ -520,6 +533,18 @@ pub(crate) fn session_permission_ceiling(
         // narrowing that matters — `tools = false` on a *member* ceiling — comes
         // from the saved Fleet and survives the clamp untouched.
         tools: true,
+    }
+}
+
+fn session_shell_ceiling(
+    shell: crate::worker_profile::ShellPolicy,
+    allow_shell: bool,
+) -> ShellCeiling {
+    match shell {
+        crate::worker_profile::ShellPolicy::None => ShellCeiling::None,
+        crate::worker_profile::ShellPolicy::ReadOnly => ShellCeiling::ReadOnly,
+        crate::worker_profile::ShellPolicy::Full if allow_shell => ShellCeiling::Full,
+        crate::worker_profile::ShellPolicy::Full => ShellCeiling::None,
     }
 }
 
@@ -1577,6 +1602,8 @@ fn exact_member_profile(
     source: Option<&std::path::Path>,
 ) -> AgentProfile {
     let posture_role = posture_role_for_member(&member.role, member.permissions);
+    let recon_shell = matches!(posture_role, "scout" | "reviewer")
+        && member.permissions.shell != ShellCeiling::None;
     // The canonical wire model, so the child spawns with exactly what the
     // receipt records.
     let wire_model = route.map_or_else(
@@ -1605,7 +1632,10 @@ fn exact_member_profile(
         // placed on the spawn request explicitly rather than baked in here.
         reasoning_effort: None,
         permissions: codewhale_config::FleetProfilePermissions {
-            allow_shell: member.permissions.shell == ShellCeiling::Full,
+            // This legacy boolean controls whether Bash is registered at all.
+            // Named recon with a non-none ceiling registers it, while the
+            // typed worker profile and per-input classifier keep it ReadOnly.
+            allow_shell: member.permissions.shell == ShellCeiling::Full || recon_shell,
             trust: false,
             approval_required: true,
         },
@@ -1878,6 +1908,70 @@ mod shell_ceiling_tests {
         let full = ChildAuthority::clamp(ceiling(true, ShellCeiling::Full), session());
         assert!(!denies_raw_shell(&full));
         assert_eq!(full.posture_role, "builder");
+    }
+
+    #[test]
+    fn named_recon_keeps_only_classifier_bounded_bash() {
+        for role in ["scout", "reviewer"] {
+            let authority = ChildAuthority::clamp_for_role(
+                role,
+                ceiling(false, ShellCeiling::ReadOnly),
+                session(),
+            );
+            assert!(
+                !authority
+                    .disallowed_tools
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case("Bash")),
+                "{role} keeps canonical Bash for per-input classification"
+            );
+            for denied in [
+                "exec_shell",
+                "task_shell_start",
+                "task_shell_wait",
+                "terminal/*",
+                "write_file",
+                "apply_patch",
+            ] {
+                assert!(
+                    authority.disallowed_tools.iter().any(|name| name == denied),
+                    "{role} must still deny {denied}: {:?}",
+                    authority.disallowed_tools
+                );
+            }
+        }
+
+        for role in ["planner", "consultant", "verifier"] {
+            let authority = ChildAuthority::clamp_for_role(
+                role,
+                ceiling(false, ShellCeiling::ReadOnly),
+                session(),
+            );
+            assert!(
+                authority
+                    .disallowed_tools
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case("Bash")),
+                "{role} must not gain the recon exception"
+            );
+        }
+
+        let parent_shell_off = ChildAuthority::clamp_for_role(
+            "scout",
+            ceiling(false, ShellCeiling::Full),
+            ceiling(true, ShellCeiling::None),
+        );
+        assert!(
+            parent_shell_off
+                .disallowed_tools
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("Bash")),
+            "a named Scout may not turn a parent shell-off ceiling into ReadOnly"
+        );
+        assert_eq!(
+            session_shell_ceiling(crate::worker_profile::ShellPolicy::Full, false),
+            ShellCeiling::None
+        );
     }
 
     /// The deny list feeds the fingerprint, so a ceiling that now denies more
@@ -2234,7 +2328,10 @@ permissions = "read_only"
         // ceiling this member saved refuses — so it is flattened into
         // `scout`, exactly as a `verifier` member under the same ceiling is.
         assert_eq!(auditor.profile.role.name, "scout");
-        assert!(!auditor.profile.permissions.allow_shell);
+        assert!(
+            auditor.profile.permissions.allow_shell,
+            "the projected Scout needs Bash registration for its typed read-only subset"
+        );
         assert_eq!(
             write_authority_for(workflow.member("auditor").expect("member").permissions),
             "read_only"

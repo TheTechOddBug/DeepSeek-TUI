@@ -12,22 +12,18 @@
 //!
 //! ## Design
 //!
-//! - **One dedicated tokio task** spawned at TUI startup. All disk I/O moves
-//!   to this task. The UI merely `try_send`s a request (non-blocking,
-//!   bounded-channel drop) and returns immediately — keystrokes are never
-//!   gated on write completion.
+//! - **One dedicated tokio task** owns disk I/O. The UI only sends requests;
+//!   keystrokes never wait for writes.
 //! - **Latest-wins coalescing per session**: when multiple `SaveCheckpoint`,
 //!   `SessionSnapshot`, or offline-queue requests pile up before the actor's
 //!   next write cycle, only the most recent one per session is written.
 //!   Checkpoints and clears are keyed by session id, so concurrent sessions
 //!   never coalesce into (or clear) each other's slot.
-//! - **Durability reporting**: every write/removal result is collected; a
-//!   `FlushAndReport` request drains pending work and replies with the
-//!   aggregated results since the last report. Cycles with no listener log
-//!   their failures instead of discarding them.
-//! - **Unbounded channel** for `try_send` to always succeed; the actor
-//!   naturally backpressures via the spawn pool. A few outstanding
-//!   `SavedSession` values in the channel (< 1 MB) is negligible pressure.
+//! - **Durability reporting**: `FlushAndReport` returns accumulated results;
+//!   cycles without a listener log failures instead of discarding them.
+//! - **Unbounded channel** for `try_send` to always succeed. Queued snapshots
+//!   retain only the canonical journal; legacy `messages` are derived at the
+//!   disk boundary instead of doubling every paused request.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -127,7 +123,14 @@ pub struct PersistActorHandle {
 impl PersistActorHandle {
     /// Queue a persistence request without blocking. If the actor's channel is
     /// closed (shutdown has already happened), return `false`.
-    pub fn try_send(&self, request: PersistRequest) -> bool {
+    pub fn try_send(&self, mut request: PersistRequest) -> bool {
+        match &mut request {
+            PersistRequest::SaveCheckpoint { session }
+            | PersistRequest::SessionSnapshot(session) => {
+                session.compact_for_persistence_queue();
+            }
+            _ => {}
+        }
         self.tx.send(request).is_ok()
     }
 }

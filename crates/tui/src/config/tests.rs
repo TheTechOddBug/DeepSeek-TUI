@@ -208,12 +208,13 @@ fn deepseek_api_key_reads_metadata_env_vars_for_newer_providers() -> Result<()> 
 
 #[test]
 fn goal_max_continuations_loads_from_goal_table() -> Result<()> {
-    // Absent table → generous built-in default (#5052).
+    // Absent table → unlimited by default (#5052).
     let config: Config = toml::from_str("")?;
     assert_eq!(
         config.goal_max_continuations(),
         crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS
     );
+    assert_eq!(config.goal_max_continuations(), 0);
 
     // Explicit backstop override.
     let config: Config = toml::from_str(
@@ -224,7 +225,7 @@ max_continuations = 25
     )?;
     assert_eq!(config.goal_max_continuations(), 25);
 
-    // 0 = unlimited-with-budget-stops.
+    // 0 = unlimited; token/time budgets are telemetry only.
     let config: Config = toml::from_str(
         r#"
 [goal]

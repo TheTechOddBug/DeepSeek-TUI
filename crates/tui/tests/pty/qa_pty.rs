@@ -10,17 +10,14 @@
 
 #![cfg(unix)]
 
-#[path = "support/qa_harness/mod.rs"]
-mod qa_harness;
-
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use qa_harness::harness::{Harness, make_sealed_workspace};
-use qa_harness::keys;
+use crate::qa_harness::harness::{Harness, make_sealed_workspace};
+use crate::qa_harness::keys;
 use sha2::{Digest, Sha256};
 use unicode_width::UnicodeWidthStr;
 
@@ -40,17 +37,19 @@ fn qa_pty_test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
-fn boot_minimal() -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
+fn boot_minimal() -> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)> {
     let ws = make_sealed_workspace()?;
     spawn_minimal_with_env(ws, &[])
 }
 
-fn boot_minimal_over_ssh() -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
+fn boot_minimal_over_ssh() -> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)>
+{
     let ws = make_sealed_workspace()?;
     spawn_minimal_with_env(ws, &[("SSH_CONNECTION", "192.0.2.10 51234 192.0.2.20 22")])
 }
 
-fn boot_minimal_without_retry() -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
+fn boot_minimal_without_retry()
+-> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)> {
     let ws = make_sealed_workspace()?;
     std::fs::write(
         ws.home().join(".deepseek").join("config.toml"),
@@ -60,9 +59,9 @@ fn boot_minimal_without_retry() -> anyhow::Result<(qa_harness::harness::SealedWo
 }
 
 fn spawn_minimal_with_env(
-    ws: qa_harness::harness::SealedWorkspace,
+    ws: crate::qa_harness::harness::SealedWorkspace,
     extra_env: &[(&str, &str)],
-) -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
+) -> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)> {
     let mut builder = Harness::builder(Harness::cargo_bin("codewhale-tui"))
         .cwd(ws.workspace())
         .clear_env()
@@ -243,11 +242,11 @@ fn spawn_approval_fixture_server() -> anyhow::Result<(String, std::thread::JoinH
     Ok((format!("http://{address}"), handle))
 }
 
-fn first_non_blank_row(frame: &qa_harness::Frame) -> Option<u16> {
+fn first_non_blank_row(frame: &crate::qa_harness::Frame) -> Option<u16> {
     (0..frame.rows()).find(|&row| !frame.row(row).trim().is_empty())
 }
 
-fn assert_viewport_starts_at_top(frame: &qa_harness::Frame) {
+fn assert_viewport_starts_at_top(frame: &crate::qa_harness::Frame) {
     let dump = frame.debug_dump();
     let first_row = first_non_blank_row(frame).expect("expected visible frame text");
     assert_eq!(
@@ -266,11 +265,15 @@ fn assert_viewport_starts_at_top(frame: &qa_harness::Frame) {
     );
 }
 
-fn visible_row_with_text(frame: &qa_harness::Frame, needle: &str) -> Option<u16> {
+fn visible_row_with_text(frame: &crate::qa_harness::Frame, needle: &str) -> Option<u16> {
     (0..frame.rows()).find(|&row| frame.row(row).contains(needle))
 }
 
-fn foreground_at_text(frame: &qa_harness::Frame, row: u16, needle: &str) -> qa_harness::Color {
+fn foreground_at_text(
+    frame: &crate::qa_harness::Frame,
+    row: u16,
+    needle: &str,
+) -> crate::qa_harness::Color {
     let col = frame
         .find_text_in_row(row, needle)
         .unwrap_or_else(|| panic!("{needle:?} missing from row {row}: {:?}", frame.row(row)));
@@ -280,7 +283,7 @@ fn foreground_at_text(frame: &qa_harness::Frame, row: u16, needle: &str) -> qa_h
         .0
 }
 
-fn composer_edge_rows(frame: &qa_harness::Frame, placeholder: &str) -> (u16, u16) {
+fn composer_edge_rows(frame: &crate::qa_harness::Frame, placeholder: &str) -> (u16, u16) {
     let input_row = visible_row_with_text(frame, placeholder)
         .unwrap_or_else(|| panic!("composer placeholder {placeholder:?} missing"));
     let minimum_rule_cells = usize::from(frame.cols() / 2);
@@ -310,11 +313,11 @@ fn composer_edge_rows(frame: &qa_harness::Frame, placeholder: &str) -> (u16, u16
 /// Assert the user-visible labels and the split composer edges tell the same
 /// agency/permission story in the ANSI cells emitted through the real PTY.
 fn assert_control_grammar(
-    frame: &qa_harness::Frame,
+    frame: &crate::qa_harness::Frame,
     mode: &str,
     permission: &str,
     placeholder: &str,
-) -> (qa_harness::Color, qa_harness::Color) {
+) -> (crate::qa_harness::Color, crate::qa_harness::Color) {
     let dump = frame.debug_dump();
     let header = frame.row(0);
     assert!(
@@ -344,7 +347,7 @@ fn assert_control_grammar(
     (mode_color, permission_color)
 }
 
-fn assert_real_pty_frame_geometry(frame: &qa_harness::Frame, cols: u16, rows: u16) {
+fn assert_real_pty_frame_geometry(frame: &crate::qa_harness::Frame, cols: u16, rows: u16) {
     let dump = frame.debug_dump();
     assert_eq!(frame.cols(), cols, "parsed PTY width changed:\n{dump}");
     assert_eq!(frame.rows(), rows, "parsed PTY height changed:\n{dump}");
@@ -369,7 +372,7 @@ fn assert_real_pty_frame_geometry(frame: &qa_harness::Frame, cols: u16, rows: u1
     }
 }
 
-fn assert_empty_state_hierarchy(frame: &qa_harness::Frame, ascii_safe: bool) {
+fn assert_empty_state_hierarchy(frame: &crate::qa_harness::Frame, ascii_safe: bool) {
     let dump = frame.debug_dump();
     let context = visible_row_with_text(frame, "codewhale").expect("empty-state context row");
     let composer = visible_row_with_text(frame, COMPOSER_READY_TEXT).expect("composer row");
@@ -431,7 +434,7 @@ fn assert_empty_state_hierarchy(frame: &qa_harness::Frame, ascii_safe: bool) {
 fn write_real_pty_evidence(
     name: &str,
     metadata: &str,
-    frame: &qa_harness::Frame,
+    frame: &crate::qa_harness::Frame,
 ) -> anyhow::Result<()> {
     write_real_pty_evidence_dump(name, metadata, &frame.debug_dump())
 }
@@ -463,7 +466,7 @@ fn wait_for_frame_dump<F>(
     timeout: Duration,
 ) -> anyhow::Result<String>
 where
-    F: FnMut(&qa_harness::Frame) -> bool,
+    F: FnMut(&crate::qa_harness::Frame) -> bool,
 {
     let mut captured = None;
     h.wait_for(
@@ -2471,7 +2474,7 @@ fn paste_unbracketed_with_trailing_newline_does_not_autosubmit() -> anyhow::Resu
 /// scenarios point at `127.0.0.1:1`, so a submitted turn fails immediately and
 /// leaves one of these on screen; an Enter that was swallowed by paste-burst
 /// suppression leaves none of them.
-fn frame_shows_dispatched_turn(frame: &qa_harness::Frame) -> bool {
+fn frame_shows_dispatched_turn(frame: &crate::qa_harness::Frame) -> bool {
     frame.contains("Turn failed") || frame.contains("Connection refused") || frame.contains("error")
 }
 
@@ -2857,7 +2860,7 @@ diff --git a/delete.txt b/delete.txt
 }
 
 fn spawn_file_mutation_harness(
-    ws: &qa_harness::harness::SealedWorkspace,
+    ws: &crate::qa_harness::harness::SealedWorkspace,
     base_url: &str,
     rows: u16,
     cols: u16,
@@ -3086,8 +3089,8 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
                     visible_row_with_text(h.frame(), "DIFF-NEW-SENTINEL").expect("added line row");
                 let old_color = foreground_at_text(h.frame(), old_row, "DIFF-OLD-SENTINEL");
                 let new_color = foreground_at_text(h.frame(), new_row, "DIFF-NEW-SENTINEL");
-                assert_ne!(old_color, qa_harness::Color::Default);
-                assert_ne!(new_color, qa_harness::Color::Default);
+                assert_ne!(old_color, crate::qa_harness::Color::Default);
+                assert_ne!(new_color, crate::qa_harness::Color::Default);
                 assert_ne!(old_color, new_color, "added/deleted ANSI roles collapsed");
             }
             "summary" => {
@@ -3632,7 +3635,7 @@ fn release_semantic_read_fifo(
     })
 }
 
-fn whale_ansi_signature(frame: &qa_harness::Frame) -> Vec<qa_harness::Color> {
+fn whale_ansi_signature(frame: &crate::qa_harness::Frame) -> Vec<crate::qa_harness::Color> {
     const WHALE_BACK: &str = "▗▄▄▄▄▄▄▄▄▄▄▄▖";
     let (row, mut col) = frame
         .find_text(WHALE_BACK)
@@ -3649,7 +3652,7 @@ fn whale_ansi_signature(frame: &qa_harness::Frame) -> Vec<qa_harness::Color> {
         .collect()
 }
 
-fn colored_foreground(frame: &qa_harness::Frame, needle: &str) -> qa_harness::Color {
+fn colored_foreground(frame: &crate::qa_harness::Frame, needle: &str) -> crate::qa_harness::Color {
     let (row, col) = frame
         .find_text(needle)
         .unwrap_or_else(|| panic!("{needle:?} missing:\n{}", frame.debug_dump()));
@@ -3659,14 +3662,14 @@ fn colored_foreground(frame: &qa_harness::Frame, needle: &str) -> qa_harness::Co
         .0;
     assert_ne!(
         foreground,
-        qa_harness::Color::Default,
+        crate::qa_harness::Color::Default,
         "{needle:?} lost its semantic foreground:\n{}",
         frame.debug_dump()
     );
     foreground
 }
 
-fn phase_marker_for_label(frame: &qa_harness::Frame, label: &str) -> char {
+fn phase_marker_for_label(frame: &crate::qa_harness::Frame, label: &str) -> char {
     // Transcript cards may carry the same semantic word (for example the
     // collapsed `reasoning hidden` receipt). The phase strip is the lowest
     // matching row, immediately above the composer, so search bottom-up.
@@ -3686,7 +3689,7 @@ fn phase_marker_for_label(frame: &qa_harness::Frame, label: &str) -> char {
 }
 
 fn maybe_transcript_marker_before_icon(
-    frame: &qa_harness::Frame,
+    frame: &crate::qa_harness::Frame,
     needle: &str,
     icon: &str,
 ) -> Option<char> {
@@ -3722,7 +3725,7 @@ fn wait_for_transcript_marker_before_icon(
     })
 }
 
-fn horizontal_rule_fills(frame: &qa_harness::Frame, row: u16, cols: u16) -> bool {
+fn horizontal_rule_fills(frame: &crate::qa_harness::Frame, row: u16, cols: u16) -> bool {
     let text = frame.row(row);
     UnicodeWidthStr::width(text.as_str()) == usize::from(cols)
         && (text.chars().all(|ch| ch == '─') || text.chars().all(|ch| ch == '-'))
@@ -3740,7 +3743,7 @@ fn resize_and_wait_for_composition<F>(
     timeout: Duration,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(&qa_harness::Frame) -> bool,
+    F: FnMut(&crate::qa_harness::Frame) -> bool,
 {
     let already_sized = {
         let frame = h.frame();
@@ -3771,10 +3774,10 @@ where
 }
 
 fn assert_running_tool_lifecycle_frame(
-    frame: &qa_harness::Frame,
+    frame: &crate::qa_harness::Frame,
     cols: u16,
     rows: u16,
-) -> (qa_harness::Color, qa_harness::Color) {
+) -> (crate::qa_harness::Color, crate::qa_harness::Color) {
     assert_real_pty_frame_geometry(frame, cols, rows);
     let dump = frame.debug_dump();
     assert!(
@@ -3809,7 +3812,7 @@ fn assert_running_tool_lifecycle_frame(
     let tool_running = foreground_at_text(frame, tool_row, "running");
     assert_ne!(
         tool_running,
-        qa_harness::Color::Default,
+        crate::qa_harness::Color::Default,
         "Bash running state lost its semantic foreground:\n{dump}"
     );
     (colored_foreground(frame, "using tool"), tool_running)
@@ -4041,7 +4044,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
     assert!(
         initial_whale
             .iter()
-            .any(|color| *color != qa_harness::Color::Default),
+            .any(|color| *color != crate::qa_harness::Color::Default),
         "idle BlueWhale lost its ANSI ink:\n{}",
         h.frame().debug_dump()
     );
@@ -4079,7 +4082,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         assert!(
             whale_ansi_signature(frame)
                 .iter()
-                .any(|color| *color != qa_harness::Color::Default),
+                .any(|color| *color != crate::qa_harness::Color::Default),
             "BlueWhale ANSI ink missing at {cols}x{rows}:\n{}",
             frame.debug_dump()
         );
@@ -4195,7 +4198,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         let done_color = foreground_at_text(frame, done_row, "done");
         assert_ne!(
             done_color,
-            qa_harness::Color::Default,
+            crate::qa_harness::Color::Default,
             "done lost ANSI role"
         );
         assert_ne!(

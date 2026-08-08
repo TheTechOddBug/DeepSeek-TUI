@@ -79,8 +79,8 @@ class CodewhaleHarnessConfig(HarnessConfig):
     binary_path: str | None = None
     """Preinstalled facade inside the runtime; useful for local candidate testing."""
 
-    max_turns: int = 100
-    """Maximum Codewhale model steps in one rollout."""
+    max_turns: int | None = None
+    """Optional model-step ceiling; omitted rollouts are unlimited."""
 
     sandbox: Literal["auto", "read-only", "workspace-write", "external-sandbox"] = (
         "auto"
@@ -96,7 +96,10 @@ class CodewhaleHarness(Harness[CodewhaleHarnessConfig]):
     def _validate_config(self) -> None:
         if not _VERSION.fullmatch(self.config.version):
             raise ValueError("version must be a semantic release identifier")
-        if not 1 <= self.config.max_turns <= 10_000:
+        if (
+            self.config.max_turns is not None
+            and not 1 <= self.config.max_turns <= 10_000
+        ):
             raise ValueError("max_turns must be between 1 and 10000")
         invalid = [
             tool
@@ -208,9 +211,9 @@ class CodewhaleHarness(Harness[CodewhaleHarnessConfig]):
             sandbox,
             "--output-format",
             "stream-json",
-            "--max-turns",
-            str(self.config.max_turns),
         ]
+        if self.config.max_turns is not None:
+            argv.extend(["--max-turns", str(self.config.max_turns)])
         if self.config.disabled_tools:
             argv.extend(["--disallowed-tools", ",".join(self.config.disabled_tools)])
         if system:

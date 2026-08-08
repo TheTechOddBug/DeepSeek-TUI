@@ -260,13 +260,12 @@ pub static COMMAND_ARITY: &[(&str, u8)] = &[
 ///
 /// # Examples
 ///
-/// ```
-/// # use codewhale_tui::command_safety::classify_command;
-/// assert_eq!(classify_command(&["git", "status", "-s"]),            "git status");
-/// assert_eq!(classify_command(&["git", "push", "origin"]),          "git push");
-/// assert_eq!(classify_command(&["cargo", "check", "--workspace"]),  "cargo check");
-/// assert_eq!(classify_command(&["npm", "run", "dev"]),              "npm run dev");
-/// assert_eq!(classify_command(&["ls", "-la"]),                      "ls");
+/// ```text
+/// ["git", "status", "-s"]           -> "git status"
+/// ["git", "push", "origin"]         -> "git push"
+/// ["cargo", "check", "--workspace"] -> "cargo check"
+/// ["npm", "run", "dev"]             -> "npm run dev"
+/// ["ls", "-la"]                      -> "ls"
 /// ```
 pub fn classify_command(tokens: &[&str]) -> String {
     if tokens.is_empty() {
@@ -321,13 +320,12 @@ pub fn classify_command(tokens: &[&str]) -> String {
 ///
 /// # Examples
 ///
-/// ```
-/// # use codewhale_tui::command_safety::prefix_allow_matches;
-/// assert!( prefix_allow_matches("git status",    "git status --porcelain"));
-/// assert!(!prefix_allow_matches("git status",    "git push origin main"));
-/// assert!( prefix_allow_matches("cargo check",   "cargo check --workspace"));
-/// assert!( prefix_allow_matches("npm run dev",   "npm run dev"));
-/// assert!(!prefix_allow_matches("npm run dev",   "npm run build"));
+/// ```text
+/// "git status"  matches "git status --porcelain"
+/// "git status"  does not match "git push origin main"
+/// "cargo check" matches "cargo check --workspace"
+/// "npm run dev" matches "npm run dev"
+/// "npm run dev" does not match "npm run build"
 /// ```
 pub fn prefix_allow_matches(pattern: &str, command: &str) -> bool {
     // Normalise the pattern: trim + lowercase + collapse whitespace.
@@ -384,6 +382,29 @@ const PARALLEL_READONLY_PREFIXES: &[&str] = &[
     "fd",
 ];
 
+/// GitHub CLI operations that inspect remote state without mutating it.
+///
+/// Keep this as an allowlist of the complete command prefix. `gh issue` is
+/// not itself safe: siblings such as `close`, `comment`, `create`, and `edit`
+/// mutate GitHub. The same distinction applies to every family below.
+const GITHUB_READONLY_PREFIXES: &[&str] = &[
+    "gh issue list",
+    "gh issue status",
+    "gh issue view",
+    "gh pr checks",
+    "gh pr diff",
+    "gh pr list",
+    "gh pr status",
+    "gh pr view",
+    "gh release list",
+    "gh release view",
+    "gh repo view",
+    "gh run list",
+    "gh run view",
+    "gh workflow list",
+    "gh workflow view",
+];
+
 /// Return `true` when a shell command is safe to auto-approve and run in a
 /// parallel read-only chunk.
 pub fn is_parallel_readonly_command(command: &str) -> bool {
@@ -391,11 +412,25 @@ pub fn is_parallel_readonly_command(command: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed.contains("$(")
-        || trimmed
-            .chars()
-            .any(|ch| matches!(ch, '\n' | '\r' | ';' | '&' | '|' | '>' | '<' | '`'))
-    {
+    if trimmed.chars().any(|ch| {
+        matches!(
+            ch,
+            '\n' | '\r'
+                | ';'
+                | '&'
+                | '|'
+                | '>'
+                | '<'
+                | '`'
+                | '$'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+        )
+    }) {
         return false;
     }
 
@@ -403,11 +438,14 @@ pub fn is_parallel_readonly_command(command: &str) -> bool {
     let Some(start) = primary_token_index(&tokens) else {
         return false;
     };
-    let command_tokens = tokens[start..].to_vec();
-
-    if let Some(inner_command) = readonly_shell_wrapper_inner_command(&command_tokens) {
-        return is_parallel_readonly_command(inner_command);
+    // An inline environment assignment can replace the very guards that make
+    // a nominal read non-executable (`PAGER`, `GH_PAGER`, fsmonitor config,
+    // ripgrep preprocessors). Machine-authority read-only Bash therefore
+    // accepts the command itself, never an `env ...`/`KEY=value ...` prefix.
+    if start != 0 {
+        return false;
     }
+    let command_tokens = tokens[start..].to_vec();
 
     let command_refs = command_tokens
         .iter()
@@ -417,50 +455,176 @@ pub fn is_parallel_readonly_command(command: &str) -> bool {
         return true;
     }
     let canonical = classify_command(&command_refs);
-    if has_exec_capable_readonly_flag(&canonical, &command_refs) {
+    let canonical_words = canonical.split_whitespace().collect::<Vec<_>>();
+    if command_refs.first().copied() != canonical_words.first().copied() {
+        // The direct-argv hardener keys on the literal program. Do not let a
+        // case-folded or path-qualified spelling classify as that executable
+        // while skipping its program-specific guards.
         return false;
     }
-    if canonical == "tail"
-        && command_refs.iter().skip(1).any(|token| {
-            *token == "-f"
-                || *token == "-F"
-                || *token == "--follow"
-                || token.starts_with("--follow=")
-        })
+    if canonical_words.first() == Some(&"git")
+        && command_refs.get(1).copied() != canonical_words.get(1).copied()
     {
+        // Global Git flags can redirect the executable/helper/config roots.
+        // Require the allowlisted subcommand to be the literal second token.
+        return false;
+    }
+    if canonical_words.first() == Some(&"gh")
+        && (command_refs.get(1).copied() != canonical_words.get(1).copied()
+            || command_refs.get(2).copied() != canonical_words.get(2).copied())
+    {
+        // Likewise, no global gh options before the allowlisted family/verb.
+        return false;
+    }
+    if !readonly_options_are_allowed(&canonical, &command_refs) {
         return false;
     }
 
     PARALLEL_READONLY_PREFIXES
         .iter()
+        .chain(GITHUB_READONLY_PREFIXES.iter())
         .any(|prefix| *prefix == canonical)
 }
 
-fn has_exec_capable_readonly_flag(canonical: &str, tokens: &[&str]) -> bool {
-    match canonical {
-        "fd" => tokens.iter().skip(1).any(|token| {
-            matches!(*token, "--exec" | "--exec-batch")
-                || token.starts_with("--exec=")
-                || token.starts_with("--exec-batch=")
-                || (token.starts_with('-')
-                    && !token.starts_with("--")
-                    && token[1..].chars().any(|flag| matches!(flag, 'x' | 'X')))
-        }),
-        "rg" => tokens
-            .iter()
-            .skip(1)
-            .any(|token| *token == "--pre" || token.starts_with("--pre=")),
-        "git grep" => tokens.iter().skip(2).any(|token| {
-            *token == "-O"
-                || token.starts_with("-O")
-                || *token == "--open-files-in-pager"
-                || token.starts_with("--open-files-in-pager=")
-                || (token.starts_with('-')
-                    && !token.starts_with("--")
-                    && token[1..].chars().any(|flag| flag == 'O'))
-        }),
-        _ => false,
+/// Return `true` only for the networked GitHub CLI subset admitted by
+/// [`is_parallel_readonly_command`].
+///
+/// Fleet uses this second predicate to apply its independent network ceiling
+/// and the configured per-host network policy. Keeping it derived from the
+/// full read-only classifier means a separator, redirect, background marker,
+/// executable flag, or unsupported `gh` verb can never be mislabeled merely
+/// because its first token is `gh`.
+#[must_use]
+pub fn is_github_readonly_command(command: &str) -> bool {
+    if !is_parallel_readonly_command(command) {
+        return false;
     }
+
+    let tokens = shell_words(command.trim());
+    let Some(start) = primary_token_index(&tokens) else {
+        return false;
+    };
+    let command_tokens = &tokens[start..];
+    let command_refs = command_tokens
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let canonical = classify_command(&command_refs);
+    GITHUB_READONLY_PREFIXES
+        .iter()
+        .any(|prefix| *prefix == canonical)
+}
+
+#[rustfmt::skip] // Keep one auditable policy row per command instead of vertically exploding strings.
+fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
+    let (start, switches, values): (usize, &str, &str) = match canonical {
+        "git status" => (2, "-s --short -b --branch --ignored --porcelain", "--untracked-files"),
+        "git diff" => (2, "--cached --staged --stat --numstat --shortstat --name-only --name-status --check --no-renames --color --no-color --word-diff", "-U --unified --diff-filter"),
+        "git log" => (2, "--oneline --decorate --graph --stat --numstat --shortstat --name-only --name-status --no-patch --all --branches --tags --remotes --first-parent --reverse --color --no-color", "-n --max-count --since --until --author --grep"),
+        "git show" => (2, "--stat --numstat --shortstat --name-only --name-status --no-patch -s --color --no-color", "-U --unified"),
+        "git ls-files" => (2, "-c --cached -d --deleted -m --modified -o --others -i --ignored --stage --unmerged --killed --exclude-standard --deduplicate", "--exclude --exclude-from"),
+        "git blame" => (2, "-w --line-porcelain --porcelain --show-stats --show-name --show-number --reverse --first-parent", "-L --since"),
+        "git grep" => (2, "-n --line-number -i --ignore-case -I -l --files-with-matches -L --files-without-match -w --word-regexp -F --fixed-strings -E --extended-regexp --cached --untracked --exclude-standard", "-e --max-depth"),
+        "ls" => (1, "-a -A -l -la -al -h -lh -hl -lah -alh -R -d -1 --all --almost-all --long --human-readable --recursive --directory", ""),
+        "pwd" => (1, "-L -P --logical --physical", ""),
+        "cat" => (1, "-n -b -s -v -E -T --number --number-nonblank --squeeze-blank --show-ends --show-tabs", ""),
+        "head" | "tail" => (1, "-q -v --quiet --verbose", "-n --lines -c --bytes"),
+        "wc" => (1, "-c -m -l -w -L --bytes --chars --lines --words --max-line-length", ""),
+        "which" => (1, "-a --all", ""),
+        "stat" => (1, "", ""),
+        "file" => (1, "-b --brief -L --dereference -h --no-dereference -i --mime --mime-type --mime-encoding", ""),
+        "du" => (1, "-a -c -h -s --all --total --human-readable --summarize --apparent-size", "-d --max-depth"),
+        "df" => (1, "-h -P -T -i --human-readable --portability --print-type --inodes", ""),
+        "grep" => (1, "-n -i -v -E -F -w -x -l -L -c --line-number --ignore-case --invert-match --extended-regexp --fixed-strings --word-regexp --line-regexp --files-with-matches --files-without-match --count", "-m --max-count -A --after-context -B --before-context -C --context"),
+        "rg" => (1, "-n --line-number -i --ignore-case -S --smart-case -F --fixed-strings -w --word-regexp -l --files-with-matches --hidden --no-ignore --no-heading --heading --stats --count --count-matches", "-g --glob -t --type -T --type-not -m --max-count -A --after-context -B --before-context -C --context --sort"),
+        "fd" => (1, "-H --hidden -I --no-ignore -s --case-sensitive -i --ignore-case --strip-cwd-prefix", "-e --extension -t --type -d --max-depth -E --exclude"),
+        "gh issue list" => (3, "", "--json --assignee --author --jq --label --limit --mention --milestone --search --state --template -R --repo"),
+        "gh issue status" => (3, "", "--json --jq --template -R --repo"),
+        "gh issue view" | "gh pr view" => (3, "--comments", "--json --jq --template -R --repo"),
+        "gh pr checks" => (3, "--fail-fast --required", "--json --jq --template -R --repo"),
+        "gh pr diff" => (3, "--name-only --patch", "--color -R --repo"),
+        "gh pr list" => (3, "--draft", "--json --app --assignee --author --base --head --jq --label --limit --search --state --template -R --repo"),
+        "gh pr status" => (3, "", "--json --conflict-status --jq --template -R --repo"),
+        "gh release list" => (3, "--exclude-drafts --exclude-pre-releases", "--json --jq --limit --order --template -R --repo"),
+        "gh release view" => (3, "", "--json --jq --template -R --repo"),
+        "gh repo view" => (3, "", "--json --branch --jq --template -R --repo"),
+        "gh run list" => (3, "", "--json --branch --commit --created --event --jq --limit --status --template --user --workflow -R --repo"),
+        "gh run view" => (3, "--exit-status --log --log-failed --verbose", "--json --attempt --job --jq --template -R --repo"),
+        "gh workflow list" => (3, "--all", "--json --jq --limit --template -R --repo"),
+        "gh workflow view" => (3, "--yaml", "--ref -R --repo"),
+        _ => return false,
+    };
+    options_match_allowlist(&tokens[start..], switches, values)
+        && (!canonical.starts_with("gh ") || !github_command_targets_unsupported_host(tokens))
+}
+
+fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> bool {
+    let mut index = 0;
+    let mut options = true;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if options && token == "--" {
+            options = false;
+        } else if options && token.starts_with('-') && token != "-" {
+            if switches.split_ascii_whitespace().any(|name| name == token) {
+                // exact, no-value switch
+            } else if values.split_ascii_whitespace().any(|name| name == token) {
+                index += 1;
+                if index >= tokens.len() || tokens[index].starts_with('-') {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    true
+}
+
+/// The release contract deliberately supports github.com only. `gh` can
+/// otherwise redirect the same apparently read-only command to GHES through a
+/// repo-qualified host or URL, bypassing the host the network policy checked.
+fn github_command_targets_unsupported_host(tokens: &[&str]) -> bool {
+    let explicit_host_is_unsupported = |value: &str| {
+        let value = value.trim();
+        let host = value
+            .strip_prefix("https://")
+            .or_else(|| value.strip_prefix("http://"))
+            .and_then(|rest| rest.split('/').next())
+            .or_else(|| {
+                let mut parts = value.split('/');
+                let first = parts.next()?;
+                (parts.clone().count() >= 2 && (first.contains('.') || first.contains(':')))
+                    .then_some(first)
+            });
+        host.is_some_and(|host| !host.eq_ignore_ascii_case("github.com"))
+    };
+
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if matches!(token, "-R" | "--repo") {
+            let Some(value) = tokens.get(index + 1) else {
+                return true;
+            };
+            if explicit_host_is_unsupported(value) {
+                return true;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--repo=")
+            && explicit_host_is_unsupported(value)
+        {
+            return true;
+        }
+        if explicit_host_is_unsupported(token) {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn is_codewhale_readonly_invocation(tokens: &[&str]) -> bool {
@@ -471,20 +635,6 @@ fn is_codewhale_readonly_invocation(tokens: &[&str]) -> bool {
         return false;
     }
     matches!(args, ["--version"] | ["-V"] | ["-v"] | ["--help"] | ["-h"])
-}
-
-fn readonly_shell_wrapper_inner_command(tokens: &[String]) -> Option<&str> {
-    let shell = tokens.first()?.as_str();
-    if !matches!(shell, "bash" | "sh" | "zsh") {
-        return None;
-    }
-    if tokens.len() != 3 {
-        return None;
-    }
-    if !matches!(tokens[1].as_str(), "-c" | "-lc") {
-        return None;
-    }
-    Some(tokens[2].as_str())
 }
 
 /// Safety classification of a command
@@ -1192,7 +1342,12 @@ mod tests {
     fn parallel_readonly_command_classifier_is_strict() {
         for command in [
             "git status -s",
-            "git log --oneline -5",
+            "git status --porcelain",
+            "git log --oneline -n 5",
+            "gh issue list --limit 20",
+            "gh issue view 5287 --comments",
+            "gh pr view 42 --json title,state",
+            "gh run view 123 --log",
             "rg foo crates/",
             "fd -e rs .",
             "fd -H --type f src",
@@ -1200,9 +1355,6 @@ mod tests {
             "git grep -n needle crates/",
             "ls -la",
             "cat Cargo.toml",
-            "bash -lc 'git status -s'",
-            "sh -c 'rg foo crates/'",
-            "bash -lc 'fd -e toml .'",
         ] {
             assert!(
                 is_parallel_readonly_command(command),
@@ -1212,16 +1364,49 @@ mod tests {
 
         for command in [
             "git status && rm -rf /",
+            "git --exec-path=/tmp status",
+            "git --config-env=core.fsmonitor=SHELL status",
+            "git -cdiff.foo.textconv=./repo-script diff HEAD",
+            "git -C../outside status",
+            "git --paginate log -1",
+            "GIT status --short",
+            "git status --help",
+            "git status -h",
             "cat a > b",
             "git push",
+            "PAGER='touch pwned' git log",
+            "GH_PAGER='sh -c touch pwned' gh issue view 5287",
+            "RIPGREP_CONFIG_PATH=/tmp/unsafe rg needle .",
+            "rg ${9:---pre=./repo-script} needle .",
+            "rg ${9:---hostname-bin=./repo-script} needle .",
+            "fd ${9:---exec} ./repo-script",
+            "rg $PATTERN .",
+            "rg *.rs .",
+            "rg --{pre,glob}=./repo-script needle .",
+            "env GIT_PAGER=cat git status",
+            "gh issue close 5287",
+            "gh --debug issue view 5287",
+            "gh issue comment 5287 --body nope",
+            "gh issue view 5287 --web",
+            "gh issue view 5287 -w",
+            "gh issue view 5287 -vw",
+            "gh pr checks 42 --watch",
+            "gh issue view 5287 -R git.example.com/owner/repo",
+            "gh issue view https://git.example.com/owner/repo/issues/5287",
+            "gh pr merge 42",
+            "gh release create v1.0.0",
             "cargo build",
             "tail -f log",
             "rg foo | head",
             "find . -delete",
             "sleep 5 &",
             "bash -lc 'git status && rm -rf /'",
+            "bash -lc 'git status -s'",
+            "sh -c 'rg foo crates/'",
+            "zsh -c 'fd -e toml .'",
             "bash -lc 'rg foo | head'",
             "bash -lc 'fd -x ./pwn.sh'",
+            "bash -lc 'PAGER=./pwn.sh git log'",
             "fd -x ./pwn.sh",
             "fd -u -tf -x ./pwn.sh",
             "fd -uX ./pwn.sh",
@@ -1231,15 +1416,74 @@ mod tests {
             "fd --exec-batch ./pwn.sh",
             "rg --pre /tmp/evil.sh needle .",
             "rg --pre=/tmp/evil.sh needle .",
+            "rg -f/etc/passwd needle .",
+            "rg --file=/etc/passwd needle .",
+            "rg --ignore-file=secret-link needle .",
+            "rg --hostname-bin ./repo-script --hyperlink-format=file://{host}{path} needle .",
+            "rg --hostname-bin=./repo-script --hyperlink-format=file://{host}{path} needle .",
+            "rg --search-zip needle .",
+            "rg -z needle .",
+            "rg -nzi needle .",
             "git grep -O needle",
             "git grep -nO needle",
             "git grep -O/tmp/evil.sh needle",
             "git grep --open-files-in-pager /tmp/evil.sh needle",
             "git grep --open-files-in-pager=/tmp/evil.sh needle",
+            "git grep --textconv needle",
+            "git grep --textcon needle",
+            "git diff --ext-diff HEAD",
+            "git diff --textconv HEAD",
+            "git diff --textcon HEAD",
+            "git log --show-signature -1",
+            "git log --format=%G? -1",
+            "git show --show-signature HEAD",
+            "git show --show-signatur HEAD",
+            "git show --format=%GS HEAD",
+            "grep -f/etc/passwd .",
+            "file -m/etc/magic Cargo.toml",
+            "file -C magic",
+            "file --compile magic",
+            "file -f names.txt",
+            "file -z archive.gz",
+            "file -S Cargo.toml",
+            "tail -qf log",
+            "tail -vF log",
+            "du -Xignore .",
+            "git log --format %GS -n 1",
+            "git show --pretty %G? HEAD",
         ] {
             assert!(
                 !is_parallel_readonly_command(command),
                 "{command} should not be parallel read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn github_readonly_classifier_only_marks_the_networked_read_subset() {
+        for command in [
+            "gh issue list",
+            "gh issue view 5287 --json title,state",
+            "gh issue view 5287 -R owner/repo",
+            "gh issue view 5287 -R github.com/owner/repo",
+        ] {
+            assert!(
+                is_github_readonly_command(command),
+                "{command} should be a read-only GitHub network command"
+            );
+        }
+        for command in [
+            "git status",
+            "gh issue edit 5287 --title changed",
+            "gh issue view 5287 > issue.txt",
+            "gh issue view 5287 -R git.example.com/owner/repo",
+            "gh pr checks 42 --watch",
+            "bash -lc 'gh pr checks 42'",
+            "bash -lc 'gh issue view 5287 && touch pwned'",
+        ] {
+            assert!(
+                !is_github_readonly_command(command),
+                "{command} must not be classified as read-only GitHub access"
             );
         }
     }

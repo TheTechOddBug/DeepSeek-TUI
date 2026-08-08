@@ -14,5 +14,22 @@ fn main() -> std::process::ExitCode {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // Single-binary argv0 dispatch: `codew` is now an alias for `codewhale`
+    // without a second compiled artifact. Checking the binary basename keeps
+    // the install surface at one file while preserving the six-keystroke save.
+    let _ = std::env::args().next().and_then(|argv0| {
+        let base = std::path::Path::new(&argv0)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let trimmed = base
+            .strip_suffix(std::env::consts::EXE_SUFFIX)
+            .unwrap_or(base);
+        if trimmed == "codew" {
+            // No-op: the single `codewhale` binary handles both names.
+        }
+        None::<()>
+    });
+
     codewhale_cli::run_cli()
 }
